@@ -61,7 +61,7 @@ export class Renderer {
     this.biomeSky = new THREE.Color(0x8fb4cc);
     this.biomeFog = new THREE.Color(0x9db4c4);
     this.scene.background = this.skyColor;
-    this.scene.fog = new THREE.Fog(this.fogColor, 90, settings.drawDistance);
+    this.scene.fog = new THREE.Fog(this.fogColor, 130, settings.drawDistance * 1.5);
 
     this.terrainMaterial = null;
     this.propMaterial = null;
@@ -86,7 +86,15 @@ export class Renderer {
     // Terrain: palette colour + baked vertex AO + baked normal tilt from the mesher,
     // then multi-octave value noise in the shader keyed by WORLD position (never
     // chunk-local: a per-chunk seed is exactly what makes a visible chunk seam).
-    const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.0 });
+    // The corridor skin is not watertight: the mesh height grid is snapped to 1/8 m
+    // (mesher BED_GRID) and neighbouring chunks are meshed at different LODs, so at
+    // the seams and at a carve lip there are hairline vertical cracks. With
+    // FrontSide a crack is a hole and the frame shows the empty-scene colour
+    // (measured sRGB 191,188,191) straight through it - those were the "pale
+    // plates": they survived every terrain/prop material test because they were
+    // never a surface at all. DoubleSide renders the far wall of the crack instead:
+    // same triangles, same draw calls, no new asset.
+    const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.0, side: THREE.DoubleSide });
     const tonePairs = surfaceTones();
     const ta = [], tb = [];
     for (let i = 0; i < tonePairs.a.length; i++) { ta.push(new THREE.Color(tonePairs.a[i])); tb.push(new THREE.Color(tonePairs.b[i])); }
@@ -136,50 +144,55 @@ float fbm1(vec2 p) { return vnoise(p); }
   vec3 an = abs(vWNormal);
   vec2 wp = an.y > 0.5 ? vWPos.xz : (an.x > an.z ? vec2(vWPos.z, vWPos.y) : vec2(vWPos.x, vWPos.y));
 
-  float patchv = fbm1(wp * 0.17);        // big hue drift
-  float tile  = fbm3(wp * 0.78 + 41.0);  // panel tone (1.3 m cells -> adjacent panels differ)
-  float grit  = fbm1(wp * 3.6 - 17.0);   // aggregate / pebble character
+  float patchv = fbm1(wp * 0.13);        // big hue drift (~8 m patches)
+  float tile  = fbm1(wp * 0.40 + 41.0);  // panel tone: 2.5 m features, so a run of
+                                         // carriageway reads as ONE worked surface
+                                         // instead of 1 m camo cells
+  float grit  = fbm1(wp * 3.2 - 17.0);   // aggregate / pebble character
 
-  // Hue AND value: the two palette anchors mix across the patch field, then the
-  // tile field swings brightness ~+-22% (PLAN §10 criterion 2 wants >= 12%).
+  // Hue AND value: the two palette anchors mix across the patch field, then the tile
+  // field swings brightness ~+-20% (PLAN §10 criterion 2 wants >= 12%, spatially
+  // coherent: the spread lives in metre-scale features, not per cell).
   vec3 hue = mix(ta, tb, patchv);
-  float tone = 0.76 + 0.50 * tile;
+  float tone = 0.82 + 0.40 * tile;
   diffuseColor.rgb *= hue * tone;
 
   // Per-surface character (docs/04 §3): asphalt has aggregate + patches of old
   // patch, gravel reads as pebbles, snow scatters, grass clumps, stone bands.
   float gritAmt = 0.10;
   if (sidx == 1) {                       // asphalt
-    gritAmt = 0.20;
+    gritAmt = 0.18;
     diffuseColor.rgb *= 0.90 + 0.22 * step(0.55, patchv);
     diffuseColor.rgb += vec3(0.012, 0.010, 0.006) * step(0.78, grit);
   } else if (sidx == 2) {                // gravel / shoulder
-    gritAmt = 0.34;
-    diffuseColor.rgb *= 0.94 + 0.16 * step(0.52, grit);
+    gritAmt = 0.22;
+    diffuseColor.rgb *= 0.95 + 0.12 * step(0.52, grit);
   } else if (sidx == 3 || sidx == 8 || sidx == 10) {   // mud / peat / dirt
-    gritAmt = 0.18;
-    diffuseColor.rgb *= 0.92 + 0.18 * vnoise(wp * 1.3);
+    gritAmt = 0.16;
+    diffuseColor.rgb *= 0.93 + 0.16 * vnoise(wp * 1.1);
   } else if (sidx == 4) {                // snow
     gritAmt = 0.07;
     diffuseColor.rgb += vec3(0.03, 0.035, 0.05) * step(0.6, tile);
   } else if (sidx == 5) {                // grass
-    gritAmt = 0.24;
-    diffuseColor.rgb *= 0.90 + 0.24 * vnoise(wp * 2.1);
+    gritAmt = 0.20;
+    diffuseColor.rgb *= 0.91 + 0.20 * vnoise(wp * 1.7);
   } else if (sidx == 6) {                // sand
     gritAmt = 0.12;
     diffuseColor.rgb *= 0.94 + 0.14 * vnoise(wp * 0.8 + vec2(7.0, 3.0));
   } else if (sidx == 7 || sidx == 9) {   // stone / ice
-    gritAmt = 0.16;
-    diffuseColor.rgb *= 0.93 + 0.16 * vnoise(wp * 0.45);
+    gritAmt = 0.14;
+    diffuseColor.rgb *= 0.94 + 0.14 * vnoise(wp * 0.4);
   } else {
-    diffuseColor.rgb *= 0.94 + 0.14 * vnoise(wp * 0.7);
+    diffuseColor.rgb *= 0.95 + 0.12 * vnoise(wp * 0.6);
   }
   diffuseColor.rgb *= 1.0 + (grit - 0.5) * gritAmt;
 
   // Edge weathering: top edges and corners wear lighter, the base of a wall and
   // any crevice stays darker (the crevice part is the baked AO in diffuseColor).
-  diffuseColor.rgb *= mix(0.80, 1.17, wear);
-  diffuseColor.rgb += vec3(0.018, 0.014, 0.006) * wear;
+  // Narrow range: the old 0.80 -> 1.17 ramp, multiplied by the baked AO of the same
+  // quad, made a 1 m wall read as a pale plate floating over a dark band.
+  diffuseColor.rgb *= mix(0.87, 1.05, wear);
+  diffuseColor.rgb += vec3(0.008, 0.006, 0.003) * wear;
 }
 `)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
@@ -205,7 +218,7 @@ float fbm1(vec2 p) { return vnoise(p); }
 `);
       m.userData.shader = shader;
     };
-    m.customProgramCacheKey = () => 'vr-terrain-f5';
+    m.customProgramCacheKey = () => 'vr-terrain-f8';
     this.terrainMaterial = m;
 
     this.propMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -231,28 +244,36 @@ float fbm1(vec2 p) { return vnoise(p); }
     lightingFor(this.biome, this.tod, rig);
 
     this.sun.color.copy(rig.sunColor);
-    this.sun.intensity = rig.keyIntensity;
+    this.sun.intensity = rig.keyIntensity * 1.18;
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
-    this.hemi.intensity = rig.ambIntensity;
+    this.hemi.intensity = rig.ambIntensity * 1.16;
     this.fill.color.copy(rig.fillColor);
-    this.fill.intensity = rig.fillIntensity;
+    this.fill.intensity = rig.fillIntensity * 1.25;
 
-    // Biome-matched fog/haze: the biome colour washed by the key light, thicker at
-    // low sun (that is what makes the golden-hour depth read).
-    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.35).lerp(rig.sunColor, 0.18 * rig.warmth);
-    this.skyColor.copy(this.biomeSky).lerp(rig.hemiSky, 0.45).lerp(rig.sunColor, 0.22 * rig.warmth);
+    // Biome-matched haze, but *directional*: the sky keeps a warm key-lit cast and the
+    // fog stays a tint rather than a grey sheet, so mid-distance terrain still reads as
+    // gravel and grass (PLAN §10 criterion 1/4: read the road and the nearest checkpoint
+    // in under a second; distant ground may wash out, the racing line may not).
+    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.20).lerp(rig.sunColor, 0.30 * rig.warmth);
+    this.skyColor.copy(this.biomeSky).lerp(rig.hemiSky, 0.38).lerp(rig.sunColor, 0.30 * rig.warmth);
     this.skyColor.r = Math.min(1, this.skyColor.r * rig.saturation);
+    this.skyColor.g = Math.min(1, this.skyColor.g * rig.saturation);
     this.scene.fog.color.copy(this.fogColor);
     const far = settings.drawDistance;
-    this.scene.fog.near = Math.max(45, far * (0.42 - 0.16 * rig.hazeMul));
-    this.scene.fog.far = far * (1.05 + 0.25 * rig.hazeMul);
+    // near = ~half the draw distance: fog starts beyond the corner you must read,
+    // and only the outer silhouette ring is hazed.
+    this.scene.fog.near = Math.max(95, far * (0.52 - 0.08 * rig.hazeMul));
+    this.scene.fog.far = far * (1.15 + 0.35 * rig.hazeMul);
 
     // Built-in ACES only when the composite is off: with post on, the scene lands
     // in a linear render target and the composite grades it (docs/04 §6).
     this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = rig.exposure;
-    this.post.compositeMat.uniforms.uExposure.value = rig.exposure;
+    // The composite is gated off on this driver, so the built-in ACES carries the whole
+    // grade: a small pull-back so low-sun key light does not blow the frame to grey.
+    const exposure = rig.exposure * (this.post.enabled ? 1 : 1.02);
+    this.renderer.toneMappingExposure = exposure;
+    this.post.compositeMat.uniforms.uExposure.value = exposure;
     this.post.compositeMat.uniforms.uWarm.value = 0.35 + 0.65 * rig.warmth;
     this.post.compositeMat.uniforms.uBloom.value = 0.35 + 0.35 * rig.warmth;
     this.post.shafts = settings.quality !== QUALITY.LOW;

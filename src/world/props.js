@@ -23,6 +23,9 @@ export function generateChunkProps(cx, cz, stage) {
   const { road, terrain, density = 1 } = stage;
   const x0 = cx * CHUNK, z0 = cz * CHUNK;
   const seed = stage.seed;
+  // Hard per-chunk cap: keeps the prop budget (and therefore the instance budget the
+  // streaming layer can actually spend in front of the camera) predictable.
+  const TREE_CAP = 44;
 
   // ---- trees / bushes: grove-field scatter per column ----
   // A 7 m cell hash sets how wooded a patch is, so the stand clumps into groves with
@@ -31,16 +34,24 @@ export function generateChunkProps(cx, cz, stage) {
   // jitter, so a patch reads as one species rather than a chessboard.
   for (let lz = 0; lz < CHUNK; lz++) {
     for (let lx = 0; lx < CHUNK; lx++) {
+      if (out.length >= TREE_CAP) break;
       const wx = x0 + lx, wz = z0 + lz;
       const grove = hash01(Math.floor(wx / 7), Math.floor(wz / 7), CLUSTER_SALT ^ seed);
       const h = hash01(wx, wz, TREE_SALT ^ seed);
-      if (h > density * (0.035 + 0.30 * grove * grove)) continue;
       const i = road.nearest(wx + 0.5, wz + 0.5);
       const lat = (wx + 0.5 - road.x[i]) * road.nx[i] + (wz + 0.5 - road.z[i]) * road.nz[i];
       const absLat = Math.abs(lat);
       const edge = road.width[i] / 2 + SHOULDER;
-      if (absLat < edge + 1.8) continue;                 // keep the corridor clear
-      if (absLat > 220) continue;
+      if (absLat < edge + 4.2) continue;                  // keep corridor + verge open
+      // Forest budget goes to the corridor: the brief is "las przy drodze" (PLAN §10),
+      // and the deep-field trees behind the first stand are never seen. Grove field
+      // decides how far a stand reaches, so the edge is dense and the far ground thins.
+      // The stand stays *out of* the lane sightline: canopies are 3-4 m wide, so the
+      // stand begins past the shoulder instead of leaning over the carriageway.
+      const reach = 64 + 60 * grove * grove;
+      if (absLat > reach) continue;
+      const near = absLat < edge + 26 ? 1.15 : 1.0;       // denser right at the verge
+      if (h > density * near * (0.06 + 0.34 * grove * grove)) continue;
       const surf = worldSurface(stage, wx, wz);
       if (surf === SURF.ASPHALT || surf === SURF.ICE) continue;
       const slope = terrain.slopeAt(wx + 0.5, wz + 0.5);
@@ -51,8 +62,8 @@ export function generateChunkProps(cx, cz, stage) {
       const y = carved >= 0 ? carved : terrain.heightAt(wx + 0.5, wz + 0.5);
       const species = pickSpecies(grove * 0.6 + h * 0.4, stage.biome);
       // Height/species variation from the seed: same species in a grove, different trees.
-      const scale = (species === PROP.PINE ? 0.95 : 0.78)
-        + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 0.7 : 1.05);
+      const scale = (species === PROP.PINE ? 0.82 : 0.66)
+        + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 0.6 : 0.85);
       out.push({
         prop: species, x: wx + 0.5, y, z: wz + 0.5,
         yaw: hash01(wx, wz, TREE_SALT ^ (seed + 13)) * Math.PI * 2,
@@ -95,7 +106,8 @@ export function generateChunkProps(cx, cz, stage) {
       const px = road.x[i] + road.nx[i] * off * -side;
       const pz = road.z[i] + road.nz[i] * off * -side;
       if (Math.floor(px / CHUNK) !== cx || Math.floor(pz / CHUNK) !== cz) continue;
-      out.push({ prop: PROP.POST, x: px, y: terrain.heightAt(px, pz), z: pz, yaw: 0, scale: 1, variant: 0 });
+      const postY = stage.world ? stage.world.columnTopAt(Math.floor(px), Math.floor(pz)) : -1;
+      out.push({ prop: PROP.POST, x: px, y: postY >= 0 ? postY : terrain.heightAt(px, pz), z: pz, yaw: 0, scale: 1, variant: 0 });
     }
   }
 
@@ -125,30 +137,41 @@ function worldSurface(stage, x, z) {
 export function buildTreeGeometries(GeoBuilder, THREE) {
   const geos = {};
 
-  // Oak: a thick trunk that keeps growing into the crown, lobes that interlock.
+  // Oak (broadleaf, "birch/oak" tone family): a trunk that keeps growing into the
+  // crown, then a canopy whose lobes interlock through the trunk top so the mass has
+  // no daylight gaps. Greens are blue-poor (the blue hemisphere was turning the old
+  // 0x3f6b30 canopies teal); trunks are red-brown and differ per species.
   const oak = new GeoBuilder();
-  oak.box(0, 1.95, 0, 0.27, 1.95, 0.27, 0x5a4326);            // trunk 0 .. 3.9
-  oak.box(0.1, 3.5, 0, 0.42, 0.9, 0.42, 0x4b3a22);            // flare into the crown
-  oak.box(0, 4.5, 0, 1.55, 1.15, 1.5, 0x3f6b30);
-  oak.box(1.05, 3.75, 0.45, 0.95, 0.75, 0.9, 0x477a36);
-  oak.box(-0.85, 5.2, -0.6, 0.9, 0.7, 0.85, 0x35602a);
-  oak.box(-0.3, 5.9, 0.5, 0.7, 0.5, 0.7, 0x436f33);
+  oak.box(0, 2.15, 0, 0.28, 2.15, 0.28, 0x5c4127);            // trunk 0 .. 4.3
+  oak.box(0, 4.05, 0, 0.34, 0.9, 0.34, 0x463320);            // flare into the crown
+  oak.box(0, 4.75, 0, 1.6, 1.25, 1.55, 0x2f5a24);
+  oak.box(1.1, 3.95, 0.45, 0.95, 0.85, 0.9, 0x36612a);
+  oak.box(-0.9, 5.35, -0.6, 0.95, 0.8, 0.9, 0x28501f);
+  oak.box(-0.3, 6.05, 0.5, 0.75, 0.6, 0.75, 0x3a6630);
+  oak.box(0.45, 5.1, -0.75, 0.8, 0.7, 0.7, 0x2c5524);
   geos[PROP.OAK] = oak.toGeometry(THREE);
 
-  // Pine: conical stack, each tier wider than the one above, trunk visible between.
+  // Pine / spruce tone family: darker, blue-green needles, conical stack where every
+  // tier overlaps the one below, trunk visible between tiers and running up into the
+  // top of the crown.
   const pine = new GeoBuilder();
-  pine.box(0, 2.7, 0, 0.21, 2.7, 0.21, 0x4b3a22);             // trunk 0 .. 5.4
-  pine.box(0, 3.1, 0, 1.45, 0.8, 1.45, 0x2c5230);
-  pine.box(0, 4.35, 0, 1.12, 0.75, 1.12, 0x315c34);
-  pine.box(0, 5.5, 0, 0.8, 0.7, 0.8, 0x27482a);
-  pine.box(0, 6.5, 0, 0.45, 0.55, 0.45, 0x2f5a2f);
+  pine.box(0, 3.0, 0, 0.22, 3.0, 0.22, 0x3d2c19);             // trunk 0 .. 6.0
+  pine.box(0, 2.55, 0, 1.05, 0.75, 1.05, 0x22421f);
+  pine.box(0, 3.55, 0, 1.45, 0.95, 1.45, 0x1f3d1f);
+  pine.box(0, 4.7, 0, 1.12, 0.9, 1.12, 0x27492a);
+  pine.box(0, 5.8, 0, 0.8, 0.85, 0.8, 0x214122);
+  pine.box(0, 6.85, 0, 0.45, 0.65, 0.45, 0x2c5230);
   geos[PROP.PINE] = pine.toGeometry(THREE);
 
+  // Dead / birch-family snag: pale warm bark with darker bands, a few limbs that
+  // start *inside* the trunk instead of floating beside it.
   const dead = new GeoBuilder();
-  dead.box(0, 2.1, 0, 0.19, 2.1, 0.19, 0x544535);
-  dead.box(0.6, 3.3, 0, 0.62, 0.12, 0.12, 0x4a3d2f);
-  dead.box(-0.5, 4.0, 0.2, 0.52, 0.1, 0.1, 0x4a3d2f);
-  dead.box(0.1, 4.5, -0.4, 0.12, 0.5, 0.12, 0x4a3d2f);
+  dead.box(0, 2.2, 0, 0.19, 2.2, 0.19, 0x6a5843);
+  dead.box(0, 1.15, 0, 0.21, 0.22, 0.21, 0x4c3f2e);
+  dead.box(0, 3.2, 0, 0.17, 0.5, 0.17, 0x5b4c39);
+  dead.box(0.55, 3.35, 0, 0.62, 0.13, 0.13, 0x463a2a);
+  dead.box(-0.45, 4.05, 0.2, 0.52, 0.11, 0.11, 0x463a2a);
+  dead.box(0.1, 4.5, -0.35, 0.13, 0.55, 0.13, 0x4f4130);
   geos[PROP.DEAD] = dead.toGeometry(THREE);
 
   const spec = new GeoBuilder();
@@ -156,9 +179,15 @@ export function buildTreeGeometries(GeoBuilder, THREE) {
   spec.box(0, 1.52, 0, 0.15, 0.15, 0.14, 0xc9a487);      // head
   geos[PROP.SPECTATOR] = spec.toGeometry(THREE);
 
+  // Corner post: dark timber with a dark-red reflector tab. The tab used to be
+  // near-white 0xd8dbe0: lit by the low key light it came out as a flat neutral grey
+  // ~ (186,183,186) and, standing every 8 m along the verge, it read as the pale
+  // plates / dashes of the reference frame (measured: that grey is the single most
+  // common colour in the lower half of the frame, ~10k px).
   const post = new GeoBuilder();
-  post.box(0, 0.7, 0, 0.12, 0.7, 0.12, 0xd8dbe0);
-  post.box(0, 1.45, 0, 0.3, 0.18, 0.06, 0xd43a2f);
+  post.box(0, 0.7, 0, 0.12, 0.7, 0.12, 0x534838);
+  post.box(0, 1.45, 0, 0.26, 0.18, 0.05, 0xa43226);
+  post.box(0, 1.15, 0.02, 0.10, 0.06, 0.04, 0x8f2b21);
   geos[PROP.POST] = post.toGeometry(THREE);
 
   const marshal = new GeoBuilder();
@@ -177,7 +206,9 @@ export function buildTreeGeometries(GeoBuilder, THREE) {
  *  not a signpost. Half-span 5.4 m clears the carriageway + SHOULDER. */
 export function buildGateGeometry(GeoBuilder, THREE) {
   const g = new GeoBuilder();
-  const post = 0xf3f5f8, red = 0xd4382c, dark = 0x1c242c, warm = 0xffd27a;
+  // post colour anchored down from 0xf3f5f8: a near-white 10.7 x 1.1 m banner plus 6 m
+  // banded poles read as pale plates against the dark forest at a distance.
+  const post = 0xcbb691, red = 0xb8362c, dark = 0x1c242c, warm = 0xe8b45c;
   for (const s of [-1, 1]) {
     // Post: 0.42 m square, 6.2 m tall, banded so it reads at distance.
     g.box(s * 5.4, 3.1, 0, 0.21, 3.1, 0.21, post);

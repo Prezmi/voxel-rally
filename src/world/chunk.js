@@ -21,6 +21,10 @@ export class Chunk {
     // to 1 m, which is what makes the road drivable); `rut` is wear (negative).
     this.fine = new Int16Array(COLS);             // carved sub-block offset, 0..15
     this.rut = new Int16Array(COLS);              // sub-block offset in 1/16 block (negative)
+    // Render-only corridor wear, 0..255 (0 = untouched natural ground, high = a worn
+    // wheel line / shoulder lip). Written by road-carve.js, read by the mesher for
+    // tone only: it is NOT part of the column height and physics never reads it.
+    this.wear = new Uint8Array(COLS);
     this.dirty = true;
     this.lod = -1;                                // 0 full, 1 simplified, 2 silhouette
     this.generated = false;

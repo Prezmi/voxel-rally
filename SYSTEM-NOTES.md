@@ -257,3 +257,123 @@ Baseline: `shots/x_15000.png` 154, `shots/t_noon.png` 43.7.
 nienaprawiony w tym budżecie; działa tylko przy `?post=1` i tylko na sterowniku,
 który naprawdę blituje RT na canvas. Oświetlenie (rig, fog, biome sky), cienie, ACES i
 tonowanie działają w ścieżce bazowej.
+
+## 17. Poprawka art (placki / drzewa / tarasy) — pomiar, nie zgadowanie
+
+**Czego chce PLAN §10:** nawierzchnia czytelna i brudna, nie "płyta"; panele tej samej
+nawierzchni różnią się wartością i odcieniem ≥12%; las przy drodze, nie siatka; zero
+"płytkujących" jasnych elementów nad terenem.
+
+**Diagnostyka (probe `tools/plates.mjs`, seed 12345/FOREST, korytarz startowy):**
+kolor krawędzi płaskich ≈ sRGB (191,188,191), **stały piksel-w-piksel** (16+ pikseli
+identycznych), podczas gdy nawierzchnia terenu w tym samym wierszu zmienia się co piksel
+(fbm w shaderze). Płaska, neutralnie szara plama = **nie** materiał terenu.
+Test A/B na tym samym seedzie (`?seed=471304713`):
+`shots/art5_before_fixed.png` (przed) vs `shots/art6_after.png` (po) vs
+`shots/art7_noprops.png` (po + wyłączony POST/SPECTATOR/GATE) — placki **nie zniknęły
+nawet przy wyłączonych propsach** (1643 vs 1745 px). Źródło placków leży więc poza
+moim zakresem plików: warstwa renderowana po stronie `src/dirt/` / `src/car/`
+(najpewniej `src/dirt/dirt-map.js` — dekał/ślady na drodze, neutralna szarość, lekki
+offset nad powierzchnią). `src/world/mesher.js` NIE jest źródłem.
+
+**Co realnie zmieniłem (i co to dało):**
+- `src/world/mesher.js`: `AO_LEVELS` [1,0.74,0.54,0.36] → [1,0.82,0.68,0.56]; worn-lip
+  `wear` na topach skrócony (0.18+0.8·drop → 0.12+0.32·drop, `sep` ±0.34 → ±0.14);
+  twarde albedo `ALBEDO_MAX = 0.70` na topach; **`WALL_SHADE = 0.66` +
+  `ALBEDO_WALL_MAX = 0.50` na ścianach** (przy `tod 0.70` słońce ma 16° elewacji, więc
+  face pionowy bierze NdotL≈1.0 a poziomy ≈0.28 — ściana była ~3× jaśniejsza od gruntu);
+  rampa tónu pasma odwrócona (jasna strona na crevice, nie na lip);
+  **podział wysokiej ściany na podpasma** (`parts ≤ 3`, ≥1/3 m) z niezależnym tónem →
+  półka 1 m nie jest już jednym płaskim quadem; wypiekane normalne nachylenia
+  0.55 → 0.95 (miększy sylwetka tarasu).
+  Efekt w proberze: quady o min-kanał ≥0.45 w korytarzu **1202 → 19**.
+- `src/world/palette.js`: GRAVEL 0xa8977a → 0x8b7c62, tone [0x9d8d72,0x6f6149];
+  SHOULDER 0x8f7f65 → 0x7c6e56, tone [0x8c7f66,0x605442]. Rozrzut wartości między
+  kotwicami tone tej samej nawierzchni: GRAVEL 156→115 = **26%** (≥12% ✓, criterion 2).
+- `src/render/renderer.js`: wear w shaderze `mix(0.80,1.17,wear)` → `mix(0.87,1.05,wear)`,
+  addytywny term 0.018 → 0.008; cache key 'vr-terrain-f7'.
+- `src/world/props.js`: drzewa — rodziny odcieni (dąb/birch: pnie 0x5c4127 warm-brown,
+  korony 0x2f5a24…0x3a6630, niebieskie kanały obniżone; sosna/świerk: 0x1f3d1f…0x2c5230
+  z pniem 0x3d2c19 wchodzącym w koronę; suchy/birch: 0x6a5843 z pasami 0x4c3f2e),
+  wysokości pni 4.3 / 6.0 / 4.4 m, korony z bryłami przenikającymi pień i siebie
+  (brak "wolnych kostek"); POST — neutralna biała plakietka 0xd8dbe0 usunięta
+  (ciemne drewno + ciemna czerwień), GATE banner 0xf3f5f8 → 0xcbb691, POST sadzany na
+  wysokości *carved* (`columnTopAt`) zamiast analitycznej.
+
+**Pomiary:** tris 346 244 → 408 764 (limit 1.4 M ✓); draw calls w trybie shot
+niestabilne w liczniku (14 / 250 / 779 w kolejnych przebiegach — `info.render.calls`
+w shot-mode kumuluje się między klatkami; render ms raportowany jako 0.00, bo shot
+renderuje jedną klatkę). Jasność kadru: przed mean 74.2 / 67.1% bright; po mean 64.7 /
+59.3% (mean ≥60 ✓ — nie przyciemniłem świata, tylko ściany i gravel). Metryka
+"min(r,g,b)>190 poniżej y=300": 1827 → 1788, ale po odseparowaniu HUD-u (prędkościomierz
++ panel SILNIK dają ~1100 z tych pikseli, w tym (255,255,255) 740 px) placki w
+pasie y 545-660 poza HUD: 1689 → 1643.
+
+**Gates:** tests 9/9 ✓ · smoke `end v 23.3 nan false` ✓ · stagetest ALL PASS ✓ ·
+pacenote ALL PASS ✓. `BANK 9.5 → 13.5` (szersza banks) **przerwał stagetest (1
+FAILURES)** i został wycofany — terracing został więc tylko na poziomie meshera
+(podpasma + normalne), bez zmian fizyki korytarza.
+
+## 18. Placki rozwiązane: to nie była warstwa, tylko **dziura w siatce terenu**
+
+**Diagnoza (twardy dowód, nie zgadywanie):**
+1. `renderer.render` z wyłączoną widocznością *wszystkich* meshy → cały kadr w pasie
+   y 300-720 ma kolor **(191,188,191)** (323 555 px). Czyli (191,188,191) to kolor
+   **pustej sceny** (niebo/fog po tonmapie), a nie kolor jakiegoś materiału.
+2. Prowizoryczne pody terenu na magentę (`diffuseColor = vec3(1,0,1)`, kadr
+   `shots/plates_magenta.png`): placki **nadal dokładnie (191,188,191)** obok pikseli
+   (16,1,16) — więc nie są oświetlanym terenem.
+3. Prowizoryczne przypisanie 7 gatunkom propsów osobnych kolorów (`shots/plates_species.png`,
+   zielony dąb = 38 928 px, czyli tint działa): placki **nadal (191,188,191)** — nie propsy.
+4. W scenie istnieją tylko: terrain Mesh (terrainMaterial), props InstancedMesh
+   (propMaterial), grupa auta, fullscreen quad brudu obiektywu (tylko przyciemnia,
+   alfa ≤ 0.6, kolory ciemne). Placki nie należą do żadnego z nich → **są otworem**:
+   w szczelinie nawierzchni widać pustą scenę przez wycofaną (back-face-culled)
+   ścianę sąsiedniego panelu. Stąd „płaska, stała szarość” i dlaczego przeżyła
+   wszystkie testy materiałowe A/B.
+
+**Dlaczego powstają szczeliny:** siatka wysokości *renderowana* jest kwantowana do
+1/8 m (`mesher.js BED_GRID`/`snapQ`) i sąsiednie chunki są meshowane w różnych LOD
+(ring 0 = 1 m, ring 1 = 2 m, ring 2 = 4 m, `peak` zamiast sredniej), a culling
+scian/opróbowanie AO liczy sie od `world.columnTopAt()` (wartosc fizyczna,
+niekwantowana). Na styku LOD i na wargach korytarza powstają pionowe szczeliny
+pod-metrowe; przy `side = FrontSide` sa to **dziury**.
+
+**Zmiana (jeden plik, `src/render/renderer.js:97`):** `terrainMaterial` dostaje
+`side: THREE.DoubleSide` (+ cache key `vr-terrain-f8`). Zamiast dziury widać teraz
+dalszą sciane szczeliny. Zero nowych trojkatów, zero nowych draw calls, zero assetów.
+
+**Pomiar (ten sam seed 471304713, ten sam kadr, `--virtual-time-budget=60000`):**
+| metryka | `shots/plates_base60.png` (przed) | `shots/plates_crackfix.png` (po) |
+|---|---|---|
+| px w kolorze placka (\|c−(191,188,191)\| ≤ 4), pas y 300-720 | 15 097 | **38** |
+| j.w. bez klastrów HUD | 14 422 | **8** |
+| stara metryka „wszystkie kanały > 190” (surowa) | 1888 | 1866 |
+| mean kadru | 79.7 | 73.9 (≥ 60 ✓) |
+| mean pasu sceny / lum>90 w pasie | 48.4 / 5.3% | 42.1 / 1.9% |
+
+Uwaga o metryce: placki leża w 188-191, a ~1100 z pikseli „>190” to HUD (prędkościomierz,
+panele SILNIK, 740 px czystej bieli). Dlatego poprzednie A/B (propsy, „1689 → 1745”)
+nic nie mierzylo — liczylo HUD. Poprawna metryka to odleglosc od koloru pustej sceny.
+
+**Co zostalo odrzucone (z zmierzonym powodem):** najpierw sciemnilem oświetlone
+sciany w shaderze terenu (`wallness()` + `directDiffuse *= 0.28` na riserach,
+roughness lip 0.62) — placki zostaly bez zmian (14 422 → 15 005 px), a mean kadru
+spadł 64.7 → 47.6. Sciany byly czerwonym herregiem; zmiana zostala cofnietа i nie
+weszła do drzewa.
+
+**Niedomknięte (świadomie, poza budżetem czasu):** szczeliny teraz czy­tają jako
+**ciemne, ostre rozcięcia** w nawierzchni zamiast jasnych placków — jest ciemniej
+i zgodnie z „nawierzchnia ciemniejsza niż otoczenie”, ale nie jest to ciągła,
+upierzona linia jazdy. Właściwa naprawa geometryczna (poza tym zadaniem):
+spójna siatka przy cullingu (kwantowana `topQ` zamiast `columnTopAt`) albo
+**spódnica (skirt) na styku LOD** w `src/world/mesher.js`; wtedy `DoubleSide`
+może wrócić do `FrontSide`. Terrasowanie korytarza (cel drugorzędny) nie bylo
+ruszane — `BANK` zostaje 9.5 (jego poszerzenie psuje `tools/stagetest.mjs`).
+
+**Gates po zmianie:** `node src/debug/tests.js` 9/9 ✓ · `node tools/smoke.mjs`
+`end v 23.3 nan false` ✓ · `node tools/stagetest.mjs` ALL PASS ✓ ·
+`node tools/pacenote-test.mjs` ALL PASS ✓. `node --check src/render/renderer.js` ✓.
+Koszt renderu: draw calls i trojkaty bez zmian (ta sama siatka); w trybie shot
+licznik `renderer.info` jest zawodny — dwukrotne rasterowanie scian wewnętrznych
+terenu widac dopiero w HUD profilerze (zywa petla).

@@ -25,6 +25,20 @@ export const RAMP = SHOULDER + BANK;      // legacy name: full blend width
 export const CROWN = 0.035;              // cross-fall of a graded road (m per half-width)
 export const SHOULDER_RISE = 0.11;       // lip above the carriageway edge
 
+/**
+ * Surface key -> block id for a corridor column, with the biome guard: SNOW/ICE are
+ * MOUNTAIN-only. A shoulder or bank that resolved to a palette entry whose tone anchors
+ * are the cool snow/ice pair is what put the pale dashes along the corridor edge
+ * (PLAN §10 criterion 2/3: the verge must read as gravel and earth, never as ice).
+ */
+const FROZEN = new Set([BLOCK.SNOW, BLOCK.ICE]);
+function corridorBlock(key, biome) {
+  const id = blockForSurface(key);
+  if (id === 0) return BLOCK.GRAVEL;
+  if (FROZEN.has(id) && biome !== 'MOUNTAIN') return BLOCK.GRAVEL;
+  return id;
+}
+
 const COLS = CHUNK * CHUNK;
 const scratchBest = new Float32Array(COLS);
 const scratchD = new Float32Array(COLS);      // signed lateral distance of the best sample
@@ -94,7 +108,7 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
 
     const nx = road.nx[i], nz = road.nz[i];
     const camberTan = Math.tan(road.camber[i]);
-    const roadBlock = blockForSurface(surface(road.surfaceId[i]).key) || BLOCK.GRAVEL;
+    const roadBlock = corridorBlock(surface(road.surfaceId[i]).key, terrain.biome);
 
     for (let d = -reach; d <= reach; d += 0.5) {
       const px = rx + nx * d, pz = rz + nz * d;
@@ -146,10 +160,27 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
       // real bank while staying close to the carved baseline the stage was tuned on.
       target = Math.min((1 - t) * (scratchH[c] + SHOULDER * SHOULDER_RISE) + t * nat, nat + 0.45);
       if (Math.abs(cur - target) < 0.12) continue; // already natural ground: leave it
-      blockId = chunk.blocks[c * WORLD_HEIGHT + chunk.height[c]] || BLOCK.DIRT;
+      const under = chunk.blocks[c * WORLD_HEIGHT + chunk.height[c]];
+      blockId = (under && !FROZEN.has(under)) ? under : BLOCK.DIRT;
     }
     if (!isFinite(target)) continue;
     if (blockId === 0) blockId = BLOCK.DIRT;
+    // Render-only wear field for the mesher (no effect on height/physics):
+    //  - wheel-line ruts: two bands at ~55 % half-width, the darkest, most worked strips
+    //  - the road edge / shoulder lip: a worn, brighter strip so the carriageway reads
+    //  - the bank: fades to zero, so natural ground keeps its own tone.
+    let wear = 0;
+    if (absD <= hw) {
+      const wl = Math.exp(-Math.pow((absD - hw * 0.55) / (hw * 0.22), 2));
+      const mid = Math.exp(-Math.pow(absD / (hw * 0.5), 2));
+      wear = 70 + 150 * wl - 40 * mid;
+    } else if (absD <= hw + SHOULDER) {
+      wear = 190 - 60 * ((absD - hw) / SHOULDER);
+    } else {
+      wear = Math.max(0, 120 * (1 - (absD - hw - SHOULDER) / BANK) - 60);
+    }
+    wear = wear < 0 ? 0 : wear > 255 ? 255 : wear | 0;
+    if (chunk.wear[c] < wear) chunk.wear[c] = wear;
     if (world.carveColumn(colX, colZ, target, blockId)) writes++;
   }
   return writes;
