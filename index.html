@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VOXEL RALLY</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0d10; }
+  #c { display: block; width: 100vw; height: 100vh; }
+  /* Debug / HUD overlay: DOM, updated at a low rate so it never costs the frame. */
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #dfe6ea; text-shadow: 0 1px 2px rgba(0,0,0,.85);
+  }
+  #hud .panel {
+    position: absolute; padding: 8px 10px; border-radius: 4px;
+    background: rgba(8,10,12,.55); border: 1px solid rgba(255,255,255,.10);
+    white-space: pre;
+  }
+  #hud-tl { top: 10px; left: 10px; }
+  #hud-tr { top: 10px; right: 10px; text-align: right; }
+  #hud-bl { bottom: 10px; left: 10px; }
+  #hud-br { bottom: 10px; right: 10px; text-align: right; }
+  /* Rally HUD (docs/07 F4). Anchors + safe-area insets, sizes in vmin so one
+     layout scales from a laptop to a 4K/TV view without any per-frame JS.
+     .agents/skills/game-ui-ux #1-#3: corner anchors, viewport-relative units,
+     critical UI inset from the screen edges. */
+  #rally {
+    position: fixed; inset: 0; pointer-events: none; z-index: 5;
+    font: clamp(10px, 1.15vmin, 20px)/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #eef3f6; text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --safe-l: env(safe-area-inset-left, 0px);
+    --safe-r: env(safe-area-inset-right, 0px);
+    --pad: 2vmin;
+  }
+  #rally.off { display: none; }
+  #rally .panel { position: absolute; padding: .5em .75em; border-radius: .35em; background: rgba(8,10,12,.5); border: 1px solid rgba(255,255,255,.12); }
+  #rally .rows { white-space: pre; }
+  #rally .pen { color: #ffb37a; }
+  /* tablice u góry ekranu (PLAN.md §10): one full-width strip, hard-capped at 10 vh,
+     anchored to the safe area, transparent enough to read through — it must never
+     cover the road, so the clock sits *inside* it instead of above it. */
+  #rally .rly-signs {
+    top: calc(var(--safe-t) + var(--pad)); left: calc(var(--safe-l) + var(--pad));
+    right: calc(var(--safe-r) + var(--pad));
+    max-height: 10vh; overflow: hidden;
+    display: flex; flex-direction: column; gap: .3em;
+    background: rgba(8,10,12,.34);
+  }
+  #rally .sign-meta { font-size: .95em; letter-spacing: .08em; opacity: .85; }
+  #rally .sign-row { display: flex; flex-direction: row; gap: .6vmin; align-items: stretch; }
+  #rally .sign {
+    min-width: 9vmin; padding: .3em .6em; border-radius: .3em;
+    border: 1px solid rgba(255,255,255,.22); background: rgba(20,24,28,.55);
+    font-weight: 700; letter-spacing: .06em;
+  }
+  #rally .sign.now { background: #f4f1e8; color: #14171c; border-color: #fff; font-size: 1.35em; }
+  #rally .sign.hi { border-color: #ff6b5e; color: #ffd9d4; background: rgba(70,18,16,.62); }
+  #rally .sign.next { opacity: .8; }
+  /* clock: top-centre anchor (rally convention: the clock is read with the eyes up) */
+  #rally .rly-clock {
+    top: calc(var(--safe-t) + 11vh); left: 50%; transform: translateX(-50%);
+    text-align: center; min-width: 34vmin;
+  }
+  #rally .rly-clock .big { font-size: 2.2em; letter-spacing: .04em; font-weight: 700; color: #fff; }
+  /* sector / penalty / damage column: left anchor, flows top-to-bottom */
+  #rally .rly-left {
+    top: calc(var(--safe-t) + 12vh); left: calc(var(--safe-l) + var(--pad));
+    display: flex; flex-direction: column; gap: .35em;
+  }
+  /* four per-wheel gauges: bottom-centre row container (PLAN.md §8 #2). Lifted off
+     the bottom edge so the corner panels (debug HUD) never sit under them. */
+  #rally .rly-wheels {
+    bottom: calc(var(--safe-b) + 13vh); left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: row; gap: .8vmin; background: none; border: 0; padding: 0;
+  }
+  #rally .gauge {
+    width: 15vmin; min-width: 92px; padding: .45em .6em; border-radius: .35em;
+    background: rgba(8,10,12,.6); border: 1px solid rgba(255,255,255,.14);
+    border-left: .35em solid #6fd08c;
+  }
+  #rally .gauge .lab { font-size: .85em; opacity: .75; letter-spacing: .1em; }
+  #rally .gauge .val { font-weight: 700; }
+  #rally .gauge .bar { height: .45em; background: rgba(255,255,255,.12); border-radius: .2em; overflow: hidden; margin: .25em 0; }
+  #rally .gauge .fill { height: 100%; width: 0%; background: #cfd8de; }
+  #rally .gauge.warn { border-left-color: #ffc861; } #rally .gauge.warn .fill { background: #ffc861; }
+  #rally .gauge.bad { border-left-color: #ff6b5e; } #rally .gauge.bad .fill { background: #ff6b5e; }
+  #rally .gauge.drive { border-left-color: #7fb6ff; } #rally .gauge.drive .fill { background: #7fb6ff; }
+  #rally .gauge.air { border-left-color: #b9a7ff; } #rally .gauge.air .fill { background: #b9a7ff; }
+  /* modal screen stack: countdown / result. pointer-events only when open so the
+     menu is reachable by keyboard focus without blocking the game. */
+  #rally .rly-modal { inset: 0; display: none; place-items: center; pointer-events: none; }
+  #rally .rly-modal.open { display: grid; pointer-events: auto; }
+  #rally .modal-box { padding: 1.2em 1.6em; border-radius: .5em; background: rgba(8,10,12,.82); border: 1px solid rgba(255,255,255,.18); min-width: 42vmin; }
+  #rally .modal-box .title { font-size: 1.8em; font-weight: 700; margin-bottom: .4em; }
+  #rally .menu-item { padding: .35em .6em; margin-top: .35em; border: 1px solid transparent; border-radius: .3em; outline: none; }
+  #rally .menu-item.focus { border-color: #cfd8de; background: rgba(255,255,255,.1); }
+
+  #boot {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    font: 14px/1.5 ui-monospace, monospace; color: #9fb0ba; background: #0b0d10;
+  }
+  #boot.hidden { display: none; }
+  .warn { color: #ffb37a; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="panel" id="hud-tl"></div>
+  <div class="panel" id="hud-tr"></div>
+  <div class="panel" id="hud-bl"></div>
+  <div class="panel" id="hud-br"></div>
+</div>
+<div id="rally"></div>
+<div id="boot">VOXEL RALLY — generowanie odcinka…</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

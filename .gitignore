@@ -1,0 +1,15 @@
+# local agent scratch (pi context vault)
+.pi/
+
+# dev screenshots, kept out of the repo
+shots/
+
+# node
+node_modules/
+npm-debug.log*
+
+# editors / os
+.DS_Store
+*.swp
+*~
+Thumbs.db

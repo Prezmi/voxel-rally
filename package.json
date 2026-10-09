@@ -1,0 +1,12 @@
+{
+  "name": "voxel-rally",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Voxel Rally - procedural rally sim in Three.js. Zero asset files.",
+  "scripts": {
+    "dev": "python3 -m http.server 8090",
+    "test": "node src/debug/tests.js",
+    "test:world": "node src/debug/tests.js world"
+  }
+}

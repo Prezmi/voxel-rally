@@ -1,0 +1,327 @@
+// Terrain mesher: face culling + greedy merging + vertex AO (docs/03 §1).
+//
+// Specialisation: our world is a strict heightfield (every column is solid from
+// y=0 to its top; docs/03 §1 caches `height[16*16]` for exactly this reason), so
+// a 2.5D greedy mesher over the column grid is correct and far cheaper than a
+// general 3D voxel sweep. LOD is cell size:
+//   lod 0 -> 1 m cells, AO on      ("full")
+//   lod 1 -> 2 m cells             ("simplified")
+//   lod 2 -> 4 m cells, no AO      ("silhouette")
+// One mesh per chunk regardless of material (per-vertex surface id drives the
+// procedural material in the shader) -> 1 draw call per chunk.
+//
+// Winding convention: front faces are CCW when viewed from outside, Y-up world.
+import { CHUNK, WORLD_HEIGHT } from './chunk.js';
+import { blockColor, blockSurface } from './palette.js';
+import { hash01 } from './noise.js';
+
+export const LOD_CELL = [1, 2, 4];
+const AO_LEVELS = [1.0, 0.74, 0.54, 0.36];
+const RELIEF_SALT = 0x51b7c3d9;
+const TONE_SALT = 0x2c9a1f7b;
+// Bed lattice for the MESH, in 1/16-block units. A carved road bed has a different
+// `fine` on every column (a 2 % grade moves the column top by ~1/32 m per metre), so a
+// greedy merge that requires exactly equal heights never merges: one 1x1 panel per
+// column, each with its own crevice AO -> the "plywood ribbon" look in the old shot.
+// Snapping the rendered grid to 1/8 m lets a run merge for 6-10 m along a grade and
+// keeps every remaining wall >= 1/8 m (no open crack), while chunk.fine / columnTop —
+// the physics surface — are untouched, so rendered and simulated height differ <= 6 cm.
+const BED_GRID = 2;
+const snapQ = (q) => Math.round(q / BED_GRID) * BED_GRID;
+const wearOf = (v) => (v > 1 ? 1 : v < 0 ? 0 : v);
+
+export function meshChunk(world, chunk, lod = 0) {
+  const cs = LOD_CELL[lod] || 1;
+  const N = CHUNK / cs;
+  const x0 = chunk.cx * CHUNK, z0 = chunk.cz * CHUNK;
+
+  // ---- LOD height/material grid ----
+  // Heights are carried in 1/16-block units so a carved road bed merges greedily
+  // like a flat one instead of being snapped to whole metres.
+  const topQ = new Int16Array(N * N);   // surface height in 1/16-block units
+  const bid = new Uint8Array(N * N);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      let sum = 0, cnt = 0, mode = 0, modeCount = 0, peak = 0;
+      for (let dz = 0; dz < cs; dz++) {
+        for (let dx = 0; dx < cs; dx++) {
+          const c = (j * cs + dz) * CHUNK + (i * cs + dx);
+          const h = chunk.height[c];
+          const tq = h < 0 ? 0 : chunk.columnTopQ(c);
+          sum += tq; cnt++;
+          if (tq > peak) peak = tq;
+          const b = h < 0 ? 0 : chunk.blocks[c * WORLD_HEIGHT + h];
+          if (b === mode) modeCount++;
+          else if (modeCount === 0) { mode = b; modeCount = 1; }
+          else modeCount--;
+        }
+      }
+      // Full and simplified LODs keep cliffs honest (max); silhouette averages.
+      const rawH = lod === 2 ? Math.round(sum / Math.max(1, cnt)) : peak;
+      topQ[j * N + i] = snapQ(rawH);
+      bid[j * N + i] = mode;
+    }
+  }
+
+  const pos = [], nor = [], col = [], sur = [], idx = [];
+  const cCol = [0, 0, 0];
+  const cNb = [0, 0, 0];
+
+  const solidAt = (wx, wy, wz) => {
+    if (wy < 0 || wy >= WORLD_HEIGHT) return false;
+    const t = world.columnTopAt(wx, wz);
+    return t >= 0 && wy <= t - 1;
+  };
+  // AO samples live in the plane offset by the face normal.
+  const aoTop = (bx, by, bz, tx, tz) => {
+    const y = by + 1;
+    const s1 = solidAt(bx + tx, y, bz) ? 1 : 0;
+    const s2 = solidAt(bx, y, bz + tz) ? 1 : 0;
+    const c = solidAt(bx + tx, y, bz + tz) ? 1 : 0;
+    return (s1 && s2) ? 3 : s1 + s2 + c;
+  };
+  const aoWallX = (bx, by, bz, ty, tz) => {
+    const x = bx + 1;
+    const s1 = solidAt(x, by + ty, bz) ? 1 : 0;
+    const s2 = solidAt(x, by, bz + tz) ? 1 : 0;
+    const c = solidAt(x, by + ty, bz + tz) ? 1 : 0;
+    return (s1 && s2) ? 3 : s1 + s2 + c;
+  };
+  const aoWallZ = (bx, by, bz, tx, ty) => {
+    const z = bz + 1;
+    const s1 = solidAt(bx, by + ty, z) ? 1 : 0;
+    const s2 = solidAt(bx, by, z + tx) ? 1 : 0;
+    const c = solidAt(bx + tx, by + ty, z) ? 1 : 0;
+    return (s1 && s2) ? 3 : s1 + s2 + c;
+  };
+
+  const vertex = (x, y, z, nx, ny, nz, r, g, b, ao, surfId, wear) => {
+    pos.push(x, y, z);
+    nor.push(nx, ny, nz);
+    col.push(r * ao, g * ao, b * ao);
+    // aSurface carries the surface id in its integer part and the edge-weathering
+    // factor in its fraction: one attribute instead of two, and streaming.js keeps
+    // its single `aSurface` buffer (docs/03 §1).
+    sur.push(surfId + wearOf(wear));
+  };
+
+  const topOutside = (i, j) => {
+    const tq = world.columnTopQAt(Math.floor(x0 + i * cs + cs * 0.5), Math.floor(z0 + j * cs + cs * 0.5));
+    return tq < 0 ? 0 : snapQ(tq);
+  };
+
+  let quads = 0;
+
+  // ---------------- TOP FACES ----------------
+  const visited = new Uint8Array(N * N);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const c0 = j * N + i;
+      if (visited[c0]) continue;
+      const hq = topQ[c0], b = bid[c0];
+      visited[c0] = 1;
+      if (hq <= 0 || b === 0) continue;
+
+      let w = 1;
+      while (i + w < N && !visited[c0 + w] && topQ[c0 + w] === hq && bid[c0 + w] === b) w++;
+      let hh = 1;
+      outer: while (j + hh < N) {
+        for (let k = 0; k < w; k++) {
+          const c = (j + hh) * N + i + k;
+          if (visited[c] || topQ[c] !== hq || bid[c] !== b) break outer;
+        }
+        hh++;
+      }
+      for (let dz = 0; dz < hh; dz++) for (let dx = 0; dx < w; dx++) visited[(j + dz) * N + i + dx] = 1;
+
+      const y = hq / 16, by = Math.floor(y) - 1;
+      const ax = x0 + i * cs, az = z0 + j * cs;
+      const bx1 = x0 + (i + w) * cs, bz1 = z0 + (j + hh) * cs;
+      const surfId = blockSurface(b);
+      blockColor(b, cCol);
+      const r = cCol[0], g = cCol[1], bb = cCol[2];
+      // Panel-level tone, keyed by the panel anchor in WORLD coordinates: the same patch
+      // of ground gets the same tone from any chunk or LOD (no seam at a chunk border),
+      // and one long merged panel reads as one slab, not a checkerboard.
+      const pn = hash01(ax, az, TONE_SALT);
+      const pv = 1 + (pn - 0.5) * 0.20;                        // value spread ~ +/-10 %
+      const pf = hash01(az + 7, ax - 3, TONE_SALT ^ 0x5bd1e995);
+      const ph = (pf - 0.5) * 0.14;                           // warm/cool hue drift
+
+      // CCW seen from +Y: (ax,az) -> (ax,bz1) -> (bx1,bz1) -> (bx1,az)
+      const base = pos.length / 3;
+      const corners = [[ax, az], [ax, bz1], [bx1, bz1], [bx1, az]];
+      for (const [cx, cz] of corners) {
+        const bx = cx === ax ? ax : bx1 - 1;
+        const bz = cz === az ? az : bz1 - 1;
+        const tx = cx === ax ? -1 : 1;
+        const tz = cz === az ? -1 : 1;
+        const ao = lod === 2 ? 1 : AO_LEVELS[aoTop(bx, by, bz, tx, tz)];
+
+        // Local grid cell for this corner + the diagonal neighbour it borders.
+        const ci = cx === ax ? i : i + w - 1;
+        const cj = cz === az ? j : j + hh - 1;
+        const ni = ci + tx, nj = cj + tz;
+        const inside = ni >= 0 && ni < N && nj >= 0 && nj < N;
+        const nb = inside ? bid[nj * N + ni] : b;
+        const nh = inside ? topQ[nj * N + ni] : hq;
+        const h1 = hash01(bx, bz, RELIEF_SALT);
+        const h2 = hash01(bz, bx, RELIEF_SALT + 3);
+
+        // Edge weathering: a corner that borders a lower panel or a different
+        // material is a worn lip (brighter in the shader), an interior corner is
+        // not. Crevice darkening is the AO term above.
+        const drop = Math.max(0, hq - nh) / 8;
+        const wear = lod === 2 ? 0.5 : wearOf(0.20 + drop + (nb !== b ? 0.30 : 0));
+
+        // Surface-to-surface transition: a road panel sharing a corner with grass
+        // pulls 1/3 of the grass colour, so the edge is a gradient, not a step.
+        let cr = r, cg = g, cb = bb;
+        if (nb !== b && wear > 0.4) {
+          blockColor(nb, cNb);
+          cr = r * 0.68 + cNb[0] * 0.32;
+          cg = g * 0.68 + cNb[1] * 0.32;
+          cb = bb * 0.68 + cNb[2] * 0.32;
+        }
+
+        // Per-corner grit on top of the panel tone (the same world hashes the relief
+        // wobble below uses, so it costs nothing extra). Adjacent panels of ONE surface
+        // end up differing in value well past the 12 % of PLAN §10 criterion 2 before
+        // the terrain shader adds its own world-space fbm tone on top.
+        const grit = pv * (1 + (h1 - 0.5) * 0.22);
+        cr = cr * grit * (1 + ph + (h2 - 0.5) * 0.08);
+        cg = cg * grit;
+        cb = cb * grit * (1 - ph - (h2 - 0.5) * 0.08);
+
+        // Baked relief: tilt the normal toward the local slope of the height field
+        // plus a small hashed wobble. Free at draw time, keyed by world position so
+        // it cannot produce a chunk seam (PLAN §10 "zero szwu").
+        let tnx = 0, tnz = 0;
+        if (lod !== 2) {
+          const hi = Math.min(N - 1, ci + 1), lo = Math.max(0, ci - 1);
+          const hj = Math.min(N - 1, cj + 1), lj = Math.max(0, cj - 1);
+          const sX = (topQ[cj * N + hi] - topQ[cj * N + lo]) / (16 * Math.max(1, hi - lo));
+          const sZ = (topQ[hj * N + ci] - topQ[lj * N + ci]) / (16 * Math.max(1, hj - lj));
+          tnx = -(sX * 0.55 + (h1 - 0.5) * 0.12);
+          tnz = -(sZ * 0.55 + (h2 - 0.5) * 0.12);
+        }
+        const inv = 1 / Math.hypot(tnx, 1, tnz);
+        vertex(cx, y, cz, tnx * inv, inv, tnz * inv, cr, cg, cb, ao, surfId, wear);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      quads++;
+    }
+  }
+
+  // ---------------- WALL FACES (+x and +z planes) ----------------
+  // A wall is the band between this column's surface and the neighbour's, both in
+  // 1/16-block units: a sub-block road edge is a 6 cm step, not a 1 m cliff.
+  const bandB = new Int8Array(N);
+  const bandLo = new Int16Array(N);
+  const bandHi = new Int16Array(N);
+  const bandNb = new Int8Array(N);
+  const seen = new Uint8Array(N);
+
+  for (let axis = 0; axis < 2; axis++) {
+    for (let p = 0; p < N; p++) {
+      bandB.fill(-1);
+      let any = false;
+      const lastPlane = (p + 1 >= N);
+      for (let q = 0; q < N; q++) {
+        let ha, hb, b, nb;
+        if (axis === 0) {
+          ha = topQ[q * N + p];
+          hb = lastPlane ? topOutside(p + 1, q) : topQ[q * N + p + 1];
+          b = bid[q * N + p];
+          nb = lastPlane ? 0 : bid[q * N + p + 1];
+        } else {
+          ha = topQ[p * N + q];
+          hb = lastPlane ? topOutside(q, p + 1) : topQ[(p + 1) * N + q];
+          b = bid[p * N + q];
+          nb = lastPlane ? 0 : bid[(p + 1) * N + q];
+        }
+        if (ha <= hb || b === 0) continue;
+        bandB[q] = b; bandLo[q] = hb; bandHi[q] = ha; bandNb[q] = nb; any = true;
+      }
+      if (!any) continue;
+      seen.fill(0);
+
+      for (let q = 0; q < N; q++) {
+        if (bandB[q] < 0 || seen[q]) continue;
+        const v = bandB[q], lo = bandLo[q], hi = bandHi[q];
+
+        let wq = 1;
+        while (q + wq < N && bandB[q + wq] === v && bandLo[q + wq] === lo && bandHi[q + wq] === hi && !seen[q + wq]) wq++;
+        for (let a = 0; a < wq; a++) seen[q + a] = 1;
+
+        blockColor(v, cCol);
+        const r = cCol[0], g = cCol[1], bb = cCol[2];
+        const surfId = blockSurface(v);
+        const yLo = lo / 16, yHi = hi / 16;
+        const spanY = yHi - yLo;
+        // The surface below the wall (verge under a road lip, grass under a
+        // terrace): its colour bleeds into the base of the band, so a material
+        // change reads as a gradient instead of a hard 1-block step (PLAN §10).
+        const nbi = bandNb[q];
+        let nrr = 0, ngg = 0, nbb = 0, hasNb = false;
+        if (nbi > 0 && nbi !== v) { blockColor(nbi, cNb); nrr = cNb[0]; ngg = cNb[1]; nbb = cNb[2]; hasNb = true; }
+        const u0 = z0 + q * cs, u1 = z0 + (q + wq) * cs;
+        const base = pos.length / 3;
+
+        if (axis === 0) {
+          const plane = x0 + (p + 1) * cs, inB = x0 + p * cs;
+          // CCW seen from +X: (u0,yLo) -> (u0,yHi) -> (u1,yHi) -> (u1,yLo)
+          const cs2 = [[u0, yLo], [u0, yHi], [u1, yHi], [u1, yLo]];
+          for (const [u, vy] of cs2) {
+            const bz = u === u0 ? u0 : u1 - 1;
+            const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
+            const tz = u === u0 ? -1 : 1;
+            const ty = vy === yLo ? -1 : 1;
+            const ao = lod === 2 ? 1 : AO_LEVELS[aoWallX(inB, by, bz, ty, tz)];
+            const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;      // 0 in the crevice, 1 at the lip
+            const wear = lod === 2 ? 0.5 : f;
+            let cr = r, cg = g, cb = bb;
+            if (hasNb) { const k = 0.45 * (1 - f); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
+            const jy = lod === 2 ? 0 : (hash01(bz, by, RELIEF_SALT + 7) - 0.5) * 0.12;
+            const jz = lod === 2 ? 0 : (hash01(by, bz, RELIEF_SALT + 11) - 0.5) * 0.14;
+            const inv = 1 / Math.hypot(1, jy, jz);
+            vertex(plane, vy, u, inv, jy * inv, jz * inv, cr, cg, cb, ao, surfId, wear);
+          }
+        } else {
+          const plane = z0 + (p + 1) * cs, inB = z0 + p * cs;
+          const x0u = x0 + q * cs, x1u = x0 + (q + wq) * cs;
+          // CCW seen from +Z: (x0u,yLo) -> (x1u,yLo) -> (x1u,yHi) -> (x0u,yHi)
+          const cs2 = [[x0u, yLo], [x1u, yLo], [x1u, yHi], [x0u, yHi]];
+          for (const [u, vy] of cs2) {
+            const bx = u === x0u ? x0u : x1u - 1;
+            const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
+            const tx = u === x0u ? -1 : 1;
+            const ty = vy === yLo ? -1 : 1;
+            const ao = lod === 2 ? 1 : AO_LEVELS[aoWallZ(bx, by, inB, tx, ty)];
+            const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;
+            const wear = lod === 2 ? 0.5 : f;
+            let cr = r, cg = g, cb = bb;
+            if (hasNb) { const k = 0.45 * (1 - f); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
+            const jy = lod === 2 ? 0 : (hash01(bx, by, RELIEF_SALT + 7) - 0.5) * 0.12;
+            const jx = lod === 2 ? 0 : (hash01(by, bx, RELIEF_SALT + 13) - 0.5) * 0.14;
+            const inv = 1 / Math.hypot(1, jy, jx);
+            vertex(u, vy, plane, jx * inv, jy * inv, inv, cr, cg, cb, ao, surfId, wear);
+          }
+        }
+        idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        quads++;
+      }
+    }
+  }
+
+  return {
+    lod,
+    position: new Float32Array(pos),
+    normal: new Float32Array(nor),
+    color: new Float32Array(col),
+    surface: new Float32Array(sur),
+    index: new Uint32Array(idx),
+    quads,
+    triangles: idx.length / 3,
+  };
+}
