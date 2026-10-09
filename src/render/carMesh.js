@@ -1,98 +1,29 @@
-// Procedural rally car mesh (docs/06: zero asset files, everything built in code).
-// Body is one merged geometry in car-local coords (X forward, Y up, Z right);
-// the four wheels are separate meshes driven from the real Wheel state, so what
-// you see is what the suspension is actually doing.
+// Procedural rally car (docs/06: zero asset files; PLAN §10.2 car look bible).
+// One chamfered/lofted body volume (car-body.js) + one instanced wheel drawn at
+// the four real Wheel states + a code-generated livery map (car-livery.js).
+// Damage is shown as physically missing / knocked parts, never as a bar.
 import * as THREE from 'three';
-import { GeoBuilder } from './primitives.js';
-import { PANELS, PANEL_COUNT, panelBoxes, classifyPanel } from '../dirt/panel-dirt.js';
+import { buildBodyGeometry, buildWheelGeometry, carShape } from './car-body.js';
+import { buildLiveryTexture } from './car-livery.js';
+import { PANELS, PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
-
-const PAINT = 0xc7352b;
-const PAINT_DARK = 0x8e2119;
-const TRIM = 0xe8e4dc;
-const GLASS = 0x2b3a44;
-const DARK = 0x24262a;
-
-function buildBodyGeometry(p) {
-  const g = new GeoBuilder();
-  const h = p.hull;
-
-  // Main tub: sits between the hull floor and just under the greenhouse.
-  g.box(0.05, h.cy + 0.02, 0, h.x - 0.22, 0.34, h.z - 0.04, PAINT, 1.0);
-  // Nose and tail are narrower so the silhouette reads as a car, not a brick.
-  g.box(h.x - 0.42, h.cy - 0.04, 0, 0.42, 0.26, h.z - 0.16, PAINT, 1.12);
-  g.box(-(h.x - 0.40), h.cy - 0.05, 0, 0.40, 0.24, h.z - 0.14, PAINT_DARK, 1.0);
-  // Greenhouse.
-  g.box(-0.10, h.cy + 0.46, 0, 0.86, 0.24, h.z - 0.16, TRIM, 1.0);
-  g.box(-0.10, h.cy + 0.47, 0, 0.80, 0.22, h.z - 0.20, GLASS, 1.05);
-  // Roof panel.
-  g.box(-0.14, h.cy + 0.70, 0, 0.72, 0.04, h.z - 0.22, TRIM, 1.18);
-  // Livery stripe down each flank.
-  g.box(0.10, h.cy + 0.06, h.z - 0.03, h.x - 0.55, 0.07, 0.02, TRIM, 1.0);
-  g.box(0.10, h.cy + 0.06, -(h.z - 0.03), h.x - 0.55, 0.07, 0.02, TRIM, 1.0);
-  // Bumpers + a rally front bar.
-  g.box(h.x - 0.04, h.cy - 0.16, 0, 0.10, 0.10, h.z, DARK, 1.0);
-  g.box(-(h.x - 0.04), h.cy - 0.14, 0, 0.10, 0.10, h.z, DARK, 1.0);
-  g.box(h.x + 0.06, h.cy - 0.02, 0, 0.06, 0.20, h.z + 0.04, DARK, 0.85);
-  // Rear wing on stalks.
-  g.box(-(h.x - 0.16), h.cy + 0.52, h.z - 0.14, 0.05, 0.20, 0.05, DARK, 1.0);
-  g.box(-(h.x - 0.16), h.cy + 0.52, -(h.z - 0.14), 0.05, 0.20, 0.05, DARK, 1.0);
-  g.box(-(h.x - 0.16), h.cy + 0.74, 0, 0.20, 0.035, h.z - 0.04, TRIM, 1.1);
-  // Sills.
-  g.box(0, h.cy - 0.26, h.z - 0.02, h.x - 0.55, 0.06, 0.05, DARK, 0.9);
-  g.box(0, h.cy - 0.26, -(h.z - 0.02), h.x - 0.55, 0.06, 0.05, DARK, 0.9);
-
-  const geo = g.toGeometry(THREE);
-  geo.computeVertexNormals();
-  return geo;
-}
-
-function buildWheelGeometry(r, width) {
-  // Tyre: a 14-sided drum with its axis along the car's Z (right).
-  const tyre = new THREE.CylinderGeometry(r, r, width, 14, 1, false);
-  tyre.rotateX(Math.PI / 2);
-  const group = new THREE.Group();
-
-  const tyreMat = new THREE.MeshStandardMaterial({ color: 0x1a1b1d, roughness: 0.95, metalness: 0.0 });
-  const tyreMesh = new THREE.Mesh(tyre, tyreMat);
-  tyreMesh.name = 'tyre';
-  group.add(tyreMesh);
-
-  // Hub + one spoke so wheel spin and lock are actually visible.
-  const hubGeo = new THREE.CylinderGeometry(r * 0.52, r * 0.52, width + 0.03, 12, 1, false);
-  hubGeo.rotateX(Math.PI / 2);
-  const hubMesh = new THREE.Mesh(hubGeo, new THREE.MeshStandardMaterial({ color: 0x9aa1a6, roughness: 0.45, metalness: 0.6 }));
-  group.add(hubMesh);
-
-  const spoke = new THREE.BoxGeometry(r * 1.5, 0.05, width + 0.05);
-  const spokeMesh = new THREE.Mesh(spoke, new THREE.MeshStandardMaterial({ color: 0x6d7479, roughness: 0.5, metalness: 0.5 }));
-  spokeMesh.name = 'spoke';
-  group.add(spokeMesh);
-
-  group.userData.tyreMat = tyreMat;
-  group.userData.tyreBase = tyreMat.color.clone();
-  return group;
-}
+import { settings } from '../core/settings.js';
 
 /**
  * Bake one panel index + airflow direction per body vertex (docs/04 §4.2: the
- * dirt layer is per panel, and the streaks run along the panel's airflow).
- * Done once at build time; the shader then only reads a float attribute.
+ * dirt layer is per panel and the streaks run along the panel's airflow). The
+ * panel index is assigned per volume by car-body.js, so the 16 panels land on
+ * the new silhouette exactly where they belong. Build-time only.
  */
-function bakePanelAttributes(geo, params) {
-  const boxes = panelBoxes(params);
-  const pos = geo.getAttribute('position');
-  const n = pos.count;
-  const panel = new Float32Array(n);
+function bakeFlowAttributes(geo) {
+  const panel = geo.getAttribute('aPanel');
+  const n = panel.count;
   const flow = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
-    const p = classifyPanel(pos.getX(i), pos.getY(i), pos.getZ(i), boxes);
-    panel[i] = p;
-    const f = PANELS[p].flow;
+    const f = PANELS[Math.max(0, Math.min(PANEL_COUNT - 1, panel.getX(i)))].flow;
     const l = Math.hypot(f[0], f[1], f[2]) || 1;
     flow[i * 3] = f[0] / l; flow[i * 3 + 1] = f[1] / l; flow[i * 3 + 2] = f[2] / l;
   }
-  geo.setAttribute('aPanel', new THREE.BufferAttribute(panel, 1));
   geo.setAttribute('aFlow', new THREE.BufferAttribute(flow, 3));
 }
 
@@ -135,56 +66,108 @@ function buildDirtTextures(dirt) {
 
 export function buildCarMesh(car, dirt) {
   const p = car.params;
-  const bodyGeo = buildBodyGeometry(p);
-  bakePanelAttributes(bodyGeo, p);
-  const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 });
+  const shape = carShape(p);
+  const built = buildBodyGeometry(car);
+  bakeFlowAttributes(built.geo);
+
   const dtex = buildDirtTextures(dirt);
-  attachDirtShader(bodyMat, dtex);
-  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  const livery = buildLiveryTexture(p.id, THREE);
+  const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.52, metalness: 0.18 });
+  attachCarShader(bodyMat, dtex, livery);
+
+  const body = new THREE.Mesh(built.geo, bodyMat);
   body.castShadow = true;
   body.receiveShadow = true;
 
-  const wheelWidth = 0.24;
-  const wheels = car.wheels.map((w) => {
-    const g = buildWheelGeometry(w.rGeo, wheelWidth);
-    g.traverse((o) => { if (o.isMesh) { o.castShadow = true; } });
-    return g;
-  });
+  // One wheel geometry, four instances: the draw-call budget stays at one call
+  // for all four corners while each wheel keeps its own transform and tint.
+  const wheel = buildWheelGeometry(p);
+  const wheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.88, metalness: 0.22 });
+  const wheels = new THREE.InstancedMesh(wheel.geo, wheelMat, 4);
+  wheels.castShadow = true;
+  wheels.receiveShadow = true;
+  wheels.frustumCulled = false;
+  wheels.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(12).fill(1), 3);
+
+  // Pristine copies of every damage-managed region: applied on change only.
+  const pos = built.geo.getAttribute('position');
+  const col = built.geo.getAttribute('color');
+  const regions = {};
+  for (const key in built.ranges) {
+    const r = built.ranges[key];
+    const n = (r[1] - r[0]) * 3;
+    regions[key] = {
+      range: r,
+      pos: Float32Array.prototype.slice.call(pos.array, r[0] * 3, r[1] * 3),
+      col: Float32Array.prototype.slice.call(col.array, r[0] * 3, r[1] * 3),
+    };
+  }
 
   const group = new THREE.Group();
   group.add(body);
-  for (const w of wheels) group.add(w);
+  group.add(wheels);
 
-  return { group, body, wheels, spin: [0, 0, 0, 0], dtex, mat: bodyMat };
+  // Headlights only light the road when the stage is dark (per-stage tod).
+  const tod = typeof settings.tod === 'number' ? settings.tod : 0.7;
+  const night = tod > 0.78 || tod < 0.22;
+  const beams = [];
+  if (night) {
+    for (const z of [shape.hz * 0.6, -shape.hz * 0.6]) {
+      const sl = new THREE.SpotLight(0xffeecd, 46, 34, 0.55, 0.62, 1.3);
+      sl.position.set(shape.hx + 0.25, shape.floor + 0.34, z);
+      sl.target.position.set(shape.hx + 17, shape.floor - 2.0, z * 1.7);
+      sl.castShadow = false;
+      group.add(sl);
+      group.add(sl.target);
+      beams.push(sl);
+    }
+  }
+
+  return {
+    group, body, wheels, spin: [0, 0, 0, 0], dtex, mat: bodyMat, livery,
+    shape, regions, beams, night, dmgKey: -1, brakeOn: -1,
+    tris: { body: built.tris, wheel: wheel.tris },
+  };
 }
 
 /**
- * Dirt layer in the car shader (docs/04 §4.2 "render brudu"): albedo darkening,
- * roughness change, normal perturbation and streaks (smugi) along the panel
- * airflow. Patched once into the standard material, so the car stays one draw
- * call and no material is ever rebuilt at runtime.
+ * Car shader: dirt layer (docs/04 §4.2 "render brudu") + the code-generated
+ * livery + emissive lamps + pixel cracks under damage. Patched once into the
+ * standard material, so the car stays one draw call and no material is ever
+ * rebuilt at runtime.
  */
-function attachDirtShader(mat, dtex) {
+function attachCarShader(mat, dtex, livery) {
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPanelTex = { value: dtex.panelTex };
     shader.uniforms.uPanelCol = { value: dtex.colTex };
     shader.uniforms.uSprayTex = { value: dtex.sprayTex };
     shader.uniforms.uSprayOrigin = { value: new THREE.Vector2(0, 0) };
+    shader.uniforms.uLivery = { value: livery };
     shader.uniforms.uSpeed = { value: 0 };
+    shader.uniforms.uHead = { value: 0.18 };
+    shader.uniforms.uTail = { value: 0.25 };
+    shader.uniforms.uDamage = { value: 0 };
 
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float aPanel;\nattribute vec3 aFlow;\nvarying float vPanel;\nvarying vec3 vFlow;\nvarying vec3 vLocal;\nvarying vec3 vWPos;\nvarying vec3 vObjNormal;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPanel = aPanel;\nvFlow = aFlow;\nvLocal = transformed;\nvObjNormal = normal;\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      .replace('#include <common>', '#include <common>\nattribute float aPanel;\nattribute vec3 aFlow;\nattribute vec2 aLivUv;\nattribute float aLiv;\nattribute float aLamp;\nvarying float vPanel;\nvarying vec3 vFlow;\nvarying vec2 vLivUv;\nvarying float vLiv;\nvarying float vLamp;\nvarying vec3 vLocal;\nvarying vec3 vWPos;\nvarying vec3 vObjNormal;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPanel = aPanel;\nvFlow = aFlow;\nvLivUv = aLivUv;\nvLiv = aLiv;\nvLamp = aLamp;\nvLocal = transformed;\nvObjNormal = normal;\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
 
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
 uniform sampler2D uPanelTex;
 uniform sampler2D uPanelCol;
 uniform sampler2D uSprayTex;
+uniform sampler2D uLivery;
 uniform vec2 uSprayOrigin;
 uniform float uSpeed;
+uniform float uHead;
+uniform float uTail;
+uniform float uDamage;
 varying float vPanel;
 varying vec3 vFlow;
+varying vec2 vLivUv;
+varying float vLiv;
+varying float vLamp;
 varying vec3 vLocal;
 varying vec3 vWPos;
 varying vec3 vObjNormal;
@@ -193,6 +176,14 @@ vec2 gPanelUv = vec2(0.0);
 float gThick = 0.0, gWet = 0.0, gDust = 0.0, gStreak = 0.0;
 vec3 gDirtCol = vec3(0.0);
 float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+{
+  // Livery (PLAN §10.2): paint, stripes, sponsor blocks and the number roundel
+  // come from the generated map; the vertex colour carries the part's own tone.
+  vec3 lv = texture2D(uLivery, clamp(vLivUv, 0.03, 0.97)).rgb;
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * lv * 1.05, vLiv);
+}
 `)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
 {
@@ -235,6 +226,14 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
   // Dry dust is a pale veil, not a dark plate - that is what keeps gravel dust
   // looking like dust rather than like mud (docs/04 risk R4).
   col = mix(col, dirtCol * 1.35 + vec3(0.22), gDust * 0.35 * (1.0 - gWet));
+
+  // Damage as a surface state of the panel (docs/02 §8): pixel cracks, not a bar.
+  if (uDamage > 0.10) {
+    float c1 = dhash1(floor(vLocal.xy * 13.0) + vec2(vLocal.z * 7.0));
+    float c2 = dhash1(floor(vLocal.yz * 5.0) + vec2(3.71));
+    float crack = step(1.0 - uDamage * 0.30, c1) * step(0.45, c2);
+    col *= 1.0 - crack * (0.30 + 0.35 * uDamage);
+  }
   diffuseColor.rgb = col;
 
   // Micro-relief from the crust; moisture smooths it out.
@@ -242,6 +241,13 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
   float n2 = dhash1(vLocal.yz * 97.0 - vLocal.x * 43.0);
   float relief = (n1 * 0.65 + n2 * 0.35 - 0.5);
   normal = normalize(normal + vec3(relief, relief * 0.6, -relief) * gThick * 0.35 * (1.0 - 0.5 * gWet));
+}
+`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+{
+  float head = step(0.5, vLamp) * step(vLamp, 1.5);
+  float tail = step(1.5, vLamp);
+  totalEmissiveRadiance += vec3(1.0, 0.93, 0.72) * uHead * head + vec3(0.95, 0.07, 0.03) * uTail * tail;
 }
 `);
     mat.userData.shader = shader;
@@ -251,8 +257,14 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
 
 const _m4 = new THREE.Matrix4();
 const _v = new THREE.Vector3();
+const _b1 = new THREE.Vector3();
+const _b2 = new THREE.Vector3();
+const _b3 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
+const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
+const _col = new THREE.Color();
+const _col2 = new THREE.Color();
 
 /**
  * Drive the visuals from the physics state. `alpha` is the fixed-step
@@ -277,37 +289,120 @@ export function syncCarMesh(view, car, alpha, dirt) {
   view.group.position.set(px, py, pz);
   view.group.quaternion.copy(_q);
   view.group.visible = true;
+  _qi.copy(_q).invert();
 
-  for (let i = 0; i < car.wheels.length; i++) {
+  for (let i = 0; i < 4; i++) {
     const w = car.wheels[i];
-    const g = view.wheels[i];
     view.spin[i] += w.omega * (1 / 120);
     if (view.spin[i] > 1e6) view.spin[i] %= (2 * Math.PI);
 
-    // Basis: forward, up, right taken from the wheel's own axes so steer,
-    // roll and pitch all show up on the tyre.
-    const fx = w.forward.x, fy = w.forward.y, fz = w.forward.z;
-    const rx = w.right.x, ry = w.right.y, rz = w.right.z;
+    // The wheel state is in WORLD frame; the mesh is a child of the car group,
+    // so the hub and the wheel axes are taken back into car-local space.
+    _v.set(w.hub.x - px, w.y - py, w.hub.z - pz).applyQuaternion(_qi);
+    const lx = _v.x, ly = _v.y, lz = _v.z;
+    _v.set(w.forward.x, w.forward.y, w.forward.z).applyQuaternion(_qi);
+    const fx = _v.x, fy = _v.y, fz = _v.z;
+    _v.set(w.right.x, w.right.y, w.right.z).applyQuaternion(_qi);
+    const rx = _v.x, ry = _v.y, rz = _v.z;
     _up.set(ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx).normalize();
 
     const a = view.spin[i];
     const ca = Math.cos(a), sa = Math.sin(a);
-    _m4.makeBasis(
-      _v.set(fx * ca + _up.x * sa, fy * ca + _up.y * sa, fz * ca + _up.z * sa).normalize(),
-      _v.set(-fx * sa + _up.x * ca, -fy * sa + _up.y * ca, -fz * sa + _up.z * ca).normalize(),
-      _v.set(rx, ry, rz).normalize(),
-    );
-    g.position.set(w.hub.x, w.y, w.hub.z);
-    g.quaternion.setFromRotationMatrix(_m4);
+    // Loaded radius shows up as a squashed tyre, so a soft landing reads soft.
+    const sc = Math.max(0.90, Math.min(1.06, w.rEff / w.rGeo));
+    // Three distinct vectors: makeBasis reads them after all three are built.
+    _b1.set(fx * ca + _up.x * sa, fy * ca + _up.y * sa, fz * ca + _up.z * sa).normalize().multiplyScalar(sc);
+    _b2.set(-fx * sa + _up.x * ca, -fy * sa + _up.y * ca, -fz * sa + _up.z * ca).normalize().multiplyScalar(sc);
+    _b3.set(rx, ry, rz).normalize().multiplyScalar(sc);
+    _m4.makeBasis(_b1, _b2, _b3);
+    _m4.setPosition(lx, ly, lz);
+    view.wheels.setMatrixAt(i, _m4);
   }
+  view.wheels.instanceMatrix.needsUpdate = true;
+
+  applyDamage(view, car);
+
+  const sh = view.mat.userData.shader;
+  if (sh) {
+    const braking = car.input && car.input.brake > 0.05 ? 1 : 0;
+    if (braking !== view.brakeOn) {
+      view.brakeOn = braking;
+      sh.uniforms.uTail.value = braking ? 2.2 : 0.4;
+    }
+    sh.uniforms.uHead.value = view.night ? (view.lightsOut ? 0.05 : 1.9) : 0.18;
+    sh.uniforms.uDamage.value = car.damage ? car.damage.severityPct : 0;
+  }
+}
+
+/**
+ * Damage as physical state (PLAN §10.2 "uszkodzone/brakujace elementy"):
+ * a knocked bumper is offset out of true, a smashed front lamp is dark and
+ * cracked and, after enough hits, the lamp volume is simply gone. Runs only
+ * when the damage state actually changes - no per-frame geometry writes.
+ */
+function applyDamage(view, car) {
+  const d = car.damage;
+  if (!d) return;
+  const key = d.frontHits * 8 + (d.lights[0] ? 0 : 4) + (d.susp[0] < 0.85 ? 1 : 0) + (d.susp[2] < 0.85 ? 2 : 0);
+  if (key === view.dmgKey) return;
+  view.dmgKey = key;
+
+  const geo = view.body.geometry;
+  const pos = geo.getAttribute('position');
+  const col = geo.getAttribute('color');
+  view.lightsOut = !d.lights[0] && d.frontHits >= 3;
+
+  for (const name of ['lampFL', 'lampFR']) {
+    const r = view.regions[name];
+    if (!r) continue;
+    // "Zbita lampa = jeden element mniej": after enough front hits the whole
+    // lamp volume is collapsed to a point (degenerate triangles, gone).
+    const dead = view.lightsOut;
+    let cx = 0, cy = 0, cz = 0;
+    const cnt = r.pos.length / 3;
+    for (let i = 0; i < r.pos.length; i += 3) { cx += r.pos[i]; cy += r.pos[i + 1]; cz += r.pos[i + 2]; }
+    cx /= cnt; cy /= cnt; cz /= cnt;
+    for (let i = r.range[0]; i < r.range[1]; i++) {
+      const k = (i - r.range[0]) * 3;
+      if (dead) pos.setXYZ(i, cx, cy, cz);
+      else pos.setXYZ(i, r.pos[k], r.pos[k + 1], r.pos[k + 2]);
+      const f = dead ? 0.2 : 1;
+      col.setXYZ(i, r.col[k] * f, r.col[k + 1] * f, r.col[k + 2] * f);
+    }
+  }
+  const bf = view.regions.bumperF;
+  if (bf) {
+    // Centroid of the pristine bumper: the dent is a rotation + offset about it.
+    let cx = 0, cy = 0, cz = 0, count = 0;
+    for (let i = 0; i < bf.pos.length; i += 3) { cx += bf.pos[i]; cy += bf.pos[i + 1]; cz += bf.pos[i + 2]; count++; }
+    cx /= count; cy /= count; cz /= count;
+    const hits = Math.min(3, d.frontHits);
+    const gone = hits >= 3;
+    const yaw = 0.10 * hits, dx = -0.055 * hits, dy = -0.03 * hits, dz = 0.05 * hits;
+    const co = Math.cos(yaw), si = Math.sin(yaw);
+    for (let i = bf.range[0]; i < bf.range[1]; i++) {
+      const k = (i - bf.range[0]) * 3;
+      const lx = bf.pos[k] - cx, ly = bf.pos[k + 1] - cy, lz = bf.pos[k + 2] - cz;
+      if (gone) pos.setXYZ(i, cx, cy, cz);
+      else pos.setXYZ(i, cx + lx * co - lz * si + dx, cy + ly + dy, cz + lx * si + lz * co + dz);
+      const f = gone ? 1 : 1 - 0.18 * hits;
+      col.setXYZ(i, bf.col[k] * f, bf.col[k + 1] * f, bf.col[k + 2] * f);
+    }
+  }
+  pos.needsUpdate = true;
+  col.needsUpdate = true;
+  view.body.geometry.computeBoundingSphere();
 }
 
 // Wheel -> the arch panel of that wheel, for caked dirt on the tyre.
 const WHEEL_ARCH = [8, 9, 10, 11];
 const TYRE_BASE_R = 0.102, TYRE_BASE_G = 0.106, TYRE_BASE_B = 0.114;
+// Linear tone the tyre tread is baked with (car-body.js CAR_MAT.rubber); the
+// instance colour is the multiplier that turns it into dirty or polished rubber.
+const BAKE = new THREE.Color(0x15161a);
 
 /**
- * Push the dirt state into the shader textures and the tyre materials.
+ * Push the dirt state into the shader textures and the tyre instances.
  * Called once per rendered frame, never allocates: the texel arrays and the
  * materials already exist and are written in place (docs/06 §1 "pule obiektów").
  */
@@ -348,22 +443,24 @@ export function updateCarDirt(view, car, dirt) {
     sh.uniforms.uSprayOrigin.value.set(dirt.map.originX, dirt.map.originZ);
   }
 
-  // Tyres: rubber darkens and polishes the tread and survives washing
-  // (docs/04 §4.2 "kanał gumy na oponach"); caked dirt does the opposite.
-  for (let i = 0; i < view.wheels.length; i++) {
-    const mat = view.wheels[i].userData.tyreMat;
-    if (!mat) continue;
+  // Tyres: rubber darkens and polishes the tread, caked dirt does the opposite
+  // (docs/04 §4.2 "kanał gumy na oponach"). Per-instance colour multiply, so
+  // one instanced draw call still shows four differently dirty wheels.
+  const inst = view.wheels.instanceColor;
+  for (let i = 0; i < 4; i++) {
     const rubber = clamp01(panels.rubber[i]);
     const arch = WHEEL_ARCH[i];
     const caked = clamp01(panels.thick[arch] * 0.8 + panels.dust[arch] * 0.5);
     const dr = panels.cr[arch], dg = panels.cg[arch], db = panels.cb[arch];
-    // Rubber: towards a shiny black. Caked dirt: towards the surface colour.
     const rr = TYRE_BASE_R * (1 - caked) * (1 - rubber) + dr * caked * 0.9 + 0.020 * rubber;
     const gg = TYRE_BASE_G * (1 - caked) * (1 - rubber) + dg * caked * 0.9 + 0.020 * rubber;
     const bb = TYRE_BASE_B * (1 - caked) * (1 - rubber) + db * caked * 0.9 + 0.024 * rubber;
-    mat.color.setRGB(rr, gg, bb);
-    mat.roughness = 0.95 - 0.42 * rubber + 0.04 * caked;
+    _col.setRGB(rr, gg, bb, THREE.SRGBColorSpace);
+    _col2.setRGB(clampRatio(_col.r / BAKE.r), clampRatio(_col.g / BAKE.g), clampRatio(_col.b / BAKE.b));
+    inst.setXYZ(i, _col2.r, _col2.g, _col2.b);
   }
+  inst.needsUpdate = true;
 }
 
+function clampRatio(v) { return v < 0.25 ? 0.25 : (v > 2.2 ? 2.2 : v); }
 function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }

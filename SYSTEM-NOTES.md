@@ -502,3 +502,86 @@ do pasa jaśniejszego pobocza, które wciąż wygląda jak płyty; tarasowanie k
 ekspozycje; pogoda odcinka nie jest pokazana w HUD; `DirtMap` nie karmi koleiny
 swiata (jego kurz idzie tylko do shaderu auta) — warstwa placków okazala sie **pasem
 `wear` carvu + mappingiem w shaderze**, nie `dirt-map.js`.
+
+## 21. Auto wg §10.2: bryła z profilem, koła instancjonowane, livery z numerem
+
+**Czego zadaza §10.2:** „Auto z numerem i barwami zespołu. Czytelne barwy, okrąg z
+numerem startowym, pasy, widoczne nadkola i koła, uszczerbki pokazane jako
+uszkodzone/brakujące elementy (zbita lampa = jeden element mniej), nie jako pasek
+procentów" + „nadwozie z objętością i zaokrągleniami, felgi i opony jako osobne
+bryły, światła (przednie świecą nocą), cień kontaktowy pod autem".
+
+**Co było:** `carMesh.js` budował auto z 14 `BoxGeometry` (płyty) i 4 cylindrów.
+Na zrzucie wychodził różowo-biały klocek bez kół — **koła były źle pozycjonowane**:
+`syncCarMesh` wstawiał *world* (`w.hub`, `w.y`) jako pozycję *lokalną* dziecka
+grupy auta, więc wszystkie cztery lądowały kilkaset metrów obok karoserii. Dodatkowo
+trzy kolumny bazy koła były budowane na tym samym `_v`, więc `makeBasis` dostawał
+trzy razy ten sam wektor.
+
+**Co jest teraz** (nowe pliki `src/render/car-body.js`, `src/render/car-livery.js`):
+- `VolumeBuilder` — bryły **zeszifrowane** (ścia + krawędzie + narożniki ścięte,
+  44 trójkąty na bryłę) oraz **loft profilem bocznym**: `tub` (11 punktów: nos,
+  maska, przegroda, pokład, tył, spód) i `cab` (4 punkty: **nachylona szyba
+  przednia, dach, nachylona szyba tylna**). Nic nie jest gładkim `BoxGeometry`.
+- Dokręcone elementy: słupki A/B + linia szyb, **nadhkola** (2 zszifrowane bryły
+  na koło, wypukłe na zewnątrz progu), progi, zderzaki przód/tył, atrapa,
+  **roof scoop**, lusterka na ramionach, końcówka wydechu, dyfuzor, **tylny
+  spoiler** tylko tam, gdzie `aero.downforce >= 0.5` (A/B/D, C bez).
+- ~1600 trójkątów karoserii, ~320 na koło.
+- **Koła:** jedna geometria + `InstancedMesh(4)`: opona z realnym bieżnikiem
+  (14 segmentów, naprzemienny promień bieżnika = kostki + środkowy kanał),
+  boki opony, bęben felgi, 5 ramion, piaasta, **tarcze hamulcowe po obu stronach**
+  (ta sama geometria dla L i P). Transformacja liczona z `w.hub`, `w.y`,
+  `w.forward`, `w.right` **przeniesionych do przestrzeni auta** (`q⁻¹`), obrót
+  z `w.omega`, skali z `w.rEff / w.rGeo` (miękkie lądowanie = zgnieciona opona).
+  Brud na oponach: `instanceColor` (mnożnik per koło) — nadal 1 draw call.
+- **Livery w kodzie:** jedna mapa 128×128 (`CanvasTexture`, `NearestFilter`,
+  mipmaps off, `SRGBColorSpace`), rysowana **raz przy starcie** per `car.id`:
+  A `#c0181f`/biały nr **7**, B granat/żółty nr **3**, C zielony/kremowy nr **12**,
+  D żółty/granatowy nr **5**; panele drzwi, pas na linii barkowej, pasy dachowe,
+  bloczki „sponsorskie" (`KORVETT / SZUTER / RALLY`), zaciemniony nos i tył oraz
+  **okrąg startowy: biały okrąg + czarna cyfra**. Mapowanie jest triplanarne
+  (bok → u,v; góra → u,v z Z; przód → v,z), zapeklowane per wierzchołek, więc
+  ten sam numer czyta się na drzwiach i na dachu. Atrybuty geometrii:
+  `aLivUv` (vec2), `aLiv` (float, 0 = szyba/zderzak/twarda plastika, 1 = lakier).
+- **Uszkodzenia jako fizyczne części** (`applyDamage`, tylko przy zmianie stanu,
+  zero zapisów per klatka): `frontHits 1..2` = zderzak przedni przekrzywiony
+  (obrót ~0.1 rad + przesunięcie) i przyciemniony; `frontHits >= 3` = zderzak
+  **usunięty** (region zwinięty do punktu = trójkąty zdegenerowane); `lights[0] == 0`
+  = lampa martwa (emissive 0.05, kolor ×0.2), a przy ≥3 uderzeniach obie bryły
+  lamp **znikają**; `severityPct` steruje uniformly `uDamage` = pikselowe pęknięcia
+  paneli w shaderze. Żadnych pasków procentów na aucie. Zgnieciona geometria ma
+  zachowane kopie originalne (`regions[].pos/.col`), więc `service()` przywraca kształt.
+- **Światła nocą:** panele lamp mają atrybut `aLamp` (1 przód, 2 tył) →
+  `totalEmissiveRadiance` (bez dodatkowych draw calli); tylne zapalają się mocniej
+  przy hamowaniu (`car.input.brake`). Dla `settings.tod > 0.78 lub < 0.22`
+  (`renderer.setTimeOfDay` wystawia teraz `settings.tod`) auto dostaje **2
+  `SpotLight`** (bez cieni) — na nocnym zrzucie widać dwa stożki na drodze.
+- **Brud §10.2 dalej czytelny:** warstwa brudu (16 paneli: albedo, roughness,
+  smugi, spray z `dirt-map.js`) jest nietknięta; zmieniło się tylko *sposób
+  przypisania* — indeks panelu nadaje teraz `car-body.js` per bryła/sciana
+  (`hood`, `roof`, `screenF`, `screenR`, `flankL/R`, `sillL/R`, `archFL/FR/RL/RR`,
+  `front`, `rear`, `under`, `wing`), zamiast nearest-box `classifyPanel`, więc
+  profile trafiły tam, gdzie powinny. `src/dirt/` nietknięte.
+
+**Pomiar** (`renderer.info` w trybie zrzutu, seed 471304713, MED):
+draw calls **223 → 216** (auto: 5 obiekty → 2: body + 1 InstancedMesh; budżet
+twardy 220 jest spełniony, wcześniej był przekroczony przez auto+kawałki terenu),
+trójkąty **40 186 → 42 758** (budżet 1.4 M). Tekstury auta: livery 128×128 RGBA,
+`panelTex` 16×1, `panelCol` 16×1, `sprayTex` 512×512 — wszystko budowane raz.
+
+**Zrzuty:** `shots/car_chase.png` (widać bryłę, koła, nadkola, spoiler, okrąg na
+dachu; tył jest zakryty płytą błota po 66 s szutru — to brud symulacji, nie lakier),
+`shots/car_close.png` (orbita 9 m: carczytelny czerwono-biały livery, felgi z
+ramionami, tinted tires, cień kontaktowy pod karoserią), `shots/car_night.png`
+(tod 0.93: dwie plamy świateł na drodze, czerwone światła tylne).
+
+**Co nadal wygląda źle:** (1) z bliska karoseria jest wciąż *za bardzo pudełkowa*
+— maska i pokład są płaskie, brak progu między błotnikiem a drzwiami; (2) livery
+triplanarne ciąnie pasy także tam, gdzie nie powinny (przód/tył dostają pasy
+dachu); (3) numery i napisy czytają się tylko z bliska (128×128, nearest);
+(4) lusterka to dwa chipy na ramionach, szyby bez odbicia środowiska (brak
+envmapy — §10.2 postuluje „szyby z odbiciem"); (5) tarcze hamulcowe świecą
+czerwienią dopiero gdy sim wystawi temperature opony — `tyre.js` jej nie ma,
+więc na razie są stalowe; (6) zapadniecie rogu przy zbitej suspensji pokazuje
+się tylko przez koło (fizyka obniza hub), karoseria jako jedna bryła nie wisie.

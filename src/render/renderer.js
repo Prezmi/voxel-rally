@@ -277,6 +277,10 @@ float fbm1(vec2 p) { return vnoise(p); }
   /** Time of day 0..1 (0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night). */
   setTimeOfDay(t) {
     this.tod = Math.max(0, Math.min(1, t));
+    // render/carMesh.js decides at build time whether the headlights get real
+    // beams: the stage's tod is the only source it needs, and it is set before
+    // the car is built (docs/06 §2 order of boot).
+    settings.tod = this.tod;
     lightingFor(this.biome, this.tod, this.rig);
     this.applyRig();
   }
