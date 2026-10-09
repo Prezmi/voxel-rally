@@ -256,9 +256,38 @@ export function buildRoad({ seed, lengthTarget = 3400, terrainHeightAt, biome = 
   const road = {
     seed, biome, control, n, length: s[n - 1],
     x, z, s, tx, tz, nx, nz, heading, kappa, grade, h, camber, width, surfaceId, feature,
+    climate: stageClimate(seed, biome),
   };
   buildIndex(road);
   return road;
+}
+
+/**
+ * Time of day + weather as a PROPERTY OF THE STAGE (PLAN §10.2: "Pora dnia i pogoda to
+ * cechy odcinka (funkcja CMR 2.0), nie ustawienie gracza"). Drawn from a dedicated
+ * seed fork, so it is deterministic (PLAN §8 #7) and cannot shift any road geometry
+ * the ghost / pace notes were built on. Mostly bright day, sometimes overcast, rarely
+ * dusk or rain - and the lighting rig, sky, fog and road wetness follow it.
+ */
+export const WEATHER = { CLEAR: 0, OVERCAST: 1, DUSK: 2, RAIN: 3 };
+export const WEATHER_NAMES = ['CLEAR', 'OVERCAST', 'DUSK', 'RAIN'];
+export function stageClimate(seed, biome = 'FOREST') {
+  const rng = new Rng((seed ^ 0x9e3779b9) >>> 0);
+  const roll = rng.next();
+  let weather = WEATHER.CLEAR;
+  if (roll > 0.965) weather = WEATHER.RAIN;
+  else if (roll > 0.90) weather = WEATHER.DUSK;
+  else if (roll > 0.68) weather = WEATHER.OVERCAST;
+  // Time of day: bright morning-to-golden window is the default band (CMR stages are
+  // daylight); dusk weather pushes it late, overcast keeps it high but flat.
+  let tod;
+  if (weather === WEATHER.DUSK) tod = 0.80 + rng.next() * 0.07;
+  else if (weather === WEATHER.OVERCAST) tod = 0.42 + rng.next() * 0.22;
+  else if (weather === WEATHER.RAIN) tod = 0.46 + rng.next() * 0.30;
+  else tod = 0.34 + rng.next() * 0.36;
+  const wet = weather === WEATHER.RAIN ? 0.55 + rng.next() * 0.25
+    : weather === WEATHER.OVERCAST ? 0.12 : 0.0;
+  return { tod, weather, weatherName: WEATHER_NAMES[weather], wet, haze: rng.range(0.85, 1.15) };
 }
 
 export const MIN_DRIVE_RADIUS = 9;   // m: no cusp tighter than this on a generated stage

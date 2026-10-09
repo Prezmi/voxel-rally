@@ -6,8 +6,25 @@ import { CHUNK, chunkKey } from './chunk.js';
 import { SURF } from './surfaces.js';
 import { SHOULDER } from './road-carve.js';
 
-export const PROP = { OAK: 0, PINE: 1, DEAD: 2, SPECTATOR: 3, POST: 4, GATE: 5, MARSHAL: 6 };
-export const PROP_NAMES = ['oak', 'pine', 'dead', 'spectator', 'post', 'gate', 'marshal'];
+export const PROP = { OAK: 0, PINE: 1, DEAD: 2, SPECTATOR: 3, POST: 4, GATE: 5, MARSHAL: 6,
+  BIRCH: 7, BUSH: 8, FERN: 9 };
+export const PROP_NAMES = ['oak', 'pine', 'dead', 'spectator', 'post', 'gate', 'marshal', 'birch', 'bush', 'fern'];
+
+// Vegetation species that are drawn as crossed alpha quads (sprite billboards),
+// which is how CMR 2.0 drew its trees (PLAN §10.2: "drzewa to sprite'y, nie
+// polygony"). Everything else stays a voxel prop.
+export const SPRITE_PROPS = [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.BUSH, PROP.FERN];
+export const SPRITE_SPEC = {
+  [PROP.OAK]: { w: 5.6, h: 7.2, planes: 3 },
+  [PROP.PINE]: { w: 4.6, h: 9.4, planes: 3 },
+  [PROP.BIRCH]: { w: 4.4, h: 7.8, planes: 3 },
+  [PROP.BUSH]: { w: 2.3, h: 1.7, planes: 2 },
+  [PROP.FERN]: { w: 1.8, h: 1.3, planes: 2 },
+};
+const SPR = { OAK: 0, PINE: 1, BIRCH: 2, BUSH: 3, FERN: 4 };
+const TEX_PX = 32;                       // 32x32, nearest neighbour (true pixel art)
+const BUSH_SALT = 0x2c9f7a11;
+const FERN_SALT = 0x61b34d0f;
 
 const TREE_SALT = 0x7a1c9f23;
 const CLUSTER_SALT = 0x5d17ae29;      // grove field: trees come in patches, not a lattice
@@ -111,7 +128,216 @@ export function generateChunkProps(cx, cz, stage) {
     }
   }
 
+  // ---- road-edge sprites: bracken and bushes right at the verge ----
+  // PLAN §10.2: the verge must be busy so the road edge reads. These never enter
+  // the corridor: they start past carriageway + shoulder + 1.2 m and props carry
+  // no collision at all, so physics is untouched.
+  if (samples) {
+    for (let k = 0; k < samples.length; k++) {
+      const i = samples[k];
+      if (out.length >= TREE_CAP + 40) break;
+      const hsh = hash01(i, 9, BUSH_SALT ^ seed);
+      if (hsh > 0.62) continue;
+      const side = hash01(i, 10, BUSH_SALT ^ seed) < 0.5 ? 1 : -1;
+      const along = hash01(i, 11, BUSH_SALT ^ seed) * 2.2 - 1.1;
+      const off = road.width[i] / 2 + SHOULDER + 1.2 + hash01(i, 12, BUSH_SALT ^ seed) * 3.4;
+      const px = road.x[i] + road.nx[i] * off * side + road.tx[i] * along;
+      const pz = road.z[i] + road.nz[i] * off * side + road.tz[i] * along;
+      if (Math.floor(px / CHUNK) !== cx || Math.floor(pz / CHUNK) !== cz) continue;
+      const gy = stage.world ? stage.world.columnTopAt(Math.floor(px), Math.floor(pz)) : -1;
+      const kind = hash01(i, 13, FERN_SALT ^ seed) < 0.55 ? PROP.FERN : PROP.BUSH;
+      out.push({
+        prop: kind, x: px, y: gy >= 0 ? gy : terrain.heightAt(px, pz), z: pz,
+        yaw: hash01(i, 14, BUSH_SALT ^ (seed + 5)) * Math.PI,
+        scale: 0.8 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.5,
+        variant: Math.floor(hash01(i, 16, BUSH_SALT ^ (seed + 17)) * 3),
+      });
+    }
+  }
+
   return out;
+}
+
+/**
+ * Procedural foliage textures, painted once at boot into small canvases and read
+ * with NearestFilter (PLAN §10.2 "tekstura 16x16 lub 32x32 generowana proceduralnie
+ * w kodzie (zero assetów)"). No file, no fetch, no per-frame work: the five
+ * canvases are shared by every instance of the species.
+ */
+export function buildFoliageTextures(THREE) {
+  if (typeof document === 'undefined') return null;      // headless: no canvas
+  const out = [];
+  for (const kind of [SPR.OAK, SPR.PINE, SPR.BIRCH, SPR.BUSH, SPR.FERN]) {
+    const cv = document.createElement('canvas');
+    cv.width = TEX_PX; cv.height = TEX_PX;
+    cv.style.imageRendering = 'pixelated';
+    const ctx = cv.getContext('2d');
+    const img = ctx.createImageData(TEX_PX, TEX_PX);
+    paintFoliage(kind, img.data);
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    out.push(tex);
+  }
+  return out;
+}
+
+/* deterministic tiny hash so the painted foliage is stable between runs */
+function ph(x, y, s) {
+  let h = (x * 374761393 + y * 668265263 + s * 2246822519) | 0;
+  h = (h ^ (h >> 13)) * 1274126177 | 0;
+  h = (h ^ (h >> 16)) >>> 0;
+  return h / 4294967296;
+}
+
+function px(data, x, y, r, g, b, a) {
+  if (x < 0 || y < 0 || x >= TEX_PX || y >= TEX_PX) return;
+  const k = (y * TEX_PX + x) * 4;
+  data[k] = r; data[k + 1] = g; data[k + 2] = b; data[k + 3] = a;
+}
+
+function paintFoliage(kind, data) {
+  data.fill(0);
+  const leaf = (x, y, base, spread, s) => {
+    // Three tones per sprite: lit tips, mid mass, shaded underside, plus a hard
+    // silhouette jitter so the edge is ragged rather than a cut-out ellipse.
+    const n = ph(x, y, s);
+    const t = n < 0.22 ? 1.18 : n < 0.72 ? 1.0 : 0.78;
+    const warm = n < 0.12 ? 10 : 0;
+    px(data, x, y, Math.min(255, base[0] * t + warm), Math.min(255, base[1] * t), Math.min(255, base[2] * t * 0.96), 255);
+    if (spread && n > 0.86) px(data, x + 1, y, base[0] * 0.7, base[1] * 0.7, base[2] * 0.7, 255);
+  };
+  const trunk = (x, y, w, c, s) => {
+    for (let dx = -w; dx <= w; dx++) {
+      const n = ph(x + dx, y, s);
+      if (n < 0.10) continue;                        // bark splits
+      const t = 0.72 + 0.5 * ph(x + dx, y >> 2, s + 7);
+      px(data, x + dx, y, c[0] * t, c[1] * t, c[2] * t, 255);
+    }
+  };
+
+  if (kind === SPR.PINE || kind === SPR.BIRCH) {
+    const spruce = kind === SPR.PINE;
+    const base = spruce ? [44, 78, 48] : [120, 158, 74];
+    const bark = spruce ? [74, 52, 34] : [206, 198, 176];
+    for (let y = 0; y < TEX_PX; y++) {
+      const u = y / (TEX_PX - 1);                   // 0 top .. 1 bottom
+      if (spruce) {
+        // conical stack with jagged tiers
+        const half = spruce ? 1.5 + 12.5 * Math.pow(u, 1.35) : 4 + 8 * Math.sin(Math.min(1, u * 1.15) * Math.PI * 0.85);
+        const tier = 1 + (y % 4 === 0 ? 1 : 0);
+        const jag = ph(y * 3, y, 31) > 0.72 ? tier : 0;
+        for (let x = 16 - Math.floor(half) - jag; x <= 16 + Math.floor(half); x++) {
+          if (ph(x, y, 17) > 0.14) leaf(x, y, base, true, 5);
+        }
+        if (u > 0.62) trunk(16, y, spruce ? 1 : 2, bark, 23);
+      } else {
+        // birch: rounded pale crown, pale banded trunk
+        const dy = u - 0.55;
+        const half = 12 * Math.sqrt(Math.max(0, 1 - dy * dy * 3.4));
+        for (let x = 16 - Math.floor(half); x <= 16 + Math.floor(half); x++) {
+          if (ph(x, y, 13) > 0.10) leaf(x, y, base, true, 9);
+        }
+        if (u > 0.58) {
+          trunk(16, y, 2, bark, 29);
+          if (y % 5 === 2) for (let x = 14; x <= 18; x++) if (ph(x, y, 41) > 0.45) px(data, x, y, 96, 88, 74, 255);
+        }
+      }
+    }
+    return;
+  }
+
+  if (kind === SPR.OAK) {
+    const base = [78, 118, 52];
+    // rounded mass: three overlapping lobes so the crown has no flat side
+    const lobes = [[16, 12, 11], [10, 16, 8], [22, 17, 8]];
+    for (const [cx0, cy0, r] of lobes) {
+      for (let y = cy0 - r; y <= cy0 + r; y++) {
+        const dy = (y - cy0) / r;
+        const half = r * Math.sqrt(Math.max(0, 1 - dy * dy));
+        for (let x = cx0 - half; x <= cx0 + half; x++) {
+          if (ph(x, y, 3) > 0.12) leaf(x, y, base, true, 11);
+        }
+      }
+    }
+    for (let y = 21; y < TEX_PX; y++) trunk(16, y, y > 26 ? 3 : 2, [96, 66, 40], 19);
+    return;
+  }
+
+  if (kind === SPR.BUSH) {
+    const base = [70, 104, 46];
+    for (let y = 12; y < TEX_PX; y++) {
+      const dy = (y - 25) / 13;
+      const half = 14 * Math.sqrt(Math.max(0, 1 - dy * dy * 1.9));
+      for (let x = 16 - half; x <= 16 + half; x++) if (ph(x, y, 7) > 0.16) leaf(x, y, base, true, 15);
+    }
+    for (let y = 26; y < TEX_PX; y++) trunk(16, y, 1, [70, 56, 36], 21);
+    return;
+  }
+
+  // FERN / BRACKEN: fronds radiating from the base, drawn as stepped strokes.
+  const base = [64, 96, 40];
+  for (let f = 0; f < 7; f++) {
+    const lean = (f - 3) * 2.6;
+    const len = 12 + Math.floor(ph(f, 1, 33) * 8);
+    for (let s = 0; s < len; s++) {
+      const x = Math.round(16 + lean * (s / len));
+      const y = TEX_PX - 2 - s;
+      px(data, x, y, base[0], base[1], base[2], 255);
+      if (s > 2) { px(data, x - 1, y - 1, base[0] * 1.2, base[1] * 1.2, base[2], 255); px(data, x + 1, y - 1, base[0] * 0.8, base[1] * 0.85, base[2], 255); }
+    }
+  }
+}
+
+/**
+ * Crossed-plane sprite geometry (NOT camera facing: fixed intersecting planes, so a
+ * stand of trees does not swim when the camera swings, and the silhouette changes
+ * as you drive past - exactly the CMR 2.0 look). Built once per species.
+ */
+export function buildSpriteGeometries(THREE) {
+  const geos = {};
+  for (const prop of SPRITE_PROPS) {
+    const sp = SPRITE_SPEC[prop];
+    const pos = [], uv = [], nrm = [], idx = [];
+    for (let p = 0; p < sp.planes; p++) {
+      const a = (p * Math.PI) / sp.planes;
+      const dx = Math.cos(a) * sp.w * 0.5, dz = Math.sin(a) * sp.w * 0.5;
+      const nx = Math.sin(a), nz = -Math.cos(a);
+      const base = pos.length / 4;
+      // bottom-left, bottom-right, top-right, top-left
+      pos.push(-dx, 0, -dz, dx, 0, dz, dx, sp.h, dz, -dx, sp.h, -dz);
+      uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+      for (let k = 0; k < 4; k++) nrm.push(nx, 0, nz);
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    g.setIndex(idx);
+    g.computeBoundingSphere();
+    geos[prop] = g;
+  }
+  return geos;
+}
+
+/** One Lambert material per species: Lambert so the sprites darken in shade instead
+ *  of glowing, alphaTest instead of transparency (no sorting artifacts, and the
+ *  shadow depth pass respects alphaTest so the shadow is the leaf, not the quad). */
+export function buildSpriteMaterials(THREE, textures) {
+  if (!textures) return null;
+  const mats = {};
+  for (const prop of SPRITE_PROPS) {
+    const tex = textures[SPRITE_PROPS.indexOf(prop)];
+    mats[prop] = new THREE.MeshLambertMaterial({
+      map: tex, alphaTest: 0.5, side: THREE.DoubleSide, vertexColors: false,
+    });
+  }
+  return mats;
 }
 
 function pickSpecies(t, biome) {
@@ -122,7 +348,7 @@ function pickSpecies(t, biome) {
     case 'SWAMP': return t < 0.55 ? PROP.DEAD : PROP.OAK;
     case 'CANYON': return t < 0.7 ? PROP.DEAD : PROP.PINE;
     case 'PLATEAU': return t < 0.6 ? PROP.OAK : PROP.DEAD;
-    default: return t < 0.5 ? PROP.OAK : (t < 0.85 ? PROP.PINE : PROP.DEAD);
+    default: return t < 0.42 ? PROP.OAK : (t < 0.72 ? PROP.PINE : (t < 0.88 ? PROP.BIRCH : PROP.DEAD));
   }
 }
 
@@ -141,26 +367,19 @@ export function buildTreeGeometries(GeoBuilder, THREE) {
   // crown, then a canopy whose lobes interlock through the trunk top so the mass has
   // no daylight gaps. Greens are blue-poor (the blue hemisphere was turning the old
   // 0x3f6b30 canopies teal); trunks are red-brown and differ per species.
+  // Oak and pine are drawn as crossed alpha sprites now (PLAN §10.2 "vegetation as
+  // sprite billboards"); the voxel canopy boxes are gone. What remains voxel is the
+  // trunk, painted into the sprite and backed by a short voxel stub so the base of
+  // a tree still meets the ground like a solid object (see buildSpriteGeometries).
   const oak = new GeoBuilder();
-  oak.box(0, 2.15, 0, 0.28, 2.15, 0.28, 0x5c4127);            // trunk 0 .. 4.3
-  oak.box(0, 4.05, 0, 0.34, 0.9, 0.34, 0x463320);            // flare into the crown
-  oak.box(0, 4.75, 0, 1.6, 1.25, 1.55, 0x2f5a24);
-  oak.box(1.1, 3.95, 0.45, 0.95, 0.85, 0.9, 0x36612a);
-  oak.box(-0.9, 5.35, -0.6, 0.95, 0.8, 0.9, 0x28501f);
-  oak.box(-0.3, 6.05, 0.5, 0.75, 0.6, 0.75, 0x3a6630);
-  oak.box(0.45, 5.1, -0.75, 0.8, 0.7, 0.7, 0x2c5524);
+  oak.box(0, 0.55, 0, 0.30, 0.55, 0.30, 0x5c4127);
   geos[PROP.OAK] = oak.toGeometry(THREE);
 
   // Pine / spruce tone family: darker, blue-green needles, conical stack where every
   // tier overlaps the one below, trunk visible between tiers and running up into the
   // top of the crown.
   const pine = new GeoBuilder();
-  pine.box(0, 3.0, 0, 0.22, 3.0, 0.22, 0x3d2c19);             // trunk 0 .. 6.0
-  pine.box(0, 2.55, 0, 1.05, 0.75, 1.05, 0x22421f);
-  pine.box(0, 3.55, 0, 1.45, 0.95, 1.45, 0x1f3d1f);
-  pine.box(0, 4.7, 0, 1.12, 0.9, 1.12, 0x27492a);
-  pine.box(0, 5.8, 0, 0.8, 0.85, 0.8, 0x214122);
-  pine.box(0, 6.85, 0, 0.45, 0.65, 0.45, 0x2c5230);
+  pine.box(0, 0.6, 0, 0.24, 0.6, 0.24, 0x3d2c19);
   geos[PROP.PINE] = pine.toGeometry(THREE);
 
   // Dead / birch-family snag: pale warm bark with darker bands, a few limbs that
@@ -184,10 +403,16 @@ export function buildTreeGeometries(GeoBuilder, THREE) {
   // ~ (186,183,186) and, standing every 8 m along the verge, it read as the pale
   // plates / dashes of the reference frame (measured: that grey is the single most
   // common colour in the lower half of the frame, ~10k px).
+  // Corner marker: a 1.6 m timber post with a real flag panel on the outside of the
+  // corner (PLAN §10.2 "stolpki z flagami po zewnetrznej - znak zakretu, nie plakietka
+  // HUD-u"). Red/white panel, angled to the line of sight of the approaching car,
+  // big enough (0.62 x 0.42 m) to read from a hundred metres.
   const post = new GeoBuilder();
-  post.box(0, 0.7, 0, 0.12, 0.7, 0.12, 0x534838);
-  post.box(0, 1.45, 0, 0.26, 0.18, 0.05, 0xa43226);
-  post.box(0, 1.15, 0.02, 0.10, 0.06, 0.04, 0x8f2b21);
+  post.box(0, 0.8, 0, 0.12, 0.8, 0.12, 0x4b4030);
+  post.box(0, 0.14, 0, 0.30, 0.14, 0.30, 0x2b3339);
+  post.box(0.22, 1.36, 0, 0.31, 0.21, 0.04, 0xb23a2b);
+  post.box(0.22, 1.36, 0.045, 0.31, 0.10, 0.012, 0xd9d2c4);
+  post.box(-0.16, 1.05, 0, 0.14, 0.10, 0.03, 0xb23a2b);
   geos[PROP.POST] = post.toGeometry(THREE);
 
   const marshal = new GeoBuilder();

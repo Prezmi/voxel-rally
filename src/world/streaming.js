@@ -6,12 +6,13 @@ import { CHUNK, chunkKey, keyToCx, keyToCz } from './chunk.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
 import { carveChunk } from './road-carve.js';
 import { GeoBuilder } from '../render/primitives.js';
-import { generateChunkProps, buildTreeGeometries, buildGateGeometry, PROP, PROP_NAMES } from './props.js';
+import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES } from './props.js';
 import { settings } from '../core/settings.js';
 
 const CAPACITY = {
   [PROP.OAK]: 1400, [PROP.PINE]: 1400, [PROP.DEAD]: 700,
-  [PROP.SPECTATOR]: 1000, [PROP.POST]: 700, [PROP.MARSHAL]: 40, [PROP.GATE]: 24,
+  [PROP.SPECTATOR]: 1000, [PROP.POST]: 900, [PROP.MARSHAL]: 40, [PROP.GATE]: 24,
+  [PROP.BIRCH]: 900, [PROP.BUSH]: 1400, [PROP.FERN]: 1600,
 };
 
 export class Streaming {
@@ -23,9 +24,16 @@ export class Streaming {
     this.propMeshes = new Map();
     this.propGeos = buildTreeGeometries(GeoBuilder, THREE);
     this.propGeos[PROP.GATE] = buildGateGeometry(GeoBuilder, THREE);
+    // Vegetation is a sprite: crossed alpha quads with a procedurally painted foliage
+    // texture (PLAN §10.2), one InstancedMesh + one Lambert material per species.
+    this.spriteGeos = buildSpriteGeometries(THREE);
+    this.spriteMats = buildSpriteMaterials(THREE, buildFoliageTextures(THREE));
 
-    for (const p of [PROP.OAK, PROP.PINE, PROP.DEAD, PROP.SPECTATOR, PROP.POST, PROP.MARSHAL, PROP.GATE]) {
-      const im = new THREE.InstancedMesh(this.propGeos[p], renderer.propMaterial, CAPACITY[p]);
+    for (const p of [PROP.OAK, PROP.PINE, PROP.DEAD, PROP.SPECTATOR, PROP.POST, PROP.MARSHAL, PROP.GATE,
+      PROP.BIRCH, PROP.BUSH, PROP.FERN]) {
+      const sprite = this.spriteMats && this.spriteMats[p];
+      const im = new THREE.InstancedMesh(sprite ? this.spriteGeos[p] : this.propGeos[p],
+        sprite || renderer.propMaterial, CAPACITY[p]);
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       im.castShadow = true;
       im.receiveShadow = true;

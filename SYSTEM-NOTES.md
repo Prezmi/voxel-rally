@@ -377,3 +377,128 @@ ruszane — `BANK` zostaje 9.5 (jego poszerzenie psuje `tools/stagetest.mjs`).
 Koszt renderu: draw calls i trojkaty bez zmian (ta sama siatka); w trybie shot
 licznik `renderer.info` jest zawodny — dwukrotne rasterowanie scian wewnętrznych
 terenu widac dopiero w HUD profilerze (zywa petla).
+
+## 19. HUD: obiekty Colina McRae przerysowane na Minecraft (PLAN.md §10.1)
+
+**Co jest skórowane, nie zmieniane:** obiektami i układem dalej rządza Colin McRae
+(§10); zmienił się wyłącznie język wizualny — zamiast deski rozdzielczy „sim dashboard”
+mowa wizualna Minecrafta. Notatki wciąż pochodzą z `src/game/pace-notes.js`, referencja
+z `src/game/ghost.js`, zegar z `src/game/timing.js`, sector/checkpointy ze `src/game/stage.js`,
+uszkodzenia z `src/car/damage.js` — żadnego drugiego systemu notatek nie dorobiono.
+
+**Mapa obiektów (CMR → co rysujemy):**
+
+| CMR (instrukcja) | ten HUD |
+|---|---|
+| co-driver signs | drewniane tablice (oak-sign): blokowa strzałka zakrętu (kink / normalny / ostry / hairpin / podwójny, L i R), cyfra ostrości, polskie słowo (`LEWY`, `OSTRO LEWY`, `NIE SKRACAJ`, `SKOK`, `GARB`, `HANT`…), dystans w metrach w wyrzeźbionej płytce; wejście i wyjście skokowo (2 klatki „pop”, zero easingu i alpha) |
+| revs | hotbar: 10 slotów zapełnianych od lewej, zielone → pomarańczowe → czerwone przy limicie |
+| gear / gear change / max throttle | osobny slot z biegiem + przepełniony segment `MAX GAZ` na końcu hotbara |
+| speed | blokowa tarcza (ząb co 10 km/h, luk czerwonej strefy z czerwonych bloków, wskazówka ze stosu kwadratów, flash strefy jako naprzemienne bloki red/white) + duże pikselowe cyfry km/h |
+| water / oil / turbo | 3 sloty z blokowym wypełnieniem — stany, które ta gra naprawdę symuluje: `SILNIK`, `PRZÓD`, `TYŁ` |
+| damage jako ułamane części | 4 sloty na róg (z `damage.susp`), wypełnienie = zdrowie, wzór pęknięć, gdy < 94 % |
+| stage progress + znacznik auta | locator bar: tabliczki-checkpointy na pasku, blokowy znacznik auta, podświetlony aktualny sektor |
+| czas + split + limit | mały panel z kamienia, lewy górny róg: `CZAS`, `SPLIT` (ujemny = zielony), `LIMIT` |
+| (PLAN §8 #2) stan koła | rząd 4 slotów: zielony = czepne, pomarańczowy = uślizg, czerwony = blokada, niebieski = powietrze |
+
+**Zasady vanilla GUI, których się trzymamy:** paleta `#C6C6C6` (panel) / `#8B8B8B` (slot) /
+1 px kontur `#1E1E1E` / bevel 3 px: near-white u góry i po lewej, `#555555` na dole i po prawej
+(światło z lewej góry), wnętrze slotu recessed (bevel odwrócony); akcenty wyłącznie stanowe:
+zieleń, czerwień, ciepłe drewno tablic (+ pomarańcz/błękit dla stanów koła, §8 #2 wymaga
+różnych stanów). Zero gradientów, zero blur, zero zaokrągleń, zero półprzezroczystych paneli,
+zero CSS `filter`, zero fontu systemowego.
+
+**True pixel art:** `src/game/pixel-font.js` — glify pisane w źródle jako siatki bitowe
+5×7 na komórce 8×8 (ascent 7), arkusz sprite'ów budowany raz per kolor, rysowany
+`drawImage` po współrzędnych całkowitych z `imageSmoothingEnabled = false`. Obsłużone
+ą ć ę ł ń ó ś ź ż (plus górne), cyfry i `+ - . : / ° ' , ! ? % ( ) > < = # * ·`;
+małe litery są składane do wielkich. HUD rysuje się do **jednego** canvasa: bufor
+logiczny = viewport / całkowity `uiScale` (1–4, Minecraft GUI scale), `image-rendering:
+pixelated`; panel odrysowuje się tylko gdy zmieni się jego klucz wartości, DOM nie jest
+tworzony w pętli klatek (jedyny DOM: canvas, 4 placefocusu menu modala, probe `#rly-safe`
+do `env(safe-area-inset-*)`). Modals (countdown / META / DNF) mają pixelowy panel z kamienia
+i odwrócony blok focusu; keyboard i gamepadfocus chodzi po nich dalej (`Tab`, strzałki, ENTER/A).
+
+**Koszt HUD (tools/stagetest.mjs C1/C2, 600 wywołania `update`):**
+`0.0015 ms/frame` (budżet ≤ 0.3) i `1166 B/frame` sterty (budżet ≤ 2048) — rzędu dwóch
+tysięcznych milisekundy, czyli wciąż taniej niż poprzedni HUD (0.0027 ms).
+**Gates po zmianie:** `node src/debug/tests.js` 9/9 ✓ · `node tools/smoke.mjs` `end v 23.3  nan false` ✓ ·
+`node tools/stagetest.mjs` ALL PASS ✓ · `node tools/pacenote-test.mjs` ALL PASS ✓.
+Zrzuty: `shots/mc_full.png`, `shots/mc_min.png`, `shots/mc_finish.png`.
+
+**Czego jeszcze nie ma (świadomie):** tablica notatki jako obiekt 3D przy drodze (§10.1
+„obiekt w 3D, nie plakietka”), licznik czasu sektorów w wariantcie MINIMAL, oraz
+sygnał dźwiękowy przejścia przez bramę. Placki na drodze w tych kadrach to znana,
+osobna usterka meshera (§18) — nie byla ruszana i nie urosla.
+
+## 20. Świat wg §10.2: sprite'y roślinności, koleiny zamiast placków, jasne światło, pogoda odcinka
+
+**Czego żąda §10.2:** roślinność jako sprite'y (krzyżujące się płaszczyzny z alfą,
+tekstura 16/32 px generowana w kodzie), droga z **ciemniejszym ubitym śladem kół**,
+jaśniejszym poboczem i wyraźną krawędzią, słupki z flagami po zewnętrznej zakrętów,
+światło jasne i wysokie (nasycone niebo, ciepły klucz, krótka mgła), oraz `tod`
+i pogoda jako **cechy odcinka**.
+
+**Co teraz robi kod:**
+- `src/world/props.js` — rośliny to **skrzyżowane płaszczyzny z alfą** (3 płaszczyzny
+  dla drzew, 2 dla krzewu/paproci), **nie** zwracane do kamery. Tekstury 32×32
+  malowane proceduralnie w kodzie (`buildFoliageTextures` → canvas + `CanvasTexture`,
+  `NearestFilter`, bez mipmapów, `image-rendering: pixelated`): świerk/sośna o
+  stożkowej sylwetce, dąb z tiga klap, **brzoza z blady, paskowany pień**, krzew,
+  paproć/bracken. Pięć gatunków = pięć tekstur zbudowanych **raz przy starcie**,
+  jedna `MeshLambertMaterial` + `alphaTest 0.5` + `DoubleSide` na gatunek (Lambert,
+  więc sprite'y ciemnieją w cieniu, nie świecą; `alphaTest` zamiast transparentu =
+  brak artefaktów sortowania, a cień liczony po alfa). Wokselowe pudła-korony usunięte.
+  Nowe typy `BIRCH`, `BUSH`, `FERN`; krzewy/paprocie stoją od `pas + SHOULDER + 1.2 m`
+  (props nie mają kolizji → fizyka bez zmian). `POST` = 1.6 m tyk ze **flagą 0.62×0.42 m**
+  (czerwona z białym pasem) po zewnętrznej zakrętu, co 8 m przy |kappa| >= 0.035.
+- `src/world/road-carve.js` — pole `wear` znaczeniowane jako **ton** (0 = najciemniejszy
+  ubity ślad koła, 255 = najbielszy). Dwie koleiny przy ±55 % półszerokości, ciemny
+  szew w osi, jaśniejszy pas pobocza (205..157), ogon na skarpie <= 26 i znika w 1/3
+  BANKU (trawa nie dostaje już jasnych płyt). Stara rampa (70..220, środek drogi
+  *jaśniejszy* niż pobocze) była dokładnie tym, co zrzuty czytały jako „placki”.
+- `src/world/mesher.js` — łączenie paneli liczy się teraz też z **skwantowanego wiadra
+  `wear` (>>5)**, więc pas koleiny jest osobnym panelem (koleiny są ciągłe, nie łatką);
+  waga `pw` 0.16 → 0.60.
+- `src/render/renderer.js` — dla nawierzchni drogowych `mix(0.70, 1.06, wear)` +
+  krzyżowy splot w pasie + tylko górna część pasma dostaje podbicie krawędzi;
+  naturalny grunt zachowuje wąską rampę 0.88..1.04. Na asfalcie koleina obniża
+  chropowatość (słaby połysk, nie odbicie). Dodany uniform `uWet` (mokrość odcinka).
+- `src/render/lighting.js` — STOPY jaśniej: noon key 2.75→3.20 / amb 1.30→1.52 /
+  fog 0.50→0.36, golden hour 3.05→3.55 / 1.26→1.52 / fog 0.78→0.46, ekspozycje w gore,
+  `fillIntensity` 0.92 + 0.95·sin(elev).
+- `applyRig`: sun ×1.34, hemi ×1.42, fill ×1.38, saturacja nieba (oderwanie od szarości),
+  **mgła krótka**: `near = max(120, far·(0.70−0.12·haze)/hazeBias)`, `far = far·(1.05+0.30·haze)`.
+- `src/world/road-spline.js` — `stageClimate(seed, biome)`: `tod`, pogoda
+  (CLEAR/OVERCAST/DUSK/RAIN), `wet`, `haze` z **osobnego forku seedu** (geometria drogi,
+  a więc ghost i notatki, nie drgną); wieszane jako `road.climate`, konsumowane przez
+  `renderer.setTimeOfDay` (nadpisalny tylko przez `?tod=`) i nowe `renderer.setClimate`.
+
+**Pomiar (seed 471304713, 1280×720, SwiftShader):**
+
+| kadr | mean | bright% | dark% | px min>190 |
+|---|---|---|---|---|
+| `shots/cmr_before.png` (tod 0.70, sprzed) | 106.8 | 69.3 | 10.9 | 10774 |
+| `shots/cmr_straight.png` (tod odcinka 0.47) | 121.7 | 94.5 | 3.3 | 13281 |
+| `shots/cmr_tod70.png` (A/B tym samym tod) | 110.0 | 90.2 | 4.6 | 13239 |
+| `shots/cmr_corner.png` (brama + zakret) | 127.0 | 88.0 | 9.3 | 15337 |
+
+Cele §10.2 (mean >= 85, bright >= 70) przekroczone bez zgniatania cieni (dark 3-9 %,
+poprzednio 10.9 %). `renderer.info`: **84 draw calls / 28 242 tris** (budzet ≤180 / 1.4 M),
+10 `InstancedMesh` propsów, 5 tekstur 32×32 zbudowanych raz. `tools/plates.mjs`:
+**18** quasi-bialych quadów meshera (14 szuter, 3 pobocze, 1 kamien) — wcześniej
+tysiace paneli; licznika „przed” na HEAD nie odłączam, bo HEAD juz nie jest aktualny.
+Licznik near-white **pikseli** urósł — to jaśniejsze, nasycone niebo (którego §10.2
+wymaga), nie placki: metryka musi byc zaweza do pasma sceny bez nieba.
+
+**Gates:** `src/debug/tests.js` 9/9 · `smoke.mjs` `end v 23.3 nan false` ·
+`stagetest.mjs` ALL PASS · `pacenote-test.mjs` ALL PASS · `node --check` na wszystkich
+osiem plikach.
+
+**Czego nadal brakuje do referencji:** sprite'y bez mipmapów migaja w dali; pień jest
+omalowany w sprite'ie, a nie wokselowy (stub geometii jest, ale nie instancjonowany → instancjowany);
+na zakrecie droga czyta sie za bardzo „błoto” — pasma kolein sa za szerokie w stosunku
+do pasa jaśniejszego pobocza, które wciąż wygląda jak płyty; tarasowanie krawedzi
+(kwantyzacja carvu) rwie ciągłość koleiny; nie ma jeszcze `sunshaft`/grade pod nowa
+ekspozycje; pogoda odcinka nie jest pokazana w HUD; `DirtMap` nie karmi koleiny
+swiata (jego kurz idzie tylko do shaderu auta) — warstwa placków okazala sie **pasem
+`wear` carvu + mappingiem w shaderze**, nie `dirt-map.js`.

@@ -153,6 +153,38 @@ Gramy w Rajdu Świata, nie w „Minecraft na kółkach”. Referencja, do które
 - **Pasek postępu odcinka** z zaznaczonymi checkpointami i znacznikiem auta (to element HUD-u CMR), obok mały, dyskretny zegar i split (wartość ujemna = jedziemy szybciej od referencji). Zakaz dużych liczb w środku kadru.
 - **Strzałki pilota**: symbol zakrętu (lewy/prawy, ostrość 1–6, hairpin, crest/jump, `DON'T CUT`) z malejącą liczbą metrów — niższa liczba = wolniejszy zakręt, `6` ≈ pełny gaz.
 - **Gęstość HUD-u jak w CMR**: pełny / minimalny / wyłączony (gracz wybiera, nie my).
+
+### 10.1 Język wizualny HUD-u: **przepisany na Minecraft**
+
+Zasada: **obiekty i układ HUD-u bierzemy z Colina McRae, ich skórę rysujemy w mowie wizualnej Minecrafta**. Zakaz "deski rozdzielczej symulatora": żadnego połysku, żadnych gradientów, żadnych półprzezroczystych paneli "glass".
+
+- **Czcionka pikselowa, generowana w kodzie** (siatka 5x7 na glif, canvas/CSS) — żadnych plików fontów. Liczby (czas, split, prędkość, dystans) w tej samej czcionce co tekst.
+- **Tabliczki z drewna zamiast plakietek**: notatki pilota to przybite tablice (jak `oak sign`) z blokową strzałką zakrętu i podpisem `LEWY 60 m`, `PRAWY 130 m`, `OSTRO LEWY`, `WĄSKI`, `SKOK`, `NIE SKRACAJ`; tablica wchodzi i wychodzi skokowo (klatka po klatce, bez easingu), z gwoździami/darkim konturem.
+- **Prędkościomierz blokowy**: tarcza zbudowana z segmentów-bloków (skala co 10 km/h jako zęby), blokowa wskazówka, czerwona strefa jako rząd czerwonych bloków; obok duży pikselowy numery prędkości i slot z biegiem.
+- **Paski stanu jako sloty** (hotbar / pasek XP / serduszka): uszkodzenia zawieszenia i silnika jako rząd slotów, pękane wypełnienie zamiast wykresu; obrót/bieg jako osobne sloty.
+- **Czas i split jako pikselowy wyświetlacz** w ramce z kamienia: `CZAS`, `SPLIT` (ujemny = szybciej od referencji, kolor zielony), `LIMIT`; zakaz dużych liczb w środku kadra.
+- **Pasek postępu odcinka** z checkpointami jako blokami-tabliczkami przy krawędzi i blokowym znacznikiem auta.
+- **Obiekt w 3D, nie plakietka**: checkpoint to brama przy drodze, notatka może być tablicą stojącą przy drodze w kadrze (poza HUD-em) dla najazdów.
+
+### 10.2 Księga wyglądu: **Colin McRae Rally 2.0 (2000) → wokselowy Minecraft**
+
+Referencja wizualna to **CMR 2.0**, nie nowsze rajdówki. Z instrukcji i recenzji wynikają konkretne, budowalne reguły:
+
+**Kadr.** Kamera pogoni trochę wyżej i dalej niż dziś: droga zajmuje dolne ~55-60% kadru, horyzont na ~40% wysokości, widoczny pas nieba, auto w dolnej tercji z czytelnym cieniem. Widok ma mówić "najazd na zakręt", nie "symulator za zderzakiem".
+
+**Droga.** Dominuje ton ziemi (szuter/ziemia), szeroka, z **ciemniejszym ubitym śladem kół**, jaśniejszym poboczem i wyraźną krawędzią; przy zakrętach słupki z flagami po zewnętrznej (znak zakrętu, nie plakietka HUD-u). Brud na drodze to **koleiny**, nie jasne łaty.
+
+**Roślinność jako sprite'y** (recenzje: "drzewa to sprite'y, nie polygony"): krzyżujące się płaszczyzny z alfą, tekstura 16×16 lub 32×32 generowana proceduralnie w kodzie (zero assetów). To czyta się bliżej CMR i jest tanie niż wokselowe pudełka; wokselowe pnie zostają jako podstawa.
+
+**Kraj = paleta.** Finlania: błoto i szuter, ciemne świerki, blade niebo; Francja: jasne trawiaste wzgórza; Szwecja: śnieg i zmarznięte jezioro; Kenia: czerwony kurz i akacj; Grecja: ochra, oliwki, kamienne mury. Nasza pionowa pionka to "leśny szuter" w charakterze Finlandii.
+
+**Pora dnia i pogoda to cechy odcinka** (funkcja CMR 2.0), nie ustawienie gracza: każdy odcinek ma `tod` i pogodę, z dopasowaną mgłą, niebem i mokrością drogi.
+
+**Światło jasne, wysokie.** CMR 2.0 chwalono za "jaśniejszą paletę": mocno nasycone niebo, ciepły klucz, twarde cienie, teren jasny. Nasza płaska szarość z nadmiernej mgły jest błędem wobec referencji.
+
+**Auto z numerem i barwami zespołu.** Czytelne barwy, okrąg z numerem startowym, pasy, widoczne nadkola i koła, uszczerbki pokazane jako **uszkodzone/brakujące elementy** (CMR: zbita lampa = jeden element mniej), nie jako pasek procentów.
+
+**Układ HUD-u wg instrukcji CMR 2.0 (§13-§14):** prędkościomierz/obrotomierz/bieg **dolny prawy róg**; czas i pozycja **górny prawy** z **paskiem sektorów, zielonym gdy zyskujemy i czerwonym gdy tracimy**; notatki pilota **u góry środka**; uszkodzenia i stany (woda/olej/turbo) **dolny lewy róg**. W naszym wydaniu: te same miejsca, drewniano-kamienne tablice i czcionka pikselowa (§10.1).
 - **Droga czytelna w każdym świetle** — pobocze, koleiny, krawędzie, kamienie i trawa przy asfalcie; kontrast nawierzchni wyższy niż w fizyce.
 - **Auto pokazane z szacunkiem dla kształtu** — nadwozie z objętością i zaokrągleniami, szyby z odbiciem środowiska, felgi i opony jako osobne bryły, światła (przednie świecą nocą), cień kontaktowy pod autem, brud na panelach czytelny z bliska i z daleka.
 

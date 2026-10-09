@@ -165,19 +165,31 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
     }
     if (!isFinite(target)) continue;
     if (blockId === 0) blockId = BLOCK.DIRT;
-    // Render-only wear field for the mesher (no effect on height/physics):
-    //  - wheel-line ruts: two bands at ~55 % half-width, the darkest, most worked strips
-    //  - the road edge / shoulder lip: a worn, brighter strip so the carriageway reads
-    //  - the bank: fades to zero, so natural ground keeps its own tone.
+    // Render-only wear field for the mesher (no effect on height/physics).
+    // Semantics are *tone*, not damage: 0 = the darkest, most compacted strip,
+    // 255 = the palest. PLAN §10.2 "Brud na drodze to koleiny, nie jasne łaty":
+    // the wheel-line ruts are the DARK bands of the carriageway, the shoulder is a
+    // slightly paler band, the road/grass edge is one narrow bright line, and the
+    // bank decays to zero so natural ground (and grass) never gets a pale plate.
+    // The old ramp put the wheel lines at the TOP of the range (70..220 with the
+    // centre brighter than the verge), which is exactly the flat pale band the
+    // screenshots read as "plates".
     let wear = 0;
     if (absD <= hw) {
-      const wl = Math.exp(-Math.pow((absD - hw * 0.55) / (hw * 0.22), 2));
-      const mid = Math.exp(-Math.pow(absD / (hw * 0.5), 2));
-      wear = 70 + 150 * wl - 40 * mid;
+      // Two compacted wheel lines at ~55 % half-width, drawn continuous along the
+      // whole carriageway, plus a dark centre seam (crown of the road stays paler).
+      const wl = Math.exp(-Math.pow((absD - hw * 0.55) / (hw * 0.20), 2))
+        + Math.exp(-Math.pow((absD + hw * 0.55) / (hw * 0.20), 2));
+      const mid = Math.exp(-Math.pow(absD / (hw * 0.45), 2));
+      wear = 150 - 120 * wl + 22 * mid;
     } else if (absD <= hw + SHOULDER) {
-      wear = 190 - 60 * ((absD - hw) / SHOULDER);
+      // Shoulder: paler loose material + a crisp edge line right at hw.
+      const e = (absD - hw) / SHOULDER;
+      wear = 205 - 48 * e;
     } else {
-      wear = Math.max(0, 120 * (1 - (absD - hw - SHOULDER) / BANK) - 60);
+      // Verge/bank: only a trace, gone within a third of the blend so grass keeps
+      // its own tone (this tail used to brighten grass for several metres).
+      wear = Math.max(0, 26 * (1 - (absD - hw - SHOULDER) / (BANK * 0.34)));
     }
     wear = wear < 0 ? 0 : wear > 255 ? 255 : wear | 0;
     if (chunk.wear[c] < wear) chunk.wear[c] = wear;

@@ -58,6 +58,9 @@ export class Renderer {
 
     this.skyColor = new THREE.Color(0x8fb4cc);
     this.fogColor = new THREE.Color(0x9db4c4);
+    this.wet = 0;
+    this.hazeBias = 1;
+    this.overcast = 0;
     this.biomeSky = new THREE.Color(0x8fb4cc);
     this.biomeFog = new THREE.Color(0x9db4c4);
     this.scene.background = this.skyColor;
@@ -78,6 +81,7 @@ export class Renderer {
     this._up = new THREE.Vector3();
     this._center = new THREE.Vector3();
     this._shadowSpan = 46;
+    this._satCol = new THREE.Color();
     this.setBiome({ sky: 0x8fb4cc, fog: 0x9db4c4 }, 'FOREST');
     this.setQuality(settings.quality);
   }
@@ -101,6 +105,7 @@ export class Renderer {
     m.onBeforeCompile = (shader) => {
       shader.uniforms.uTintA = { value: ta };
       shader.uniforms.uTintB = { value: tb };
+      shader.uniforms.uWet = { value: 0 };      // stage weather wetness (PLAN §10.2)
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nattribute float aSurface;\nvarying float vSurface;\nvarying vec3 vWPos;\nvarying vec3 vWNormal;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = aSurface;\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWNormal = (modelMatrix * vec4(objectNormal, 0.0)).xyz;');
@@ -111,6 +116,7 @@ varying vec3 vWPos;
 varying vec3 vWNormal;
 uniform vec3 uTintA[11];
 uniform vec3 uTintB[11];
+uniform float uWet;
 
 // Integer hash -> [0,1): cheaper than the sin-hash it replaces, and it is a pure
 // function of world position, so a panel gets the same tone from any chunk or LOD.
@@ -191,8 +197,22 @@ float fbm1(vec2 p) { return vnoise(p); }
   // any crevice stays darker (the crevice part is the baked AO in diffuseColor).
   // Narrow range: the old 0.80 -> 1.17 ramp, multiplied by the baked AO of the same
   // quad, made a 1 m wall read as a pale plate floating over a dark band.
-  diffuseColor.rgb *= mix(0.87, 1.05, wear);
-  diffuseColor.rgb += vec3(0.008, 0.006, 0.003) * wear;
+  // Edge weathering + the CMR road skin (PLAN §10.2 "Droga"): the corridor tone comes
+  // from the carve wear band, where LOW = compacted wheel-line rut (darker than the
+  // surface) and HIGH = pale shoulder / edge line. Natural ground keeps the narrow,
+  // gentle ramp so a wall lip never turns into a pale plate floating over a dark band.
+  float roadish = (sidx == 1 || sidx == 2 || sidx == 3 || sidx == 8 || sidx == 10) ? 1.0 : 0.0;
+  float natural = mix(0.88, 1.04, wear);
+  // Ruts: down to 0.62 of the surface tone, feathered by the fbm fields above so the
+  // band reads as worked ground rather than a decal.
+  float rutT = wear;
+  float band = mix(0.70, 1.06, rutT);
+  // A faint cross-band grain inside the carriageway so a rut is not a dead flat strip.
+  band *= 0.94 + 0.12 * fbm1(vec2(wp.x * 1.9 + wp.y * 0.35, wp.y * 1.9));
+  diffuseColor.rgb *= mix(natural, band, roadish);
+  diffuseColor.rgb += vec3(0.010, 0.008, 0.004) * wear * (1.0 - roadish);
+  // The bright edge line against grass: only the very top of the band gets the lift.
+  diffuseColor.rgb += vec3(0.020, 0.019, 0.016) * roadish * smoothstep(0.82, 1.0, wear);
 }
 `)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
@@ -200,7 +220,11 @@ float fbm1(vec2 p) { return vnoise(p); }
   float sid = floor(vSurface + 0.001);
   int sidx = int(sid + 0.5);
   float r = 0.95;
-  if (sidx == 1) r = 0.50;               // asphalt
+  if (sidx == 1) {
+    r = 0.50;                            // asphalt
+    // Worn wheel lines on asphalt are compacted: a faint sheen, not a reflection.
+    r *= mix(0.55, 1.0, smoothstep(0.10, 0.40, fract(vSurface)));
+  }
   else if (sidx == 2) r = 0.98;         // gravel
   else if (sidx == 3) r = 1.0;          // mud
   else if (sidx == 4) r = 0.76;         // snow
@@ -214,11 +238,15 @@ float fbm1(vec2 p) { return vnoise(p); }
   // never has (PLAN §10). Worn edges are polished slightly.
   float wob = 0.92 + 0.16 * fbm1(vWPos.xz * 0.85 + 5.0);
   roughnessFactor = min(1.0, roughnessFactor * r * wob * mix(1.0, 0.88, fract(vSurface)));
+  // Wet stage (rain): the carriageway loses roughness, the verge does not.
+  int siw = int(floor(vSurface + 0.001) + 0.5);
+  float roadishw = (siw == 1 || siw == 2 || siw == 3 || siw == 10) ? 1.0 : 0.0;
+  roughnessFactor = clamp(roughnessFactor * (1.0 - 0.55 * uWet * roadishw), 0.05, 1.0);
 }
 `);
       m.userData.shader = shader;
     };
-    m.customProgramCacheKey = () => 'vr-terrain-f8';
+    m.customProgramCacheKey = () => 'vr-terrain-f9';
     this.terrainMaterial = m;
 
     this.propMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -229,6 +257,20 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.biome = biomeName || this.biome;
     this.biomeSky.set(info.sky);
     this.biomeFog.set(info.fog);
+    this.applyRig();
+  }
+
+  /**
+   * Stage climate from the generator (road.climate, PLAN §10.2): wetness darkens and
+   * glosses the carriageway, overcast flattens the key, haze lengthens the fog. Same
+   * material graph, different numbers (PLAN §10 "noc i deszcz nie moga byc osobnym kodem").
+   */
+  setClimate(cl) {
+    this.wet = cl && cl.wet ? cl.wet : 0;
+    this.hazeBias = cl && cl.haze ? cl.haze : 1;
+    this.overcast = cl && cl.weather === 1 ? 1 : 0;
+    const sh = this.terrainMaterial.userData && this.terrainMaterial.userData.shader;
+    if (sh && sh.uniforms.uWet) sh.uniforms.uWet.value = this.wet;
     this.applyRig();
   }
 
@@ -243,28 +285,35 @@ float fbm1(vec2 p) { return vnoise(p); }
     const rig = this.rig;
     lightingFor(this.biome, this.tod, rig);
 
+    const oc = this.overcast || 0;
     this.sun.color.copy(rig.sunColor);
-    this.sun.intensity = rig.keyIntensity * 1.18;
+    this.sun.intensity = rig.keyIntensity * 1.34 * (1 - 0.52 * oc);
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
-    this.hemi.intensity = rig.ambIntensity * 1.16;
+    this.hemi.intensity = rig.ambIntensity * 1.42 * (1 + 0.22 * oc);
     this.fill.color.copy(rig.fillColor);
-    this.fill.intensity = rig.fillIntensity * 1.25;
+    this.fill.intensity = rig.fillIntensity * 1.38 * (1 + 0.30 * oc);
 
     // Biome-matched haze, but *directional*: the sky keeps a warm key-lit cast and the
     // fog stays a tint rather than a grey sheet, so mid-distance terrain still reads as
     // gravel and grass (PLAN §10 criterion 1/4: read the road and the nearest checkpoint
     // in under a second; distant ground may wash out, the racing line may not).
-    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.20).lerp(rig.sunColor, 0.30 * rig.warmth);
-    this.skyColor.copy(this.biomeSky).lerp(rig.hemiSky, 0.38).lerp(rig.sunColor, 0.30 * rig.warmth);
+    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.14).lerp(rig.sunColor, 0.34 * rig.warmth);
+    this.skyColor.copy(this.biomeSky).lerp(rig.hemiSky, 0.30).lerp(rig.sunColor, 0.34 * rig.warmth);
+    // Saturated sky (PLAN §10.2 "mocno nasycone niebo"): push the blue away from grey
+    // instead of letting the haze wash the whole frame to one value.
+    const skyL = 0.2126 * this.skyColor.r + 0.7152 * this.skyColor.g + 0.0722 * this.skyColor.b;
+    this._satCol.setRGB(skyL * 0.55, skyL * 0.85, Math.min(1, skyL * 1.5));
+    this.skyColor.lerp(this._satCol, 0.45);
     this.skyColor.r = Math.min(1, this.skyColor.r * rig.saturation);
     this.skyColor.g = Math.min(1, this.skyColor.g * rig.saturation);
+    this.skyColor.b = Math.min(1, this.skyColor.b * rig.saturation);
     this.scene.fog.color.copy(this.fogColor);
     const far = settings.drawDistance;
-    // near = ~half the draw distance: fog starts beyond the corner you must read,
-    // and only the outer silhouette ring is hazed.
-    this.scene.fog.near = Math.max(95, far * (0.52 - 0.08 * rig.hazeMul));
-    this.scene.fog.far = far * (1.15 + 0.35 * rig.hazeMul);
+    // Fog is short by design (PLAN §10.2 "teren jasny, tylko horyzont mglisty"):
+    // mid-distance terrain must stay crisp, only the outer silhouette ring hazes.
+    this.scene.fog.near = Math.max(120, far * (0.70 - 0.12 * rig.hazeMul) / this.hazeBias);
+    this.scene.fog.far = far * (1.05 + 0.30 * rig.hazeMul);
 
     // Built-in ACES only when the composite is off: with post on, the scene lands
     // in a linear render target and the composite grades it (docs/04 §6).
@@ -277,6 +326,9 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.post.compositeMat.uniforms.uWarm.value = 0.35 + 0.65 * rig.warmth;
     this.post.compositeMat.uniforms.uBloom.value = 0.35 + 0.35 * rig.warmth;
     this.post.shafts = settings.quality !== QUALITY.LOW;
+    // Late shader compile: the wetness uniform only exists once the program is built.
+    const shT = this.terrainMaterial.userData && this.terrainMaterial.userData.shader;
+    if (shT && shT.uniforms.uWet) shT.uniforms.uWet.value = this.wet;
   }
 
   setQuality(q) {

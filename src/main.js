@@ -74,6 +74,7 @@ function params() {
   else if (postFlag === '1') settings.post = true;
   return {
     seed, biome: BIOME_INFO[biome] ? biome : 'FOREST', carId, lengthTarget: len,
+    hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
     surfaceKey, frames, rain, cam, ref, tod, stats,
   };
@@ -113,7 +114,11 @@ async function main() {
   const canvas = document.getElementById('c');
   const renderer = new Renderer(canvas);
   renderer.setBiome(BIOME_INFO[cfg.biome], cfg.biome);
-  renderer.setTimeOfDay(cfg.tod);
+  // Pora dnia i pogoda to feature of the stage (PLAN §10.2); ?tod= only overrides it
+  // for art-direction shots.
+  const climate = stage.road.climate || { tod: cfg.tod, wet: 0, haze: 1, weather: 0 };
+  renderer.setTimeOfDay(cfg.hasTod ? cfg.tod : climate.tod);
+  renderer.setClimate(climate);
   renderer.setQuality(settings.quality);
   if (cfg.cam) settings.cameraMode = cfg.cam;
 

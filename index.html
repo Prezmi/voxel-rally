@@ -30,178 +30,35 @@
   #hud-tr { top: 10px; right: 10px; text-align: right; }
   #hud-bl { bottom: 10px; left: 10px; }
   #hud-br { bottom: 10px; right: 10px; text-align: right; }
-  /* Rally HUD — Colin McRae Rally layout (PLAN.md §10, SYSTEM-NOTES §14).
-     Anchors + vmin + safe areas, one accent colour + neutrals (DiRT-style restraint),
-     no monospace text walls, nothing in the middle of the frame.
-     .agents/skills/game-ui-ux #1-#3: corner anchors, viewport-relative units. */
+  /* Rally HUD — Colin McRae Rally OBJECTS drawn in Minecraft's VISUAL LANGUAGE
+     (PLAN.md §10 + §10.1). The whole HUD is one canvas drawn with integer coordinates
+     and nearest-neighbour scaling: no gradients, no blur, no rounded corners, no alpha
+     panels, no CSS filter, no system font. Layout stays anchor-based (corners), the
+     canvas is a whole-integer upscale of a logical GUI buffer and every panel honours
+     the safe area (skills/game-ui-ux #1-#3): the insets are read from #rly-safe. */
   #rally {
     position: fixed; inset: 0; pointer-events: none; z-index: 5;
-    font: clamp(11px, 1.25vmin, 22px)/1.25 system-ui, "Segoe UI", Inter, Arial, sans-serif;
-    color: #eef3f6; letter-spacing: .02em;
-    --accent: #ffce3a;         /* the one powerful colour */
-    --danger: #ff4f45;         /* reserved: redline, lock-up, time limit */
-    --plate: rgba(10,12,15,.62);
-    --line: rgba(255,255,255,.16);
-    --safe-t: env(safe-area-inset-top, 0px);
-    --safe-b: env(safe-area-inset-bottom, 0px);
-    --safe-l: env(safe-area-inset-left, 0px);
-    --safe-r: env(safe-area-inset-right, 0px);
-    --pad: 2vmin;
   }
-  #rally .panel { position: absolute; padding: .55em .8em; border-radius: .3em; background: var(--plate); border: 1px solid var(--line); }
-  #rally .rows { white-space: pre; }
-  /* tablice u góry ekranu: co-driver sign board, hard-capped at 10 vh (PLAN §10) */
-  #rally .rly-signs {
-    top: calc(var(--safe-t) + var(--pad)); left: calc(var(--safe-l) + var(--pad));
-    right: calc(var(--safe-r) + var(--pad));
-    max-height: 10vh; overflow: hidden; padding: 0; background: none; border: 0;
-    display: flex; flex-direction: column; gap: .35em;
-    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+  #rally .rly-canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    image-rendering: pixelated; image-rendering: crisp-edges;
   }
-  #rally .sign-meta {
-    align-self: flex-start; padding: .2em .55em; border-radius: .2em;
-    background: rgba(10,12,15,.55); border-left: .25em solid var(--accent);
-    font-size: .82em; letter-spacing: .12em; color: #cfdae2;
+  /* safe-area probe: the HUD reads its insets from this element's computed padding */
+  #rly-safe {
+    position: fixed; top: 0; left: 0; width: 0; height: 0; pointer-events: none;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+             env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   }
-  #rally .sign-row { display: flex; flex-direction: row; justify-content: center; gap: .7vmin; align-items: stretch; }
-  #rally .sign {
-    display: flex; flex-direction: row; align-items: center; gap: .45em;
-    min-width: 7.5vmin; padding: .3em .6em .3em .35em; border-radius: .25em;
-    background: var(--plate); border: 1px solid var(--line);
-    opacity: .34; transition: opacity .18s linear, transform .18s linear;
+  /* Screen-state stack (skill #5): the modal owns focus. Its text is pixel-drawn on the
+     canvas; these DOM rows are the keyboard/gamepad/mouse focus targets, laid over the
+     drawn rows, so the menu never needs a system font. */
+  #rally .rly-modal { position: absolute; inset: 0; display: none; pointer-events: none; }
+  #rally .rly-modal.open { display: block; pointer-events: auto; }
+  #rally .menu-item {
+    position: absolute; padding: 0; border: 0; background: none; outline: none;
+    font-size: 1px; line-height: 1px; color: transparent; cursor: pointer;
   }
-  #rally .sign svg.glyph { width: 2.6em; height: 2.6em; flex: 0 0 auto; }
-  #rally .sign svg.glyph .gpath { fill: none; stroke: var(--accent); stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
-  #rally .sign.dir-l svg.glyph { transform: scaleX(-1); }
-  #rally .sign .s-num {
-    font-size: 2.1em; font-weight: 800; line-height: 1; min-width: 1.1em; text-align: center;
-    font-variant-numeric: tabular-nums; color: #fff;
-  }
-  #rally .sign .s-col { display: flex; flex-direction: column; gap: .1em; }
-  #rally .sign .s-txt { font-size: .82em; font-weight: 700; letter-spacing: .1em; color: #cfdae2; white-space: nowrap; }
-  #rally .sign .s-dist { font-size: 1.05em; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); }
-  #rally .sign.idle { opacity: 0; }
-  #rally .sign.lead { opacity: 1; }
-  #rally .sign.hi { border-color: var(--danger); background: rgba(58,16,14,.7); }
-  #rally .sign.hi .s-num, #rally .sign.hi .s-dist { color: #ffd9d4; }
-  #rally .sign.now {
-    opacity: 1; background: var(--accent); color: #14171c; border-color: #fff;
-    box-shadow: 0 0 0 .12em rgba(255,206,58,.35);
-  }
-  #rally .sign.now .s-num, #rally .sign.now .s-dist { color: #14171c; }
-  #rally .sign.now .s-txt { color: #2c2f34; }
-  #rally .sign.now svg.glyph .gpath { stroke: #14171c; }
-  /* time cluster: small, top-left, one accent — no big numbers (PLAN §10) */
-  #rally .rly-time {
-    top: calc(var(--safe-t) + 12vh); left: calc(var(--safe-l) + var(--pad));
-    display: flex; flex-direction: column; gap: .12em; min-width: 22vmin;
-  }
-  #rally .t-total { font-size: 1.55em; font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; }
-  #rally .t-split { font-size: .95em; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .06em; }
-  #rally .t-split.ahead { color: var(--accent); }
-  #rally .t-split.behind { color: var(--danger); }
-  #rally .t-limit { font-size: .85em; color: #9fb0ba; font-variant-numeric: tabular-nums; }
-  #rally .t-limit.warn { color: var(--danger); }
-  /* stage progress bar: checkpoint markers + a car tick (CMR04 stage progress) */
-  #rally .rly-prog {
-    top: calc(var(--safe-t) + 21vh); left: calc(var(--safe-l) + var(--pad));
-    width: min(46vmin, 44vw); display: flex; flex-direction: column; gap: .35em;
-  }
-  #rally .p-label { font-size: .78em; letter-spacing: .16em; color: #cfdae2; white-space: pre; }
-  #rally .p-times { font-size: .74em; color: #9fb0ba; font-variant-numeric: tabular-nums; }
-  #rally .p-bar {
-    position: relative; height: .55em; border-radius: .25em;
-    background: rgba(255,255,255,.14); border: 1px solid var(--line);
-  }
-  #rally .p-active { position: absolute; top: -1px; bottom: -1px; background: rgba(255,206,58,.22); border-radius: .2em; }
-  #rally .p-cp {
-    position: absolute; top: 100%; transform: translateX(-50%);
-    font-size: .68em; color: #9fb0ba; letter-spacing: .08em; padding-top: .15em;
-  }
-  #rally .p-cp::before {
-    content: ""; position: absolute; left: 50%; top: -.55em; width: 2px; height: .75em;
-    background: #cfd8de; transform: translateX(-50%);
-  }
-  #rally .p-car {
-    position: absolute; top: 50%; width: 0; height: 0; transform: translate(-50%, -50%);
-    border-left: .55em solid var(--accent); border-top: .35em solid transparent; border-bottom: .35em solid transparent;
-    filter: drop-shadow(0 1px 2px rgba(0,0,0,.8));
-  }
-  /* speedometer cluster: bottom-right anchor (racing-game convention) */
-  #rally .rly-cluster {
-    bottom: calc(var(--safe-b) + var(--pad)); right: calc(var(--safe-r) + var(--pad));
-    display: flex; flex-direction: row; align-items: flex-end; gap: 1vmin;
-    background: none; border: 0; padding: 0;
-  }
-  #rally .tacho { position: relative; width: 21vmin; min-width: 128px; height: 21vmin; }
-  #rally .tacho svg.tface { width: 100%; height: 100%; display: block; overflow: visible; }
-  #rally .tface .tring { fill: rgba(10,12,15,.66); stroke: var(--line); stroke-width: 2; }
-  #rally .tface .tscale { fill: none; stroke: rgba(238,243,246,.55); stroke-width: 3; }
-  #rally .tface .tred { fill: none; stroke: var(--danger); stroke-width: 6; }
-  #rally .tface .tticks { fill: none; stroke: #cfd8de; stroke-width: 2; }
-  #rally .tface .tneedle { stroke: var(--accent); stroke-width: 4; stroke-linecap: round; fill: none; }
-  #rally .tface .thub { fill: #cfd8de; }
-  #rally .tacho .tcue {
-    position: absolute; left: 50%; bottom: 8%; transform: translateX(-50%);
-    font-size: .72em; font-weight: 800; letter-spacing: .22em; color: var(--danger);
-    opacity: 0; transition: opacity .12s linear;
-  }
-  #rally .tacho .tcue.on { opacity: 1; animation: rlycue .5s steps(2) infinite; }
-  @keyframes rlycue { 0% { opacity: 1; } 100% { opacity: .25; } }
-  #rally .speed { text-align: right; }
-  #rally .speed .v {
-    font-size: 4.1em; font-weight: 800; line-height: .9; font-variant-numeric: tabular-nums;
-    color: #fff; text-shadow: 0 2px 6px rgba(0,0,0,.85);
-  }
-  #rally .speed .u { font-size: .8em; letter-spacing: .3em; color: #9fb0ba; }
-  #rally .gear {
-    min-width: 4.2vmin; padding: .25em .5em; border-radius: .25em; text-align: center;
-    font-size: 2.1em; font-weight: 800; color: #9fb0ba;
-    background: var(--plate); border: 1px solid var(--line);
-  }
-  #rally .gear.on { color: var(--accent); border-color: rgba(255,206,58,.55); }
-  #rally .minis { display: flex; flex-direction: column; gap: .35em; min-width: 12vmin; }
-  #rally .mini .lab { font-size: .7em; letter-spacing: .14em; color: #9fb0ba; }
-  #rally .mini .bar { height: .4em; background: rgba(255,255,255,.12); border-radius: .2em; overflow: hidden; }
-  #rally .mini .fill { height: 100%; width: 100%; background: #cfd8de; }
-  #rally .mini.warn .fill { background: var(--accent); }
-  #rally .mini.bad .fill { background: var(--danger); }
-  /* four per-wheel segments, bottom-left (PLAN.md §8 #2) */
-  #rally .rly-wheels {
-    bottom: calc(var(--safe-b) + var(--pad)); left: calc(var(--safe-l) + var(--pad));
-    display: flex; flex-direction: row; gap: .5vmin; background: none; border: 0; padding: 0;
-  }
-  #rally .w {
-    width: 12vmin; min-width: 94px; padding: .3em .45em; border-radius: .25em;
-    background: var(--plate); border: 1px solid var(--line);
-    border-left: .3em solid #6fd08c;
-  }
-  #rally .w .lab { font-size: .66em; opacity: .7; letter-spacing: .12em; }
-  #rally .w .val { font-size: .72em; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #rally .w .bar { height: .35em; background: rgba(255,255,255,.12); border-radius: .2em; overflow: hidden; margin-top: .25em; }
-  #rally .w .fill { height: 100%; width: 0%; background: #cfd8de; }
-  #rally .w.warn { border-left-color: var(--accent); } #rally .w.warn .fill { background: var(--accent); }
-  #rally .w.bad { border-left-color: var(--danger); } #rally .w.bad .fill { background: var(--danger); }
-  #rally .w.drive { border-left-color: #7fb6ff; } #rally .w.drive .fill { background: #7fb6ff; }
-  #rally .w.air { border-left-color: #b9a7ff; } #rally .w.air .fill { background: #b9a7ff; }
-  /* density modes (CMR options: Game Displays Full / Minimal / Off) */
-  #rally.mode-minimal .rly-prog, #rally.mode-minimal .rly-wheels,
-  #rally.mode-minimal .minis, #rally.mode-minimal .t-limit { display: none; }
-  #rally.mode-minimal .sign:not(.lead) { display: none; }
-  #rally.mode-minimal .tacho { width: 16vmin; min-width: 104px; height: 16vmin; }
-  #rally.mode-minimal .speed .v { font-size: 3.2em; }
-  #rally.mode-off > * { display: none; }
-  #rally.mode-off .rly-modal.open { display: grid; }
-  /* modal screen stack: countdown / result. pointer-events only when open so the
-     menu is reachable by keyboard focus without blocking the game. */
-  #rally .rly-modal { inset: 0; display: none; place-items: center; pointer-events: none; }
-  #rally .rly-modal.open { display: grid; pointer-events: auto; }
-  #rally .modal-box { padding: 1.2em 1.6em; border-radius: .5em; background: rgba(8,10,12,.86); border: 1px solid rgba(255,255,255,.18); border-top: .25em solid var(--accent); min-width: 42vmin; }
-  #rally .modal-box .title { font-size: 1.8em; font-weight: 700; margin-bottom: .4em; letter-spacing: .04em; }
-  #rally .modal-box .rows { font-size: .95em; color: #cfdae2; font-variant-numeric: tabular-nums; }
-  #rally .menu-item { padding: .35em .6em; margin-top: .35em; border: 1px solid transparent; border-radius: .3em; outline: none; }
-  #rally .menu-item.focus { border-color: var(--accent); background: rgba(255,206,58,.14); color: #fff; }
-
+  #rally .menu-item.off { display: none; }
   #boot {
     position: fixed; inset: 0; display: grid; place-items: center;
     font: 14px/1.5 ui-monospace, monospace; color: #9fb0ba; background: #0b0d10;
@@ -227,6 +84,7 @@
   <div class="panel" id="hud-br"></div>
 </div>
 <div id="rally" class="rally mode-full"></div>
+<div id="rly-safe"></div>
 <div id="boot">VOXEL RALLY — generowanie odcinka…</div>
 <script type="module" src="./src/main.js"></script>
 </body>

@@ -131,6 +131,12 @@ export function meshChunk(world, chunk, lod = 0) {
   // ---------------- TOP FACES ----------------
   const visited = new Uint8Array(N * N);
   const wPanel = new Uint8Array(N * N);
+  // Panel merging must not swallow the wear bands: the wheel-line ruts are only
+  // readable if the rut strip is its own panel (PLAN §10.2 "continuous ruts along
+  // the driving line"). Quantised to 32 levels so noise in the field does not
+  // shatter the corridor into per-column panels.
+  const wearBkt = new Uint8Array(N * N);
+  for (let c = 0; c < N * N; c++) wearBkt[c] = wearG[c] >> 5;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const c0 = j * N + i;
@@ -140,13 +146,15 @@ export function meshChunk(world, chunk, lod = 0) {
       wPanel[c0] = wearG[c0];
       if (hq <= 0 || b === 0) continue;
 
+      const wb0 = wearBkt[c0];
       let w = 1;
-      while (i + w < N && !visited[c0 + w] && topQ[c0 + w] === hq && bid[c0 + w] === b) w++;
+      while (i + w < N && !visited[c0 + w] && topQ[c0 + w] === hq && bid[c0 + w] === b
+        && wearBkt[c0 + w] === wb0) w++;
       let hh = 1;
       outer: while (j + hh < N) {
         for (let k = 0; k < w; k++) {
           const c = (j + hh) * N + i + k;
-          if (visited[c] || topQ[c] !== hq || bid[c] !== b) break outer;
+          if (visited[c] || topQ[c] !== hq || bid[c] !== b || wearBkt[c] !== wb0) break outer;
         }
         hh++;
       }
@@ -195,7 +203,10 @@ export function meshChunk(world, chunk, lod = 0) {
         // material is a worn lip (brighter in the shader), an interior corner is
         // not. Crevice darkening is the AO term above.
         const drop = Math.max(0, hq - nh) / 8;
-        const wear = lod === 2 ? 0.5 : wearOf(0.12 + drop * 0.32 + (nb !== b ? 0.12 : 0) + pw * 0.16);
+        // pw dominates on the corridor: the carve wear band *is* the tone of the
+        // carriageway (rut dark, shoulder pale), the geometry terms only add the
+        // worn lip on top of it.
+        const wear = lod === 2 ? 0.5 : wearOf(0.10 + drop * 0.22 + (nb !== b ? 0.12 : 0) + pw * 0.60);
 
         // Surface-to-surface transition: a road panel sharing a corner with grass
         // pulls 1/3 of the grass colour, so the edge is a gradient, not a step.
