@@ -138,3 +138,122 @@ Draw calls, streamed mesh count and triangles are properties of `Streaming` + `R
 - **Not verified in this pass.** Actual audio output (no voice pack / no audio device in
   headless Chrome) and the click graph's sound — only its node count and queue timings are
   measurable headlessly.
+
+## 13. Headless shot recipe (corrected 2026-10-09)
+
+`--use-gl=angle --use-angle=swiftshader` alone no longer gives WebGL in headless Chrome: the driver
+logs `Automatic fallback to software WebGL has been deprecated` and the 3D viewport renders **black
+while the DOM HUD still draws**. The recipe now needs the opt-in:
+
+```
+google-chrome --headless=new --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader \
+  --enable-webgl --enable-logging=stderr --window-size=1280,720 \
+  --screenshot=shots/<name>.png "http://localhost:8123/index.html?frames=<substeps>&shot=1&stats=1"
+```
+
+Three failure modes that look like "the renderer is broken":
+- missing `--enable-unsafe-swiftshader` -> black viewport, no JS error;
+- an exception inside `FrameLoop.onFrame` escapes into the rAF callback and **kills the loop**, leaving
+  a black viewport with a live HUD. `main.js` now wraps the HUD updates in try/catch for that reason
+  (a debug overlay must never own game state);
+- `hud.js` read `stage.arc`, which does not exist (`main.js` owns the arc in `ctx.arc`). That throw is
+  what produced the two blank `shots/f5b_*.png` frames.
+
+## 14. HUD rajdowy w układzie Colin McRae Rally (PLAN.md §10)
+
+**Co faktycznie sprawdzono.** Zlecone przez orchestratora źródła (instrukcja CMR1 PS1 w
+gamesdatabase.org, CMR04 na Scribd, cheatbook.de, taliagual.com, kcimgdryannothard.wordpress.com)
+**nie były dostępne dla tego agenta** — brak narzędzia do pobierania treści
+(tylko odczyt plików lokalnych). Opis tych źródeł w zleceniu potraktowano jako dane wejściowe,
+a ich treść uzgodniono z lokalnym `docs/07` (F4: zegar, split, limit, uszkodzenia, 4 wskaźniki kół)
+i z `pace-notes.js`/`voice.js` (semantyka notatek: niższa liczba = wolniejszy zakręt, metry,
+UWAGA/DON'T CUT/garb). **Do zweryfikowania przez kogoś z dostępem do sieci** — jeśli któryś
+z punktów poniżej mija się z instrukcją, poprawiamy HUD, nie filozofię.
+
+**Co pokazują HUD-y CMR (wg opisu źródeł + własnego modelu rajdu):**
+- 1-gracz: czas bieżący, obroty, prędkość, bieg, **strzałka pilota**, postęp w odcinku, split i najlepszy split.
+- opcje **Game Displays: Full / Minimal / Off** oraz **Co-driver arrows On/Off** — gracz decyduje o gęstości.
+- CMR04 dopisuje: pasek postępu z **znacznikiem reprezentującym auto**, split liczony
+  w dół do noty pilota, **wartość ujemna = szybciej niż referencja**, małe wskaźniki water/oil/turbo.
+- notatki: `6` ≈ pełny gaz, `1` = ostrzeżenie/zakręt wolny, metry do zakrętu, Care/Crest/Jump/Don't cut.
+
+**Skopiowano 1:1:** pasek tablic u góry z rysowanym symbolem zakrętu + cyfrą 1..6 + licznikiem
+metrów; cluster prędkościomierza w prawym dolnym rogu (tarcza ze strefą czerwoną, wskazówka,
+duża cyfra km/h, okno biegu); pasek postępu odcinka z checkpointami i znaczkiem auta; mały zegar
+i split u góry po lewej (ujemny = przód, kolor); trzy tryby gęstości Full/Minimal/Off na jeden klawisz.
+
+**Zadaptowano (bo inna symulacja niż CMR):** zamiast water/oil/turbo pokazujemy to, co naprawdę
+symulujemy — **SILNIK** (`damage.enginePowerScale`), **ZAWIS PRZ / ZAWIS TYŁ** (średnia `damage.susp`
+na oś) — jako małe paski przy tarczy; tarcza ma skalę od `params.engine.redline` (czerwona strefa
+od 86 % skali, bo `redline` zawsze wypada w ostatnim dziesiątniku wyświetlanej skali) oraz pulsujący
+napis **SHIFT** przy 93 % skali (docs/05: audio-wizualny sygnał zmiany biegu); cztery wskaźniki kół
+zostały, ale jako małe segmenty kolorem (czepne/uślizg/blokada/powietrze), liczby tylko w FULL.
+Notatki **nie są drugą implementacją** — HUD czyta kolejność i priorytety z `pace-notes.js`,
+a karta „mówiona teraz" jest podświetlana przez `voice.currentText`. Znacznik severity → łuk strzałki
+jest liczony z krzywizny (`turnGlyph(150 - (sev-1)*22)`), hairpin dostaje własny łuk 200°.
+Znaki rysowane są ścieżkami SVG generowanymi z matematyki — zero plików, zero `fetch()`.
+
+**Architektura:** DOM budowany raz w konstruktorze (95 węzłów w teście), w klatce tylko
+mutowane cache'owane teksty / klasy / `style.left|width` / jeden `transform` wskazówki;
+atesty: tacho+zegar 30 Hz, koła 20 Hz, tablice 20 Hz, listy i pad 8 Hz. `settings.hudMode`
+(FULL|MINIMAL|OFF) + `settings.showCoDriverArrows` trzymają wybór; klawisz **N** cykluje
+peony → minimalny → wyłączony (`?hud=min|off` do zrzutów). Nakładka fizyki (`src/debug/hud.js`)
+jest teraz **domyślnie zamknięta** (`settings.showPhysicsHud`), ma własną etykietę „DEV · FIZYKA",
+kropkowaną ramkę, inny krój i `z-index` pod HUD-em gry — żeby zrzut HUD-u nie wyglądał jak teks-ciawka.
+
+**Koszt (tools/stagetest.mjs, stub DOM, 600 wywołań):** `0.0027 ms/frame` (budżet ≤ 0.3),
+`1488 B/frame` sterty (budżet ≤ 2048), 95 węzłów DOM, C1/C2/C3 PASS.
+
+**Niedokończone / do poprawy:**
+1. **Zrzuty pokazują czarny kadry 3D** —_recipe_ headless (`--use-gl=angle --use-angle=swiftshader(-webgl)`)
+   zwraca mean jasności 1.4–9.2 na 255 (stare zrzuty w `shots/` mają mean 154), więc ocenić można
+   tylko układ HUD-u, nie jego czytność na prawdziwym kadrze. Do naprawy w sesji z roboczym WebGL.
+2. Nie ma jeszcze **najlepszego splitu** osobno (CMR1 pokazuje „best split") — `timing.js` go nie liczy.
+3. Pasek postępu nie pokazuje **nazw checkpointów** (bram) ani ich koloru po przejechaniu;
+   znaczniki S1..S5 są liczbowe.
+4. `showCoDriverArrows` jest w settings, ale nie ma jeszcze klawisza/menu opcji (ekran opcji to inny task).
+5. Tryb OFF nie pokazuje licznika startu jako osobnego kadr (licznik jest modalem) — celowe, zgodne
+   z „OFF = tylko countdown i modal meta".
+
+## 15. Czarny kadr 3D w zrzutach — diagnoza i naprawa (sesja F5)
+
+**Przyczyna 1 (pomiarowa, dominująca):** `#boot` to pełnoekranowa, nieprzezroczysta
+nakładka (`position: fixed; inset: 0; background: #0b0d10`). W trybie zrzutu ścieżka
+statystyk wywoływała `hud.boot(<tekst render>)`, a `hud.boot(null)` był pomijany, gdy
+`?stats=1`. Reguła bramek zrzutów zawsze zawiera `stats=1`, więc każdy kadr był
+przykryty płytą `#0b0d10`/`--plate rgba(10,12,15,.62)`. HUD (`z-index 5`) świecił,
+kadry WebGL „były czarne”. Naprawa: `src/main.js` — na końcu trybu zrzutu bezwarunkowe
+`hud.boot(null)`; liczby renderu zostają na `window.__vrStats` (+ `renderer.info`).
+
+**Przyczyna 2 (prawdziwa, w pipeline F5):** `PostChain` composituje scenę do
+`rtScene` (RGBA16F) i dopiero blituje fullscreen quadem na domyślny bufor. Na
+ANGLE/SwiftShader scena do RT renderuje się poprawnie (odczyt `readPixels`: mean 0.31,
+max 0.48, lit 80 %, alpha 1), ale **żaden quad nie trafia na canvas** — nawet testowy
+passthrough/`constant`: canvas mean 0.0000, alpha 0.000, przy `calls 1`, FBO
+`FRAMEBUFFER_COMPLETE` i braku błędu GL/kompilacji. Ten sam quad do `rtA`/`rtB` rysuje
+siępoprawnie. Efekt: `?post=1` => czarny kadr, ścieżka bez composite => poprawny kadr.
+Gate: `settings.post = false` (domyślnie + presety MED/HIGH, `src/core/settings.js`),
+`?post=1` włącza composite świadomie. `renderer.applyRig/setQuality` dobiera wtedy
+`ACESFilmicToneMapping` + `toneMappingExposure` z riga (ścieżka wbudowana).
+
+**Kolejność flag:** `?post=0/1` w `params()` jest czytane PO `?q=` (preset nadpisywał
+`settings.post`), więc dawniejsze `?post=0` nie wyłączało composite przy `?q=MED|HIGH`.
+
+**Artefakt zrzutu przy MED/HIGH:** kadr MED/HIGH (cienie 1536–2048, ~250 draw calli na
+SwiftShader) jest liczony tak długo, że zrzut bez `--virtual-time-budget` trafia w
+wyczyszczony bufor. Z `--virtual-time-budget=25000` kadr jest pełny.
+
+**Jasność (PIL, pas 200..520000, mean/bright%/pas górnego nieba):**
+| kadr | przed | po |
+|---|---|---|
+| `frames=200` MED, `stats=1` | 13.1 / 1.6 % / — | 25.2 / 14.5 % / 41.6 (`g_med200_vtb`, vtb=25 s) |
+| `frames=8000` MED | 13.2 / 0.4 % | **121.1 / 88.4 % / 173.4** (`g_med8000_vtb`) |
+| `?q=high` | 13.2 / 0.4 % | 31.7 / 19.8 % / 54.9 (`g_high_vtb`) |
+| `?q=low` | 14.5 | **41.5 / 47.6 % / 58.8** (`g_low`, bez vtb) |
+| `?post=1` | 13.1 | 8.5 / 1.3 % (`g_post1`) — composite nadal wyłączone |
+Baseline: `shots/x_15000.png` 154, `shots/t_noon.png` 43.7.
+
+**Wyłączone świadomie:** composite F5 (bloom/grade/grain/sunshafts) — `PostChain`
+nienaprawiony w tym budżecie; działa tylko przy `?post=1` i tylko na sterowniku,
+który naprawdę blituje RT na canvas. Oświetlenie (rig, fog, biome sky), cienie, ACES i
+tonowanie działają w ścieżce bazowej.

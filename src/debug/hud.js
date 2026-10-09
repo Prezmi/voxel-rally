@@ -14,7 +14,8 @@ export class Hud {
     this.br = document.getElementById('hud-br');
     this._acc = 0;
     this._last = ['', '', '', ''];
-    this.enabled = true;
+    this.enabled = settings.showPhysicsHud;   // the DEV panel is opt-in (key H)
+    if (!this.enabled) { this.enabled = true; this.toggle(); }
   }
 
   toggle() {
@@ -77,7 +78,7 @@ export class Hud {
     this._set(3, [
       `W/S throttle·brake   A/D steer`,
       `SPACE handbrake   Q/E shift`,
-      `C camera ${settings.cameraMode}   H hud   N rally HUD   P pause   R restart`,
+      `C camera ${settings.cameraMode}   H ten panel (DEV)   N HUD gry: pełny/minimalny/wyłączony   P pauza   R restart`,
       `X mycie auta   V wycieraczka   B deszcz`,
       `F1/F2/F3 quality   T tests`,
       settings.assists.abs ? 'assists ON' : 'assists OFF',

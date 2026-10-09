@@ -149,6 +149,10 @@ Gramy w Rajdu Świata, nie w „Minecraft na kółkach”. Referencja, do które
 **Co przenosimy z referencji:**
 - **Checkpointy stoją przy drodze** — brama / dwa słupki z flagą przy krawędzi trasy, widoczne z daleka, oświetlone; nie abstrakcyjne punkty na mapie. Przejście przez bramę daje sygnał wizualny i dźwiękowy.
 - **Tablice u góry ekranu** — pas informacyjny nad kadrem: nazwa odcinka, sector, split do referencji, limit czasu, notatki pilota jako znaki (np. `5L → 4R`, `HANT`, `DON'T CUT`) wyświetlane jak drogowskazy, z czasowym oknem pojawienia. Ten pas jest *hierarchiczny*: najpierw to, czego gracz potrzebuje w zakręcie.
+- **Prędkościomierz jak w grze rajdowej** (nie listy tekstowe): dolny róg kadru — obrotomierz ze strefą czerwoną i wskazówką, duża cyfra prędkości w km/h, widoczny bieg (`N 1..6`), małe wskaźniki stanów (woda/olej/turbo w stylu CMR). Tarcza jest czytelna ruchem gałki, nie tekstem.
+- **Pasek postępu odcinka** z zaznaczonymi checkpointami i znacznikiem auta (to element HUD-u CMR), obok mały, dyskretny zegar i split (wartość ujemna = jedziemy szybciej od referencji). Zakaz dużych liczb w środku kadru.
+- **Strzałki pilota**: symbol zakrętu (lewy/prawy, ostrość 1–6, hairpin, crest/jump, `DON'T CUT`) z malejącą liczbą metrów — niższa liczba = wolniejszy zakręt, `6` ≈ pełny gaz.
+- **Gęstość HUD-u jak w CMR**: pełny / minimalny / wyłączony (gracz wybiera, nie my).
 - **Droga czytelna w każdym świetle** — pobocze, koleiny, krawędzie, kamienie i trawa przy asfalcie; kontrast nawierzchni wyższy niż w fizyce.
 - **Auto pokazane z szacunkiem dla kształtu** — nadwozie z objętością i zaokrągleniami, szyby z odbiciem środowiska, felgi i opony jako osobne bryły, światła (przednie świecą nocą), cień kontaktowy pod autem, brud na panelach czytelny z bliska i z daleka.
 

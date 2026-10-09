@@ -54,8 +54,14 @@ function params() {
   // ?tod=<0..1> time of day for the art-direction shots (PLAN §10 criterion 1/4):
   // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour.
   const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.70;
-  // ?post=0 turns the composite off (A/B shots for the pass-cost numbers).
-  if (q.get('post') === '0') settings.post = false;
+  // ?post=0|1 turns the composite off/on (A/B shots for the pass-cost numbers).
+  // Read *after* the quality preset below so the flag always wins.
+  const postFlag = q.get('post');
+  // ?hud=FULL|MIN|OFF: HUD density (CMR "Game Displays"), for shots and for testing.
+  const hudMode = (q.get('hud') || '').toUpperCase();
+  if (hudMode === 'MIN' || hudMode === 'MINIMAL') settings.hudMode = 'MINIMAL';
+  else if (hudMode === 'OFF') settings.hudMode = 'OFF';
+  else if (hudMode === 'FULL') settings.hudMode = 'FULL';
   // ?stats=1 keeps the render-cost read-out on screen (shot-mode harness).
   const stats = q.get('stats') === '1';
   // ?q=LOW|MED|HIGH picks the quality preset before the renderer is built, so the
@@ -64,6 +70,8 @@ function params() {
   if (qName === 'LOW') qualityPreset(QUALITY.LOW);
   else if (qName === 'MED') qualityPreset(QUALITY.MED);
   else if (qName === 'HIGH') qualityPreset(QUALITY.HIGH);
+  if (postFlag === '0') settings.post = false;
+  else if (postFlag === '1') settings.post = true;
   return {
     seed, biome: BIOME_INFO[biome] ? biome : 'FOREST', carId, lengthTarget: len,
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
@@ -228,7 +236,12 @@ async function main() {
     } else if (code === 'KeyH') hud.toggle();
     else if (code === 'KeyP' || code === 'Escape') loop.time.paused = !loop.time.paused;
     else if (code === 'KeyR') { restartRun(); }
-    else if (code === 'KeyN') rally.toggle();
+    else if (code === 'KeyN') {
+      // Gęstość HUD-u jak w opcjach CMR: pełny -> minimalny -> wyłączony (PLAN §10).
+      const m = rally.cycleMode();
+      hud.boot(`HUD: ${{ FULL: 'pełny', MINIMAL: 'minimalny', OFF: 'wyłączony' }[m]}`);
+      setTimeout(() => hud.boot(null), 1600);
+    }
     // M = pilot w/l (the co-driver channel, docs/05 §7).
     else if (code === 'KeyM') {
       voice.muted = !voice.muted;
@@ -351,7 +364,11 @@ async function main() {
     const rig = renderer.rig;
     hud.boot(`render ${m.mean.toFixed(2)} ms mean / ${m.p95.toFixed(2)} p95 | bez shaft ${m.noShaft.toFixed(2)} | bez post ${m.raw.toFixed(2)} | calls ${renderer.info.calls} | tris ${renderer.info.tris} | post ${postWas ? 'on' : 'off'} | tod ${cfg.tod.toFixed(2)} exp ${rig.exposure.toFixed(2)} key ${rig.keyIntensity.toFixed(2)} amb ${rig.ambIntensity.toFixed(2)} fill ${rig.fillIntensity.toFixed(2)} elev ${rig.elevationDeg.toFixed(0)}`);
   }
-  if (cfg.frames <= 0 || !cfg.stats) hud.boot(null);   // in shot mode the boot line can carry the numbers
+  // #boot is a full-viewport opaque panel (index.html: inset 0 + background #0b0d10),
+  // so leaving it up in shot mode paints over the WebGL frame and every headless
+  // screenshot reads as a black viewport. The render-cost numbers stay available on
+  // window.__vrStats + renderer.info for the shot harness.
+  hud.boot(null);
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
   window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice };
 }

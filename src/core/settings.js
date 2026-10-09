@@ -7,7 +7,9 @@ export const settings = {
   // Rendering
   renderScale: 1.0,          // 1.0 = native; LOW drops to 0.75
   shadows: true,
-  post: true,                // F5: bloom/grade/grain composite (off at LOW, see setQuality)
+  post: false,               // F5 composite: GATED OFF (see SYSTEM-NOTES §15) — the offscreen
+                             // RT -> canvas blit of PostChain composites nothing on this
+                             // driver, so the base ACES path is the correct render.
   drawDistance: 260,         // m, docs/03 §1
   fullRadius: 110,
   simpleRadius: 200,
@@ -34,6 +36,10 @@ export const settings = {
   // Audio (F5)
   audioEnabled: false,
   masterGain: 0.8,
+
+  // HUD (PLAN.md §10: CMR "Game Displays: Full / Minimal / Off")
+  hudMode: 'FULL',             // FULL | MINIMAL | OFF, cycled with N
+  showCoDriverArrows: true,    // CMR options: co-driver arrows On/Off
 
   // Debug
   showPhysicsHud: false,
@@ -62,10 +68,10 @@ export function qualityPreset(q) {
     settings.renderScale = 0.75; settings.shadows = false; settings.post = false;
     settings.drawDistance = 170; settings.fullRadius = 80; settings.simpleRadius = 140;
   } else if (q === QUALITY.MED) {
-    settings.renderScale = 1.0; settings.shadows = true; settings.post = true;
+    settings.renderScale = 1.0; settings.shadows = true; settings.post = false;
     settings.drawDistance = 260; settings.fullRadius = 110; settings.simpleRadius = 200;
   } else {
-    settings.renderScale = 1.0; settings.shadows = true; settings.post = true;
+    settings.renderScale = 1.0; settings.shadows = true; settings.post = false;
     settings.drawDistance = 320; settings.fullRadius = 130; settings.simpleRadius = 240;
   }
 }
