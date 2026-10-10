@@ -642,12 +642,26 @@ export class Streaming {
       const geo = rec.geometry;
       // A baked node can carry one material or one per primitive: clone whichever shape
       // the loader handed over, otherwise the whole start layer dies on .clone of an array.
+      // A baked prop is a solid stack of closed boxes: force the adopted materials
+      // opaque and single-sided. glTF exports every prop material doubleSided, and a
+      // double-sided interior face lands on the same depth as the face in front of it
+      // (the banner board dithered into a white/red checker that way). FrontSide plus
+      // no alpha makes the board one surface.
+      const opaque = (m) => {
+        if (!m || !m.clone) return this.renderer.propMaterial;
+        const c = m.clone();
+        if (c.vertexColors && !geo.getAttribute('color')) c.vertexColors = false;
+        c.transparent = false;
+        c.opacity = 1;
+        c.alphaTest = 0;
+        c.side = THREE.FrontSide;
+        return c;
+      };
       let mat;
       if (Array.isArray(rec.material)) {
-        mat = rec.material.map((m) => (m && m.clone ? m.clone() : this.renderer.propMaterial));
+        mat = rec.material.map(opaque);
       } else if (rec.material && rec.material.clone) {
-        mat = rec.material.clone();
-        if (mat.vertexColors && !geo.getAttribute('color')) mat.vertexColors = false;
+        mat = opaque(rec.material);
       } else {
         mat = this.renderer.propMaterial;
       }

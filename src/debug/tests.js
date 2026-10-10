@@ -985,6 +985,80 @@ function testFrameRateIndependence() {
 }
 testFrameRateIndependence();
 
+// ------------------------------------------------- HUD layout: modal vs boards, label vs bar
+// Fault 1: the countdown / result modal was painted over the two pace-note boards, the
+// meta strip and the locator bar, leaving half-erased labels. While ANY modal screen is
+// up the boards must draw nothing at all. Fault 2: the sector strip label sat on top of
+// the locator bar, so at every viewport (desktop / phone portrait / phone landscape) the
+// label rect must not intersect the bar rect.
+function testHudBoardsUnderModalAndSectorLabelRow() {
+  let ops = 0;                                   // every 2D call on the stub canvas
+  const ctx2d = new Proxy({}, {
+    get(t, k) { if (k in t) return t[k]; return () => { ops++; }; },
+    set(t, k, v) { t[k] = v; return true; },
+  });
+  class CanvasStubDoc extends MenuStubDoc {
+    createElement(tag) {
+      const el = super.createElement(tag);
+      if (tag === 'canvas') el.getContext = () => ctx2d;
+      return el;
+    }
+  }
+  const SEED = 99, LEN = 900;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const run = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 90 });
+  const wheelStub = () => ({ alpha: 0, kappa: 0, N: 0, slipEnergy: 0, airborneFrames: 0 });
+  const car = { body: { pos: { x: road.x[12], z: road.z[12] }, groundSpeed: 14 }, wheels: [wheelStub(), wheelStub(), wheelStub(), wheelStub()] };
+  const hudCtx = { car, stage: run, notes: [], stageName: 'ODCINEK LEŚNY' };
+  const sizes = [[1600, 900], [390, 844], [844, 390]];
+  globalThis.window = { innerWidth: sizes[0][0], innerHeight: sizes[0][1], addEventListener() {} };
+  const rally = new RallyHud(new CanvasStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+
+  // ---- 1. boards are suppressed while a modal (countdown) is open ------------
+  rally.update(DT, hudCtx);                      // PRE_START stage pushes 'countdown'
+  const modalUp = rally.top() === 'countdown' && rally._modalOpen === true;
+  const hidden = rally._keys.boards === 'hidden';
+  ops = 0;
+  rally._drawMeta(hudCtx); rally._drawSigns(hudCtx); rally._drawProg(hudCtx);
+  const silentUnderModal = ops === 0;
+  rally.startStage();                            // countdown closed -> the boards return
+  for (const key in rally._keys) rally._keys[key] = '';
+  ops = 0;
+  rally._drawMeta(hudCtx); rally._drawProg(hudCtx);
+  const paintsOnHud = ops > 0;
+
+  // ---- 2. sector label row never overlaps the bar row, at all three sizes ----
+  let k = 12;                                    // walk the car down the road into a sector
+  for (let i = 0; i < 900; i++) {
+    k = Math.min(road.x.length - 1, k + 1);
+    car.body.pos.x = road.x[k]; car.body.pos.z = road.z[k];
+    run.step(DT, car);
+  }
+  const rects = [];
+  let clearAtAll = true;
+  for (const [w, h] of sizes) {
+    globalThis.window.innerWidth = w; globalThis.window.innerHeight = h;
+    rally._resize();
+    rally._drawProg(hudCtx);
+    const g = rally._progGeom;
+    if (!g) { clearAtAll = false; rects.push(`${w}x${h}:none`); continue; }
+    const gap = Math.max(g.bar.y - (g.label.y + g.label.h), g.label.y - (g.bar.y + g.bar.h));
+    const inside = g.label.x >= 0 && g.label.y >= 0
+      && g.bar.x + g.bar.w <= rally.W && g.bar.y + g.bar.h <= rally.H;
+    if (!(gap >= 0 && inside)) clearAtAll = false;
+    rects.push(`${w}x${h}:L[${g.label.x},${g.label.y},${g.label.w},${g.label.h}] `
+      + `B[${g.bar.x},${g.bar.y},${g.bar.w},${g.bar.h}] gap=${gap}`);
+  }
+  const secActive = !!run.timing.activeSector;
+  const ok = modalUp && hidden && silentUnderModal && paintsOnHud && clearAtAll && secActive;
+  check('T18 HUD layout: pace-note boards are suppressed while a modal is open, and the sector label rect never intersects the progress bar rect (1600x900 / 390x844 / 844x390)',
+    ok, `modal=${modalUp} boardsHidden=${hidden} silentUnderModal=${silentUnderModal} `
+    + `paintsOnHud=${paintsOnHud} sector=${secActive} ${rects.join(' ')}`);
+  delete globalThis.window;
+}
+testHudBoardsUnderModalAndSectorLabelRow();
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) process.exitCode = 1;

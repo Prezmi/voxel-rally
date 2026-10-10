@@ -398,18 +398,20 @@ def _banner_arch():
     rib = (4.55, 5.15, 5.60, 5.85, 5.60, 5.15, 4.55)                    # stepped rib
     for k, z in enumerate(rib):
         g.append((-5.20 + k * 1.73, 0, z, 0.95, 0.32, 0.26, "pole_steel"))
-    # Banner cloth: one thick plate carrying its own lettering blocks on both faces.
-    # As with the gantry, the old 0.03-0.05 m pale cloth + 0.03 m red trim + 0.05 m
-    # chequer end tabs sat within 5 cm of each other and came back as dithered pale
-    # slabbing over the lane.
-    g.append((0, 0.32, 4.30, 4.55, 0.12, 0.84, "gate_dark"))           # frame, opaque
-    g.append((0, 0.32, 4.30, 4.30, 0.16, 0.70, "canvas"))              # solid cloth plate
-    for s in (-1, 1):
-        for k in range(4):                                            # lettering
-            g.append((-2.70 + k * 1.80, 0.32 + s * 0.20, 4.50, 0.62, 0.05, 0.18, "gate_red"))
-        for k in range(2):                                            # lower rule
-            g.append((-1.35 + k * 2.70, 0.32 + s * 0.20, 3.90, 1.05, 0.05, 0.10, "gate_dark"))
-        g.append((s * 4.60, 0.32, 4.30, 0.40, 0.16, 0.84, "gate_red"))  # solid end tabs
+    # Banner board: ONE solid opaque core plate with the red bands running clean
+    # THROUGH it, so every coloured face of the board sits on its own plane. The old
+    # build was a pale 0.32 m canvas plate with 0.05 m red lettering slabs and 0.16 m
+    # red end tabs stacked along the same Y axis with their faces 10 mm apart
+    # (cloth 0.16 / lettering 0.17, cloth 0.48 / lettering 0.47) and every material
+    # exported doubleSided, so the depth pass dithered pale canvas against gate_red
+    # across the whole 9 m span - a white/red checkerboard, not a board. Nothing here
+    # is coplanar or closer than 12 cm to a face of another colour, no sheet is under
+    # 0.28 m thick, and there is no alpha anywhere.
+    g.append((0, 0, 4.30, 4.30, 0.14, 0.70, "canvas"))                # solid core plate
+    for k in range(6):                                                # red bands, through the core
+        g.append((-3.44 + k * 1.376, 0, 4.30, 0.40, 0.34, 0.58, "gate_red"))
+    for s in (-1, 1):                                                 # solid end tabs
+        g.append((s * 4.60, 0, 4.30, 0.40, 0.44, 0.84, "gate_red"))
     return g
 
 

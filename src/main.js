@@ -559,6 +559,18 @@ async function main() {
     else rally.openMenu();                             // boot -> menu, START odpala odliczanie
   }
   hud.boot(null);
+  // The shot's HUD flush above runs inside one synchronous boot task, and the shot
+  // loop is paused from then on, so the HUD canvas is never presented on a compositor
+  // frame: every ?frames= PNG came back with NO HUD at all (no countdown modal, no
+  // meta strip, no pace boards, no locator bar). Draw the panels again from a real
+  // animation frame so the layer is committed before the screenshot.
+  if (cfg.frames > 0 && !cfg.perftest && typeof requestAnimationFrame === 'function') {
+    const flush = () => {
+      rally.update(1 / 8, { car, stage: stageRun, notes: notes.notes, voice, stageName });
+      rally.update(1 / 8, { car, stage: stageRun, notes: notes.notes, voice, stageName });
+    };
+    requestAnimationFrame(() => requestAnimationFrame(flush));
+  }
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
   window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice };
 }

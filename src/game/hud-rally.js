@@ -467,11 +467,21 @@ export class RallyHud {
       this._drawModal(ctx);
       return;
     }
+    if (this._dirtyAll && this.g) {
+      this.g.clearRect(0, 0, this.W, this.H);
+      this._dirtyAll = false;
+      // A full-canvas clear (modal, resize, mode change) must invalidate every cached
+      // value, otherwise the panels whose number did not change stay erased - that is
+      // what left the stage/meta strip and the pace-note boards blank.
+      for (const k in this._keys) this._keys[k] = '';
+    }
     // A modal owns the frame it sits on. The countdown panel spans the middle of the
     // screen and used to be painted straight over the meta strip, the pace-note boards
     // and the locator bar, leaving half-erased labels ("SEKTOR" -> "OSTRZF"). While any
     // modal is up those boards are cleared once and skipped; closing the modal forces a
-    // full redraw so they come back whole.
+    // full redraw so they come back whole. This runs AFTER the full-canvas clear above,
+    // otherwise that clear wipes the 'hidden' marker on the very frame the modal opens
+    // and the boards are drawn straight under it.
     if (this._modalOpen && this.L) {
       if (this._keys.boards !== 'hidden') {
         this._keys.boards = 'hidden';
@@ -482,14 +492,6 @@ export class RallyHud {
     } else if (this._keys.boards === 'hidden') {
       this._keys.boards = '';
       this._dirtyAll = true;
-    }
-    if (this._dirtyAll && this.g) {
-      this.g.clearRect(0, 0, this.W, this.H);
-      this._dirtyAll = false;
-      // A full-canvas clear (modal, resize, mode change) must invalidate every cached
-      // value, otherwise the panels whose number did not change stay erased - that is
-      // what left the stage/meta strip and the pace-note boards blank.
-      for (const k in this._keys) this._keys[k] = '';
     }
     if (this.mode === 'OFF') {
       if (this.top() !== 'hud') { this._drawModal(ctx); this._pollMenu(); }
@@ -755,6 +757,12 @@ export class RallyHud {
       : `POSTĘP ${Math.round(pos * 100)}%`;
     const lw = Math.max(96, textWidth(label, 1) + 8);
     const bw = Math.max(R.w, lw);
+    // The two rows the strip is made of, published for the layout test (T18): the label
+    // owns the upper row, the bar + gates + car tick own the row strictly below it.
+    this._progGeom = {
+      label: { x: R.x - 1, y: R.y - 2, w: lw, h: 12 },
+      bar: { x: R.x, y: R.y + 16, w: bw, h: 8 },
+    };
     this._clear({ x: R.x - 2, y: R.y - 3, w: bw + 6, h: R.h + 8 });
     this.g.fillStyle = C.OUT; this.g.fillRect(R.x - 2, R.y - 3, lw + 2, 14);
     this.g.fillStyle = C.PANEL; this.g.fillRect(R.x - 1, R.y - 2, lw, 12);

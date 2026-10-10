@@ -1,15 +1,15 @@
 {
   "generated_by": "tools/blender/build_stage_props.py",
   "source_glb": "props.glb",
-  "total_triangles": 4824,
-  "file_bytes": 287816,
+  "total_triangles": 4740,
+  "file_bytes": 283316,
   "props": [
     {
       "name": "prop_banner_arch",
       "width_m": 12.72,
       "height_m": 6.11,
-      "depth_m": 1.03,
-      "triangles": 324,
+      "depth_m": 0.92,
+      "triangles": 240,
       "instance": false
     },
     {
