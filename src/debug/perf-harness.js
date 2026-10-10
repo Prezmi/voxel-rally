@@ -26,7 +26,19 @@ function emit(line) {
   } catch (e) { /* DOM not ready: console line is enough */ }
 }
 
-export function startPerfHarness({ loop, renderer, stream, dirt, durationMs = 70000 }) {
+export function startPerfHarness({ loop, renderer, stream, dirt, carGroup, durationMs = 70000 }) {
+  // Triangles the *car* costs, measured once: the scene graph under view.group is
+  // static (only matrices change), so one walk at boot is enough and the harness can
+  // attribute the difference between renderer.info.tris and the stream's own layers.
+  let carTris = 0;
+  if (carGroup) {
+    carGroup.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const g = o.geometry;
+      carTris += g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0);
+    });
+  }
+
   const t0 = performance.now();
   let prev = t0;
   let winFrames = 0;
@@ -66,13 +78,22 @@ export function startPerfHarness({ loop, renderer, stream, dirt, durationMs = 70
       const mean = winSum / winFrames;
       const ss = (simSteps - simStepsAt) * DT / Math.max(1e-3, winSum / 1000);
       const st = stream.stats;
-      // The rate-independence check: sim seconds advanced per real second. Must sit
-      // at ~1.00 whatever the display (60 Hz, 120 Hz, a hitching software renderer).
+      const bd = st.breakdown || {};
+      const k = (v) => (((v || 0) / 1000).toFixed(1));
+      const sp = st.species || {};
+      const spLine = Object.entries(sp).filter(([, n]) => n > 0)
+        .sort((a, b) => b[1] - a[1]).map(([n2, n]) => `${n2}=${n}`).join(' ');
+      // The same rate-independence check as before, plus the per-category triangle
+      // cost so "the trees eat the frame" is a number and not a feeling.
       emit(`PERF t=${(t / 1000).toFixed(1)}s fps=${(1000 / mean).toFixed(1)} ` +
         `sim=${ss.toFixed(3)} s/s ` +
         `frame=${mean.toFixed(2)}/${p95().toFixed(2)}ms calls=${renderer.info.calls} ` +
         `tris=${renderer.info.tris} stris=${st.tris} chunks=${st.chunks} props=${st.props} tiles=${st.tiles} ` +
         `remesh=${st.remeshes} gen=${st.generated} dirtMs=${dirt.stats.msMean.toFixed(2)}`);
+      emit(`PERF_BD ktris trees=${k(bd.treesNear + bd.treesFar)}(near ${k(bd.treesNear)}/far ${k(bd.treesFar)}) ` +
+        `props=${k(bd.propsNear + bd.propsFar + bd.other)} terrain=${k(bd.terrain)} tiles=${k(bd.tiles)} ` +
+        `car=${(carTris / 1000).toFixed(1)} other=${((renderer.info.tris - (bd.treesNear + bd.treesFar + bd.propsNear + bd.propsFar + bd.other + bd.terrain + bd.tiles) - carTris) / 1000).toFixed(1)} ` +
+        `species ${spLine}`);
       winFrames = 0; winSum = 0; winD.length = 0;
       lastFps = 1000 / mean;
       simStepsAt = simSteps;
@@ -82,9 +103,13 @@ export function startPerfHarness({ loop, renderer, stream, dirt, durationMs = 70
       ended = true;
       const g = (m) => (fpsAt[m] !== undefined ? fpsAt[m].toFixed(1) : 'n/a');
       const st = stream.stats;
+      const bd = st.breakdown || {};
+      const k = (v) => (((v || 0) / 1000).toFixed(1));
       emit(`PERF_SUMMARY fps@10s=${g(10000)} fps@30s=${g(30000)} fps@60s=${g(60000)} ` +
         `chunks=${st.chunks} props=${st.props} tiles=${st.tiles} ` +
         `calls=${renderer.info.calls} tris=${renderer.info.tris}`);
+      emit(`PERF_SUMMARY_BD ktris trees=${k(bd.treesNear + bd.treesFar)}(near ${k(bd.treesNear)}/far ${k(bd.treesFar)}) ` +
+        `props=${k(bd.propsNear + bd.propsFar + bd.other)} terrain=${k(bd.terrain)} tiles=${k(bd.tiles)} car=${(carTris / 1000).toFixed(1)}`);
     }
     if (inner) inner(l);
   };

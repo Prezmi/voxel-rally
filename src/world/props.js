@@ -23,6 +23,24 @@ export const SPRITE_SPEC = {
 };
 const SPR = { OAK: 0, PINE: 1, BIRCH: 2, BUSH: 3, FERN: 4 };
 const TEX_PX = 32;                       // 32x32, nearest neighbour (true pixel art)
+// One canvas atlas, painted once at boot: every sprite species lives in its own
+// 32x32 cell of a single texture, so the whole forest is one texture and one shader
+// program (PLAN §10.2 "zero assetów": still fully procedural, still no file).
+const ATLAS = { cols: 4, w: TEX_PX * 4, h: TEX_PX * 2 };
+const SPR_CELL = [SPR.OAK, SPR.PINE, SPR.BIRCH, SPR.BUSH, SPR.FERN];
+
+/** Atlas cell of one sprite species as [u0,v0,u1,v1], inset by half a texel so a
+ *  neighbouring cell can never bleed in at the quad edge. */
+export function atlasRect(sprIdx) {
+  const col = sprIdx % ATLAS.cols, row = Math.floor(sprIdx / ATLAS.cols);
+  return [
+    (col * TEX_PX + 0.5) / ATLAS.w,
+    1 - (row * TEX_PX + TEX_PX - 0.5) / ATLAS.h,
+    (col * TEX_PX + TEX_PX - 0.5) / ATLAS.w,
+    1 - (row * TEX_PX + 0.5) / ATLAS.h,
+  ];
+}
+
 const BUSH_SALT = 0x2c9f7a11;
 const FERN_SALT = 0x61b34d0f;
 
@@ -185,24 +203,27 @@ export function generateChunkProps(cx, cz, stage) {
  */
 export function buildFoliageTextures(THREE) {
   if (typeof document === 'undefined') return null;      // headless: no canvas
-  const out = [];
-  for (const kind of [SPR.OAK, SPR.PINE, SPR.BIRCH, SPR.BUSH, SPR.FERN]) {
-    const cv = document.createElement('canvas');
-    cv.width = TEX_PX; cv.height = TEX_PX;
-    cv.style.imageRendering = 'pixelated';
-    const ctx = cv.getContext('2d');
-    const img = ctx.createImageData(TEX_PX, TEX_PX);
-    paintFoliage(kind, img.data);
-    ctx.putImageData(img, 0, 0);
-    const tex = new THREE.CanvasTexture(cv);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    tex.generateMipmaps = false;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.needsUpdate = true;
-    out.push(tex);
+  const cv = document.createElement('canvas');
+  cv.width = ATLAS.w; cv.height = ATLAS.h;
+  cv.style.imageRendering = 'pixelated';
+  const ctx = cv.getContext('2d');
+  const tmp = document.createElement('canvas');
+  tmp.width = TEX_PX; tmp.height = TEX_PX;
+  const tctx = tmp.getContext('2d');
+  for (let i = 0; i < SPR_CELL.length; i++) {
+    const img = tctx.createImageData(TEX_PX, TEX_PX);
+    paintFoliage(SPR_CELL[i], img.data);
+    tctx.putImageData(img, 0, 0);
+    const col = i % ATLAS.cols, row = Math.floor(i / ATLAS.cols);
+    ctx.drawImage(tmp, col * TEX_PX, row * TEX_PX);
   }
-  return out;
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 /* deterministic tiny hash so the painted foliage is stable between runs */
@@ -320,6 +341,68 @@ function paintFoliage(kind, data) {
  * stand of trees does not swim when the camera swings, and the silhouette changes
  * as you drive past - exactly the CMR 2.0 look). Built once per species.
  */
+// ---- near level of detail for vegetation (perf) --------------------------------
+// The baked props.glb trees are 444-528 triangles each (37-44 voxel blocks: see
+// assets/models/props.manifest.json) and the near band puts ~470 of them on screen:
+// 230 k of the ~309 k triangles a MED frame drew. NEAR_LOD_TRIS is the per-species
+// near budget; a species whose near geometry is over it gets the build below instead,
+// which is roughly half the trunk and foliage blocks of the baked node spread over
+// the same envelope (width/height straight from the manifest, matching SPRITE_SPEC so
+// the near -> sprite handover keeps the same silhouette). Mid and far bands untouched.
+export const NEAR_LOD_TRIS = {
+  [PROP.PINE]: 264, [PROP.OAK]: 228, [PROP.BIRCH]: 270, [PROP.BUSH]: 132, [PROP.DEAD]: 90,
+};
+const NEAR_LOD_SPEC = {
+  // tiers x perTier boxes of foliage on one trunk box, sized to the baked envelope.
+  [PROP.PINE]: { w: 4.58, h: 9.44, bark: 0x3d2c19, leaf: 0x2f4a2c, tiers: 5, perTier: 4, cone: 1 },
+  [PROP.OAK]: { w: 4.84, h: 7.37, bark: 0x5c4127, leaf: 0x3f6b30, tiers: 3, perTier: 5, base: 0.46 },
+  [PROP.BIRCH]: { w: 3.74, h: 7.96, bark: 0x8d8577, leaf: 0x4a7a3a, tiers: 3, perTier: 5, base: 0.50 },
+  [PROP.BUSH]: { w: 2.00, h: 1.57, bark: 0x35602c, leaf: 0x35602c, tiers: 2, perTier: 5, base: 0.05, trunk: 0 },
+  [PROP.DEAD]: { w: 2.02, h: 5.94, bark: 0x6a5843, leaf: 0x5b4c39, snag: 1 },
+};
+
+/**
+ * Cheap near geometry per species. A conifer is a trunk plus a conical stack of
+ * pinwheeled tiers; a broadleaf/bush is a trunk plus a stacked blob; the dead snag is
+ * a tapering trunk with three limbs. Same outer envelope as the baked node, so the
+ * skyline of a stand does not move — only the block count inside it halves.
+ */
+export function buildNearLodGeometries(GeoBuilder, THREE) {
+  const geos = {};
+  for (const [key, sp] of Object.entries(NEAR_LOD_SPEC)) {
+    const b = new GeoBuilder();
+    if (sp.snag) {
+      let y = 0;
+      for (let k = 0; k < 4; k++) {
+        const hy = sp.h * (0.16 - 0.02 * k);
+        b.box(0, y + hy, 0, 0.15 - 0.022 * k, hy, 0.15 - 0.022 * k, sp.bark);
+        y += hy * 2;
+      }
+      b.box(sp.w * 0.22, sp.h * 0.56, 0, sp.w * 0.22, 0.07, 0.06, sp.leaf);
+      b.box(-sp.w * 0.19, sp.h * 0.70, sp.w * 0.09, sp.w * 0.19, 0.06, 0.06, sp.leaf);
+      b.box(0.05, sp.h * 0.86, -sp.w * 0.14, 0.06, sp.h * 0.10, 0.06, sp.leaf);
+    } else {
+      if (sp.trunk !== 0) b.box(0, sp.h * 0.17, 0, 0.16, sp.h * 0.17, 0.16, sp.bark);
+      const base = sp.base !== undefined ? sp.base : 0.30;
+      for (let k = 0; k < sp.tiers; k++) {
+        const t = sp.tiers > 1 ? k / (sp.tiers - 1) : 0;
+        const rad = sp.w * 0.5 * (1 - (sp.cone ? 0.74 : 0.30) * t);
+        const y = sp.h * (base + (0.94 - base) * t);
+        const hy = sp.h * (sp.cone ? 0.075 : 0.11) * (1 - 0.25 * t);
+        for (let j = 0; j < sp.perTier; j++) {
+          const a = (j / sp.perTier) * Math.PI * 2 + k * 0.7;
+          const off = j === 0 ? 0 : rad * 0.42;
+          const hx = j % 2 ? rad * 0.40 : rad * 0.56;
+          const hz = j % 2 ? rad * 0.56 : rad * 0.40;
+          b.box(Math.cos(a) * off, y, Math.sin(a) * off, hx, hy, hz, sp.leaf);
+        }
+      }
+    }
+    geos[Number(key)] = b.toGeometry(THREE);
+  }
+  return geos;
+}
+
 export function buildSpriteGeometries(THREE) {
   const geos = {};
   for (const prop of SPRITE_PROPS) {
@@ -337,10 +420,11 @@ export function buildSpriteGeometries(THREE) {
       const ox = nx * (p - (sp.planes - 1) / 2) * sp.w * 0.17;
       const oz = nz * (p - (sp.planes - 1) / 2) * sp.w * 0.17;
       const base = pos.length / 4;
+      const [u0, v0, u1, v1] = atlasRect(SPRITE_PROPS.indexOf(prop));
       // bottom-left, bottom-right, top-right, top-left
       pos.push(-dx + ox, 0, -dz + oz, dx + ox, 0, dz + oz,
         dx + ox, ht, dz + oz, -dx + ox, ht, -dz + oz);
-      uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+      uv.push(u0, v0, u1, v0, u1, v1, u0, v1);
       for (let k = 0; k < 4; k++) nrm.push(nx, 0, nz);
       idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
     }
@@ -355,19 +439,49 @@ export function buildSpriteGeometries(THREE) {
   return geos;
 }
 
-/** One Lambert material per species: Lambert so the sprites darken in shade instead
- *  of glowing, alphaTest instead of transparency (no sorting artifacts, and the
- *  shadow depth pass respects alphaTest so the shadow is the leaf, not the quad). */
-export function buildSpriteMaterials(THREE, textures) {
-  if (!textures) return null;
+/** One material for every sprite species, fed by the single foliage atlas: no
+ *  per-instance material variation, one shader program for the whole forest.
+ *  Lambert so the sprites darken in shade instead of glowing, alphaTest instead of
+ *  transparency (no sorting artifacts, and the shadow depth pass respects alphaTest
+ *  so the shadow is the leaf, not the quad). Keyed by species so callers keep their
+ *  per-species lookups while sharing the same material object. */
+export function buildSpriteMaterials(THREE, tex) {
+  if (!tex) return null;
   const mats = {};
-  for (const prop of SPRITE_PROPS) {
-    const tex = textures[SPRITE_PROPS.indexOf(prop)];
-    mats[prop] = new THREE.MeshLambertMaterial({
-      map: tex, alphaTest: 0.5, side: THREE.DoubleSide, vertexColors: false,
-    });
-  }
+  const shared = new THREE.MeshLambertMaterial({
+    map: tex, alphaTest: 0.5, side: THREE.DoubleSide, vertexColors: false,
+  });
+  for (const prop of SPRITE_PROPS) mats[prop] = shared;
   return mats;
+}
+
+/**
+ * Far LOD: ONE camera-facing quad per tree (2 triangles, the cheapest thing that can
+ * still read as a tree at 60 m+). Built once per species; the yaw is written per
+ * instance at rebuild time so the quad squares up to the camera. The crown is drawn
+ * a little wider than the crossed-quad LOD so a distant stand keeps the same skyline
+ * mass even with a third of the geometry.
+ */
+export function buildBillboardGeometries(THREE) {
+  const geos = {};
+  for (const prop of SPRITE_PROPS) {
+    const sp = SPRITE_SPEC[prop];
+    const wd = sp.w * 1.18, ht = sp.h * 1.02;
+    const [u0, v0, u1, v1] = atlasRect(SPRITE_PROPS.indexOf(prop));
+    const pos = [], uv = [], nrm = [], idx = [];
+    pos.push(-wd / 2, 0, 0, wd / 2, 0, 0, wd / 2, ht, 0, -wd / 2, ht, 0);
+    uv.push(u0, v0, u1, v0, u1, v1, u0, v1);
+    for (let k = 0; k < 4; k++) nrm.push(0, 0, 1);
+    idx.push(0, 1, 2, 0, 2, 3);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    g.setIndex(idx);
+    g.computeBoundingSphere();
+    geos[prop] = g;
+  }
+  return geos;
 }
 
 function pickSpecies(t, biome) {

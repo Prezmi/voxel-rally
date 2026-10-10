@@ -25,6 +25,8 @@ import { attachDirtLens } from './render/dirt-lens.js';
 import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
 import { startPerfHarness } from './debug/perf-harness.js';
+import { pregenerateStage } from './world/pregen.js';
+import { loadStageCache } from './world/stage-cache.js';
 import { DT } from './core/time.js';
 import { settings, applyDifficulty, qualityPreset, QUALITY, loadSettings, saveSettings } from './core/settings.js';
 
@@ -32,6 +34,21 @@ import { settings, applyDifficulty, qualityPreset, QUALITY, loadSettings, saveSe
 // boot text updates. In shot mode (--frames) a headless browser barely ticks
 // rAF, so the yields collapse to a timer tick instead of stalling the stage.
 const nextFrame = (instant) => new Promise((r) => (instant ? setTimeout(r, 0) : requestAnimationFrame(() => r())));
+
+// Mirror a line into the hidden #perflog node the perf harness owns
+// (src/debug/perf-harness.js) so `tools/perf-run.mjs` can quote the stage load time.
+function perfLog(line) {
+  try {
+    let el = document.getElementById('perflog');
+    if (!el) {
+      el = document.createElement('pre');
+      el.id = 'perflog';
+      el.style.display = 'none';
+      document.body.appendChild(el);
+    }
+    el.textContent += line + '\n';
+  } catch (e) { /* DOM not ready: the console line is enough */ }
+}
 
 function params() {
   const q = new URLSearchParams(location.search);
@@ -145,6 +162,35 @@ async function main() {
   if (cfg.cam) settings.cameraMode = cfg.cam;
 
   const stream = new Streaming(stage.world, stage.terrain, stage.road, stage.carveIndex, renderer, stage);
+
+  // ---- stage pre-generation: the loading screen is a real load, not a splash ----
+  // Heightfield + surface ids for every chunk the draw distance can ask for, the road
+  // carve silhouette, the prop list and the block tile list are all built here, in
+  // bounded slices with progress, before the first frame is drawn. A cache generated
+  // offline (tools/gen-stage-cache.mjs -> assets/world/stage-<seed>-<biome>.bin) is
+  // used when it exists for this exact seed + biome; a missing file or a mismatched
+  // seed falls back to generating the same data now. After either path Streaming only
+  // ever builds and destroys render geometry, never terrain data.
+  const loadT0 = performance.now();
+  const cached = await loadStageCache(stage.world, cfg.seed, cfg.biome);
+  hud.boot(cached
+    ? `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\nładowanie zapisanego etapu…\n${(cached.bytes / 1e6).toFixed(1)} MB · ${cached.chunks} chunków`
+    : `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\ngenerowanie całego etapu…`);
+  await nextFrame(cfg.shotBoot);
+  const pre = await pregenerateStage(stream, settings.drawDistance, {
+    yieldFn: () => nextFrame(cfg.shotBoot),
+    onProgress: (p, done, total) => hud.boot(
+      `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n`
+      + `${cached ? 'wczytywanie' : 'generowanie'} etapu: ${Math.round(p * 100)}%\n`
+      + `${done} / ${total} chunków`,
+    ),
+  });
+  const loadS = (performance.now() - loadT0) / 1000;
+  const loadLine = `[stage] ${cached ? `cache ${cached.url}` : 'generated'} · ${pre.chunks} chunks `
+    + `(${pre.filled} terrain, ${pre.carved} carve) · ${pre.props} prop lists · ${pre.tiles} tile lists `
+    + `· load ${loadS.toFixed(1)} s`;
+  console.log(loadLine);
+  perfLog(loadLine);
   // Shim for a carry-over bug in world/chunk.js: surfaceAt/rutAt index the column
   // with a *fractional* local offset (x - cx*CHUNK), so at any real contact point
   // they return undefined and every wheel reads the 'unknown' surface. Fixed here
@@ -451,7 +497,7 @@ async function main() {
     // Prime the chunk cache before the harness clock starts, otherwise the 10/30/60 s
     // marks measure the cache filling up rather than steady-state driving.
     for (let k = 0; k < 12; k++) stream.update(car.body.pos, 120);
-    startPerfHarness({ loop, renderer, stream, dirt });
+    startPerfHarness({ loop, renderer, stream, dirt, carGroup: view.group });
   }
 
   // Shot mode: run the whole drive synchronously at boot, then freeze the sim.

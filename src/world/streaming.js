@@ -7,7 +7,7 @@ import { meshChunk, LOD_CELL } from './mesher.js';
 import { carveChunk, SHOULDER } from './road-carve.js';
 import { SURF } from './surfaces.js';
 import { GeoBuilder } from '../render/primitives.js';
-import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES } from './props.js';
+import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries } from './props.js';
 import { settings, QUALITY } from '../core/settings.js';
 import { loadModelNodes } from '../render/assets.js';
 
@@ -77,11 +77,27 @@ const TILE_FAR = [130, 130, 0, 0];  // index = ring
 const farRingRadius = () => settings.simpleRadius + (settings.drawDistance - settings.simpleRadius) * 0.5;
 const TILE_FAR_ABS = 150;          // m from the car, hard cut regardless of ring
 const TILE_FAR_ABS_LOW = 90;       // LOW: the tiles are 0.18 m slabs, they read to ~90 m
+// A baked block-tile node above this triangle count is replaced by a shared unit box:
+// the layer is 1 334 instances, so the per-tile budget is what the whole frame is made
+// of (measured: 4.29 M of the 4.53 M triangles at LOW came from these slabs).
+const TILE_MAX_TRIS = 96;
+const SPRITE_SET = new Set(SPRITE_PROPS);   // species drawn as sprites at the far bands
 
-/** Upload only the used prefix of an instance buffer, not the whole capacity. */
-function upload(im, n) {
-  const a = im.instanceMatrix;
-  if (a.clearUpdateRange && a.addUpdateRange) { a.clearUpdateRange(); a.addUpdateRange(0, Math.max(1, n) * 16); }
+/** Triangles of a geometry, indexed or not. */
+function geoTris(geo) {
+  if (!geo) return 0;
+  if (geo.index) return geo.index.count / 3;
+  const p = geo.attributes && geo.attributes.position;
+  return p ? p.count / 3 : 0;
+}
+
+/** Upload only the used prefix of an instance buffer, not the whole capacity.
+ *  Accepts the InstancedMesh (-> its instanceMatrix) or a raw BufferAttribute, so the
+ *  colour channel can be paid for at 3 floats/instance instead of 16. */
+function upload(target, n, itemSize = 16) {
+  const a = target && target.isInstancedMesh ? target.instanceMatrix : target;
+  if (!a) return;
+  if (a.clearUpdateRange && a.addUpdateRange) { a.clearUpdateRange(); a.addUpdateRange(0, Math.max(1, n) * itemSize); }
   a.needsUpdate = true;
 }
 
@@ -97,6 +113,7 @@ export class Streaming {
     // Vegetation is a sprite: crossed alpha quads with a procedurally painted foliage
     // texture (PLAN §10.2), one InstancedMesh + one Lambert material per species.
     this.spriteGeos = buildSpriteGeometries(THREE);
+    this.billGeos = buildBillboardGeometries(THREE);
     this.spriteMats = buildSpriteMaterials(THREE, buildFoliageTextures(THREE));
 
     for (const p of [PROP.OAK, PROP.PINE, PROP.DEAD, PROP.SPECTATOR, PROP.POST, PROP.MARSHAL, PROP.GATE,
@@ -113,20 +130,32 @@ export class Streaming {
       this.propMeshes.set(p, im);
     }
 
-    // ---- prop distance LOD (perf: the glb tree nodes are ~1-2 k tris each, and
-    // 1 400 of them per species is what put 6.3 M triangles in one frame).
-    // Near ring: the baked glb geo on the mesh above. Far ring: the crossed-quad
-    // sprite of the same species, a handful of tris. Beyond PROP_FAR: nothing.
-    this.farMeshes = new Map();
-    for (const p of [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.BUSH, PROP.FERN]) {
-      const geo = this.spriteGeos[p], mat = this.spriteMats && this.spriteMats[p];
-      if (!geo || !mat) continue;
-      const im = new THREE.InstancedMesh(geo, mat, CAPACITY[p]);
-      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      im.castShadow = false; im.receiveShadow = false;
-      im.count = 0; im.frustumCulled = false;
-      renderer.scene.add(im);
-      this.farMeshes.set(p, im);
+    // ---- prop distance LOD (perf: the glb tree nodes are ~600 tris each, and
+    // 1 400 of them per species is what put millions of triangles in one frame).
+    // Near band: the baked glb/voxel geo. Mid band: the crossed alpha-quad sprite.
+    // Far band: ONE camera-facing billboard quad. Beyond farR: nothing.
+    // One InstancedMesh per species per band => at most one draw call per species per
+    // LOD level, and a band with no visible instance is switched off (count 0 +
+    // visible false), so the whole batch leaves the draw-call list.
+    this.midMeshes = new Map();
+    this.billMeshes = new Map();
+    for (const p of SPRITE_PROPS) {
+      const mat = this.spriteMats && this.spriteMats[p];
+      if (!mat || !this.spriteGeos[p] || !this.billGeos[p]) continue;
+      const mid = new THREE.InstancedMesh(this.spriteGeos[p], mat, CAPACITY[p]);
+      const bill = new THREE.InstancedMesh(this.billGeos[p], mat, CAPACITY[p]);
+      for (const im of [mid, bill]) {
+        im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        im.castShadow = false; im.receiveShadow = false;
+        im.count = 0; im.frustumCulled = false;   // instance culling is done by hand
+        // Per-instance distance fade (ramp toward the horizon) instead of a hard pop:
+        // instanceColor costs one extra attribute, no extra material, no extra pass.
+        im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY[p] * 3), 3);
+        im.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        renderer.scene.add(im);
+      }
+      this.midMeshes.set(p, mid);
+      this.billMeshes.set(p, bill);
     }
     this._frustum = new THREE.Frustum();
     this._projScreen = new THREE.Matrix4();
@@ -152,8 +181,11 @@ export class Streaming {
     this._scale = new THREE.Vector3();
     this._pos = new THREE.Vector3();
     this._euler = new THREE.Euler();
+    this._col = new THREE.Color();
 
     this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
+    this.stats.breakdown = { terrain: 0, treesNear: 0, treesFar: 0, propsNear: 0, propsFar: 0, tiles: 0, other: 0 };
+    this.stats.species = {};
     this._lastInst = 0;              // 4 Hz gate on the instance rebuild/upload
     this._lastCx = null; this._lastCz = null; this._lastCount = -1; this._lastCamQ = null;
     this._gatesPlaced = false;
@@ -165,6 +197,7 @@ export class Streaming {
   /** Swap a species container's procedural geo for the baked glb node geo. */
   _adoptAssetProps(nodes) {
     if (!nodes || !nodes.size || this.assetsApplied) return false;
+    const cheaper = [];
     for (const [type, im] of this.propMeshes) {
       const name = ASSET_NODES[type];
       if (!name) continue;
@@ -174,9 +207,23 @@ export class Streaming {
       if (mat && !Array.isArray(mat) && mat.vertexColors && !rec.geometry.getAttribute('color')) {
         mat.vertexColors = false;                          // nothing to feed USE_COLOR
       }
-      im.geometry = rec.geometry;
-      if (mat) im.material = mat;
+      // Near LOD budget (props.js): the near band is the one band where a driver
+      // resolves a trunk, and it paid 444-528 triangles per tree ~470 times a frame
+      // (230 k of the ~309 k triangles of a MED frame). Over budget, the near instance
+      // gets the half-block build instead: same envelope, so the silhouette stays.
+      const nodeTris = geoTris(rec.geometry);
+      const budget = NEAR_LOD_TRIS[type];
+      const lod = budget ? (this.nearLodGeos || (this.nearLodGeos = buildNearLodGeometries(GeoBuilder, THREE)))[type] : null;
+      if (budget && lod && nodeTris > budget && geoTris(lod) <= budget) {
+        im.geometry = lod;
+        im.material = this.renderer.propMaterial;
+        cheaper.push(`${PROP_NAMES[type]} ${nodeTris}->${geoTris(lod)}`);
+      } else {
+        im.geometry = rec.geometry;
+        if (mat) im.material = mat;
+      }
     }
+    if (cheaper.length) console.log(`[props] near LOD tris/instance ${cheaper.join(' ')}`);
     this._buildStartProps(nodes);
     this.assetsApplied = true;
     return true;
@@ -200,16 +247,24 @@ export class Streaming {
       if (!geo.boundingBox) geo.computeBoundingBox();
       const bb = geo.boundingBox;
       if (!bb || !isFinite(bb.min.x) || !isFinite(bb.max.y)) continue;
+      // A baked paver node costs a few thousand triangles. A block tile is a slab: at
+      // the ~130 m this layer reaches, the bevel is invisible and the slab is 3000x the
+      // cost of the whole forest, so the geometry is swapped for one shared unit box
+      // fitted to the node bounding box (same material, same footprint, same top face).
+      const h = Math.max(0.02, bb.max.y - bb.min.y);
+      const useBox = geoTris(geo) > TILE_MAX_TRIS;
+      const drawGeo = useBox ? (this._tileBox || (this._tileBox = new THREE.BoxGeometry(1, 1, 1))) : geo;
       this.blockOff.set(sid, {
         x: -0.5 * (bb.min.x + bb.max.x),
-        y: -bb.max.y,
+        y: useBox ? -h * 0.5 : -bb.max.y,
         z: -0.5 * (bb.min.z + bb.max.z),
         w: Math.min(1.4, Math.max(0.6, bb.max.x - bb.min.x)),
         d: Math.min(1.4, Math.max(0.6, bb.max.z - bb.min.z)),
+        h: useBox ? h : 1,
       });
       const mat = rec.material ? rec.material.clone() : this.renderer.propMaterial;
       if (mat.vertexColors && !geo.getAttribute('color')) mat.vertexColors = false;
-      const im = new THREE.InstancedMesh(geo, mat, TILE_CAPACITY);
+      const im = new THREE.InstancedMesh(drawGeo, mat, TILE_CAPACITY);
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       im.castShadow = false;                                // a 0.18 m slab: no own shadow
       im.receiveShadow = true;
@@ -233,8 +288,10 @@ export class Streaming {
 
   /** Which columns of one chunk get a tile: the carriageway band plus VERGE beyond it. */
   _chunkTiles(cx, cz, stride = 1, cap = TILE_CAP_CHUNK) {
+    // Data only: no dependency on the block glb, so pre-generation (boot or the
+    // offline cache) can build these tables before stage_blocks.glb has resolved.
     const chunk = this.world.chunkAt(cx, cz);
-    if (!chunk || !this.blockActive) return null;
+    if (!chunk) return null;
     const t = new Uint8Array(COLS);
     t.tiles = 0;
     const x0 = cx * CHUNK, z0 = cz * CHUNK;
@@ -249,7 +306,7 @@ export class Streaming {
       const lat = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i]);
       if (lat > road.width[i] / 2 + SHOULDER + VERGE) continue;
       const sid = chunk.surface[c];                        // the id physics already has
-      if (!sid || !this.blockMeshes.has(sid)) continue;
+      if (!sid || !BLOCK_SURFACES.includes(sid)) continue;
       cand.push([c, sid, lat]);
     }
     // The cap is fixed, so spend it from the carriageway outwards: stopping at the
@@ -262,6 +319,22 @@ export class Streaming {
       n++;
     }
     t.tiles = n;                                           // count kept on the same array
+    return t;
+  }
+
+  /**
+   * Ring-specific tile table for one chunk, cached on the stage. Pre-generation
+   * (src/world/pregen.js) fills the same cache, so a chunk the car drives into costs
+   * no world work at all - only mesh building below.
+   */
+  tileTable(cx, cz, ring) {
+    const tables = this.stage.tileTables || (this.stage.tileTables = new Map());
+    const key = chunkKey(cx, cz) * 4 + ring;
+    let t = tables.get(key);
+    if (t !== undefined) return t;
+    const stride = TILE_STRIDE[ring];
+    t = stride ? (this._chunkTiles(cx, cz, stride, TILE_CAP_RING[ring]) || null) : null;
+    tables.set(key, t);
     return t;
   }
 
@@ -302,7 +375,7 @@ export class Streaming {
           }
           this._pos.set(wx + off.x, y + TILE_LIFT + off.y, wz + off.z);
           this._quat.identity();
-          this._scale.set(off.w, 1, off.d);
+          this._scale.set(off.w, off.h, off.d);
           this._mat4.compose(this._pos, this._quat, this._scale);
           im.setMatrixAt(used, this._mat4);
           this._tileCount.set(sid, used + 1);
@@ -346,10 +419,21 @@ export class Streaming {
       if (d > R + CHUNK * 2) {
         if (rec.mesh) { this.renderer.scene.remove(rec.mesh); rec.mesh.geometry.dispose(); }
         this.records.delete(key);
-        // The voxel columns go the same way as their mesh: generation + carve are
-        // deterministic in (cx,cz,seed), so keeping them forever only grew the Map
-        // (~16 KB of column arrays per chunk, 293 chunks in 30 s of driving).
-        this.world.dropChunk(rec.cx, rec.cz);
+        if (this.stage.preGen) {
+          // Pre-generated stage: the chunk data is the point of the pre-generation, so
+          // only the render geometry above is destroyed. `generated` stays 0 while
+          // driving because nothing has to be regenerated on the way past.
+          this.stats.kept = (this.stats.kept || 0) + 1;
+        } else {
+          // The voxel columns go the same way as their mesh: generation + carve are
+          // deterministic in (cx,cz,seed), so keeping them forever only grew the Map
+          // (~16 KB of column arrays per chunk, 293 chunks in 30 s of driving).
+          this.world.dropChunk(rec.cx, rec.cz);
+          if (this.stage.tileTables) {
+            this.stage.tileTables.delete(key * 4);
+            this.stage.tileTables.delete(key * 4 + 1);
+          }
+        }
       }
     }
 
@@ -417,16 +501,12 @@ export class Streaming {
         remeshes++;
       }
       if (!rec.props) {
-        rec.props = generateChunkProps(job.cx, job.cz, this.stage);
+        // Pre-generated prop list when the stage has one; the runtime scatter stays as
+        // the fallback for anything outside the pre-generated set (cache mismatch).
+        const pre = this.stage.propTables && this.stage.propTables.get(key);
+        rec.props = pre !== undefined ? pre : generateChunkProps(job.cx, job.cz, this.stage);
       }
-      if (!rec.tiles) {
-        const stride = TILE_STRIDE[job.ring];
-        if (stride) {
-          rec.tiles = this._chunkTiles(job.cx, job.cz, stride, TILE_CAP_RING[job.ring]) || null;
-        } else {
-          rec.tiles = null;
-        }
-      }
+      if (!rec.tiles) rec.tiles = this.tileTable(job.cx, job.cz, job.ring);
     }
     this.stats.remeshes = remeshes;
 
@@ -461,7 +541,53 @@ export class Streaming {
     for (const rec of this.records.values()) if (rec.mesh) tris += rec.mesh.geometry.index.count / 3;
     this.stats.chunks = this.records.size;
     this.stats.tris = tris;
+    this._breakdown();
     return performance.now() - t0;
+  }
+
+  /**
+   * Per-category triangle + instance cost, the `bd=` / `sp=` columns the perf harness
+   * prints (?perftest=1). One pass over the ~25 instanced meshes the layer owns, so it
+   * is cheaper than the chunk loop above and runs on every update. The point is to be
+   * able to say which layer eats the frame: vegetation, ground, block tiles, gates and
+   * start furniture, or the car (counted by the harness, not here).
+   */
+  _breakdown() {
+    const bd = this.stats.breakdown || (this.stats.breakdown = {
+      terrain: 0, treesNear: 0, treesFar: 0, propsNear: 0, propsFar: 0, tiles: 0, other: 0,
+    });
+    const sp = this.stats.species || (this.stats.species = {});
+    for (const k of Object.keys(sp)) sp[k] = null;
+    bd.terrain = this.stats.tris;
+    bd.treesNear = bd.treesFar = bd.propsNear = bd.propsFar = bd.tiles = bd.other = 0;
+    for (const [type, im] of this.propMeshes) {
+      const name = PROP_NAMES[type] || String(type);
+      const t = geoTris(im.geometry) * im.count;
+      const spriteFar = this.midMeshes.has(type);
+      if (type === PROP.GATE) bd.other += t; else bd.propsNear += t;
+      if (SPRITE_PROPS.includes(type)) { bd.treesNear += t; bd.propsNear -= t; }
+      sp[name] = im.count;
+      const fim = this.midMeshes.get(type);
+      if (fim) {
+        const ft = geoTris(fim.geometry) * fim.count;
+        bd.propsFar += ft;
+        if (SPRITE_PROPS.includes(type)) bd.treesFar += ft;
+        sp[name] += fim.count;
+      }
+      const bim = this.billMeshes.get(type);
+      if (bim) {
+        const bt = geoTris(bim.geometry) * bim.count;
+        bd.propsFar += bt;
+        if (SPRITE_PROPS.includes(type)) bd.treesFar += bt;
+        sp[name] += bim.count;
+      }
+    }
+    for (const im of this.startMeshes.values()) bd.other += geoTris(im.geometry) * im.count;
+    bd.tileUnit = 0;
+    for (const im of this.blockMeshes.values()) {
+      bd.tiles += geoTris(im.geometry) * im.count;
+      bd.tileUnit = Math.max(bd.tileUnit, geoTris(im.geometry));
+    }
   }
 
   _placeGates() {
@@ -571,23 +697,44 @@ export class Streaming {
   }
 
   /**
-   * Bound the prop load instead of letting it grow with the drive: distance LOD
-   * (glb geo near, sprite quad far, nothing beyond), camera-frustum culling, and
-   * the fixed per-species caps. Called at <=6.7 Hz, allocation-free.
+   * Bound the prop load instead of letting it grow with the drive:
+   *  - three LOD bands (baked geometry near, crossed alpha quads mid, ONE camera-facing
+   *    billboard quad far, nothing beyond farR) -> at most one instanced draw call per
+   *    species per band, all of them on one shared foliage atlas and one material;
+   *  - camera-frustum culling per instance, and a band with zero surviving instances is
+   *    switched off, so a species the camera cannot see costs no draw call at all;
+   *  - a fixed per-species instance budget spent by DISTANCE PRIORITY (nearest first),
+   *    so a full stand truncates the far edge of the forest, never random trees;
+   *  - a per-instance colour ramp past midR, so the forest fades into the haze instead
+   *    of popping out at farR.
+   * Called at <=6.7 Hz, allocation-free: the buckets, the arrays and both instance
+   * buffers are reused, and each buffer is uploaded once per rebuild (not per frame).
    */
   _rebuildProps(focus) {
-    const low = settings.quality === QUALITY.LOW;
-    const nearR = low ? 45 : 85;
-    const farR = low ? 95 : 170;
-    const capMul = low ? 0.55 : 1;      // LOW also trims the near instance budget
+    const q = settings.quality;
+    const low = q === QUALITY.LOW, high = q === QUALITY.HIGH;
+    // Band radii. LOW keeps the baked voxel/glb tree only within 18 m of the car, which
+    // is where a viewer can actually read a trunk; past that the sprite/quad carries it.
+    // (Measured at MEDIUM: the old 45 m near band put 230 k of the 309 k frame
+    // triangles into trees that were too far away to read anything.)
+    const nearR = low ? 18 : (high ? 34 : 24);
+    const midR = low ? 62 : (high ? 120 : 90);
+    const farR = low ? 92 : (high ? 175 : 135);
+    // Posts and spectators have no sprite/billboard variant (they are too small to
+    // billboard) but they are ~100 tris each, so they keep a longer single band: corner
+    // markers have to be readable early or the corner reads as empty air.
+    // Absolute per-species instance budgets (the CAPACITY arrays are allocated once).
+    const nearCapMul = low ? 0.22 : (high ? 0.45 : 0.3);
+    const nearRHard = low ? 70 : (high ? 110 : 90);
     const cam = this.renderer.camera;
     this._projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._projScreen);
 
     // Pooled buckets: this used to allocate a Map plus one array per species on
     // every rebuild, which is what made the GC churn visible as a hitch.
-    const buckets = this._buckets || (this._buckets = new Map());
-    const farBuckets = this._farBuckets || (this._farBuckets = new Map());
+    const nearB = this._buckets || (this._buckets = new Map());
+    const midB = this._midBuckets || (this._midBuckets = new Map());
+    const billB = this._billBuckets || (this._billBuckets = new Map());
     for (const rec of this.records.values()) {
       if (!rec.props) continue;
       for (const p of rec.props) {
@@ -596,53 +743,69 @@ export class Streaming {
         this._sphere.center.set(p.x, p.y + 2.4 * p.scale, p.z);
         this._sphere.radius = 3.6 * p.scale;
         if (!this._frustum.intersectsSphere(this._sphere)) continue;
-        const map = d <= nearR ? buckets : farBuckets;
+        p._d = d;                                    // scratch: distance priority below
+        const isTree = SPRITE_SET.has(p.prop);
+        const map = d <= (isTree ? nearR : nearRHard) ? nearB : (d <= midR ? midB : billB);
         let a = map.get(p.prop);
         if (!a) { a = []; map.set(p.prop, a); }
         a.push(p);
       }
     }
     let total = 0;
-    for (const [type, im] of this.propMeshes) {
-      if (type === PROP.GATE) continue;
-      const list = buckets.get(type) || [];
-      const n = Math.min(list.length, Math.floor(CAPACITY[type] * capMul));
+    // Distance priority: the buckets are sorted nearest-first so a budget cut drops the
+    // far end of the species band and never the trees the driver is actually aiming at.
+    const prio = (list) => { if (list.length > 1) list.sort((a, b) => a._d - b._d); return list; };
+    const put = (im, list, n, camFacing, fade0, fade1, farRef) => {
       for (let i = 0; i < n; i++) {
         const p = list[i];
         this._pos.set(p.x, p.y, p.z);
-        this._euler.set(0, p.yaw, 0);
+        // A billboard squares up to the camera; a crossed-quad / voxel prop keeps the
+        // yaw it was placed with, so a stand does not swim when the camera swings.
+        this._euler.set(0, camFacing ? Math.atan2(cam.position.x - p.x, cam.position.z - p.z) : p.yaw, 0);
         this._quat.setFromEuler(this._euler);
         this._scale.set(p.scale, p.scale, p.scale);
         this._mat4.compose(this._pos, this._quat, this._scale);
         im.setMatrixAt(i, this._mat4);
+        if (im.instanceColor) {
+          // Distance fade, not a pop: 1.0 at the inner edge of the band down to 0.78 at
+          // farR, multiplied into the Lambert diffuse and then pushed into the scene fog.
+          const t = Math.max(0, Math.min(1, (p._d - fade0) / Math.max(1, fade1 - fade0)));
+          const f = 1 - (1 - 0.78) * t * farRef;
+          this._col.setRGB(f, f, f);
+          im.setColorAt(i, this._col);
+        }
       }
       im.count = n;
       im.visible = n > 0;
       upload(im, n);
+      if (im.instanceColor) upload(im.instanceColor, n, 3);
       total += n;
-      // far LOD: same placement on the sprite mesh; species without a sprite geo
-      // simply drop out past nearR (posts and spectators are too small to matter)
-      const fim = this.farMeshes.get(type);
-      if (fim) {
-        const fl = farBuckets.get(type) || [];
-        const fn = Math.min(fl.length, CAPACITY[type]);
-        for (let i = 0; i < fn; i++) {
-          const p = fl[i];
-          this._pos.set(p.x, p.y, p.z);
-          this._euler.set(0, p.yaw, 0);
-          this._quat.setFromEuler(this._euler);
-          this._scale.set(p.scale, p.scale, p.scale);
-          this._mat4.compose(this._pos, this._quat, this._scale);
-          fim.setMatrixAt(i, this._mat4);
-        }
-        fim.count = fn;
-        fim.visible = fn > 0;
-        upload(fim, fn);
-        total += fn;
-      }
+    };
+    for (const [type, im] of this.propMeshes) {
+      if (type === PROP.GATE) continue;
+      const cap = CAPACITY[type];
+      const nl = nearB.get(type), ml = midB.get(type), bl = billB.get(type);
+      const near = prio(nl || this._empty);
+      const mid = prio(ml || this._empty);
+      const bill = prio(bl || this._empty);
+      put(im, near, this._budget(near, Math.floor(cap * nearCapMul)), false, 0, 0, 0);
+      const mim = this.midMeshes.get(type);
+      if (mim) put(mim, mid, this._budget(mid, cap), false, midR, farR, 1);
+      const bim = this.billMeshes.get(type);
+      if (bim) put(bim, bill, this._budget(bill, cap), true, farR * 0.62, farR, 1);
     }
     this.stats.props = total;
-    for (const a of buckets.values()) a.length = 0;      // keep the arrays, drop the items
-    for (const a of farBuckets.values()) a.length = 0;
+    for (const a of nearB.values()) a.length = 0;      // keep the arrays, drop the items
+    for (const a of midB.values()) a.length = 0;
+    for (const a of billB.values()) a.length = 0;
+  }
+
+  /** Shared empty bucket, so a species with nothing visible allocates nothing. */
+  get _empty() { return this._emptyList || (this._emptyList = []); }
+
+  /** Distance-priority budget: spend the instance cap on the nearest props. */
+  _budget(list, cap) {
+    if (list.length > cap) list.sort((a, b) => a._d - b._d);
+    return Math.min(list.length, cap);
   }
 }
