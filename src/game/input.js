@@ -80,9 +80,11 @@ export class Input {
     // The thumb pad is analog (continuous, deadzoned, curved in touch.js); the
     // keyboard and the pad axes stay binary and ramp below.
     const analog = (t.enabled && typeof t.analogSteer === 'number') ? t.analogSteer : null;
+    // Vehicle convention: POSITIVE steer = LEFT. Keyboard left therefore has to be
+    // the +1 term (it used to be the minus term, which steered the car right).
     const want = analog !== null
       ? clamp(analog, -1, 1)
-      : clamp((held('steerRight') ? 1 : 0) - (held('steerLeft') ? 1 : 0), -1, 1);
+      : clamp((held('steerLeft') ? 1 : 0) - (held('steerRight') ? 1 : 0), -1, 1);
     if (settings.keyboardAsPad) {
       // First-order ramp: the same response a wheel with a real rate limit gives.
       const rate = 1000 / Math.max(20, settings.steerRampMs);

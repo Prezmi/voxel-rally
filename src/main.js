@@ -410,7 +410,12 @@ async function main() {
 
   // ?perftest=1: the in-game perf harness. Flag-gated, so a normal boot never
   // wraps the loop and never logs.
-  if (cfg.perftest) startPerfHarness({ loop, renderer, stream, dirt });
+  if (cfg.perftest) {
+    // Prime the chunk cache before the harness clock starts, otherwise the 10/30/60 s
+    // marks measure the cache filling up rather than steady-state driving.
+    for (let k = 0; k < 12; k++) stream.update(car.body.pos, 120);
+    startPerfHarness({ loop, renderer, stream, dirt });
+  }
 
   // Shot mode: run the whole drive synchronously at boot, then freeze the sim.
   // --virtual-time-budget does not drive rAF at 60 Hz on a headless box, so a

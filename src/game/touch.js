@@ -38,6 +38,7 @@ export function steerCurve(raw, dz = STEER_DEADZONE) {
 // game's own pixel font (pixelLabel below).
 const STYLE = `
 #touch-ui{position:fixed;inset:0;z-index:12;pointer-events:none;touch-action:none;
+  overscroll-behavior:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
   opacity:0;transition:opacity .2s;display:none;
   --sa-l:env(safe-area-inset-left,0px);--sa-r:env(safe-area-inset-right,0px);
   --sa-b:env(safe-area-inset-bottom,0px);--s:1;--edge:8px}
@@ -162,6 +163,22 @@ const TEMPLATE = `
 </div>
 `;
 
+/**
+ * A thumb drag on screen -> a steer command. Screen x grows to the RIGHT while the
+ * steer convention is positive = left, so the screen delta is negated here: a thumb
+ * dragged left gives a positive (left) steer, the same sign the arrow/pad buttons and
+ * the keyboard give.
+ */
+export function dragToSteer(dxPx, travelPx) {
+  const t = Math.max(8, travelPx || 1);
+  return Math.max(-1, Math.min(1, -dxPx / t));
+}
+
+/** Knob x-offset in px for a steer value: positive (left) steer moves it LEFT (< 0). */
+export function knobOffset(steer, half) {
+  return -Math.max(-1, Math.min(1, steer || 0)) * half;
+}
+
 export function createTouchInput() {
   const actions = { throttle: 0, brake: 0, steerLeft: 0, steerRight: 0, handbrake: 0 };
   return {
@@ -170,7 +187,11 @@ export function createTouchInput() {
     analogSteer: null,       // live analog steer from the thumb (curved), null = no thumb
     steerVisual: 0,          // the value the car actually got -> drives the knob
     _raw: 0, _raf: 0,
-    get steer() { return this.analogSteer ?? (actions.steerRight - actions.steerLeft); },
+    // Vehicle convention: POSITIVE steer = a LEFT turn (see car/steering.js: a
+    // positive angle turns the front wheels towards body -X, i.e. to the left).
+    // This used to be steerRight - steerLeft, which handed a left press -1 and
+    // therefore turned the car RIGHT.
+    get steer() { return this.analogSteer ?? (actions.steerLeft - actions.steerRight); },
     isHeld(name) { return actions[name] === 1; },
     releaseAll() {
       for (const k in actions) actions[k] = 0;
@@ -190,7 +211,7 @@ export function createTouchInput() {
       if (!knob || !track) return;
       const half = Math.max(8, (track.clientWidth - knob.offsetWidth) / 2);
       const v = Math.max(-1, Math.min(1, this.steerVisual || 0));
-      knob.style.transform = `translateX(${(v * half).toFixed(1)}px)`;
+      knob.style.transform = `translateX(${knobOffset(v, half).toFixed(1)}px)`;
       if (v !== 0) knob.classList.add('on'); else knob.classList.remove('on');
     },
     attach(target = window) {
@@ -268,13 +289,54 @@ export function createTouchInput() {
         this.setSteerRaw(0);
       });
       zone.addEventListener('pointermove', (e) => {
-        if (zp !== null && e.pointerId === zp) this.setSteerRaw((e.clientX - originX) / travel);
+        if (zp !== null && e.pointerId === zp) this.setSteerRaw(dragToSteer(e.clientX - originX, travel));
       });
       const lift = (e) => { if (zp === null || e.pointerId === zp) { zp = null; this.releaseSteer(); } };
       zone.addEventListener('pointerup', lift);
       zone.addEventListener('pointercancel', lift);
       window.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') this.enabled && root.classList.remove('on'); }, { passive: true });
-      document.documentElement.style.touchAction = 'manipulation';
+      // ---- page zoom / pan lockdown (phone) ------------------------------------
+      // CSS on the overlay is not enough: iOS still fires gesturestart/gesturechange for a
+      // pinch that begins on the canvas, and Chrome Android still honours double-tap zoom.
+      // So the gestures are swallowed at the document level as well, and the canvas and the
+      // overlay controls both preventDefault their touchstart/pointerdown.
+      const lock = document.documentElement.style;
+      lock.touchAction = 'none'; lock.overscrollBehavior = 'none'; lock.height = '100%';
+      if (document.body) {
+        document.body.style.touchAction = 'none';
+        document.body.style.overscrollBehavior = 'none';
+        document.body.style.position = 'fixed';   // height lock: the page cannot scroll
+        document.body.style.inset = '0';
+        document.body.style.height = '100%';
+        document.body.style.overflow = 'hidden';
+      }
+      const swallow = (e) => { e.preventDefault(); return false; };
+      root.addEventListener('touchstart', swallow, { passive: false });
+      const canvas = document.getElementById('c');
+      canvas?.addEventListener('touchstart', swallow, { passive: false });
+      canvas?.addEventListener('pointerdown', (e) => { if (e.pointerType !== 'mouse') e.preventDefault(); }, { passive: false });
+      if (!this._gestureLock) {          // window-level: installed once per session
+        this._gestureLock = true;
+        for (const g of ['gesturestart', 'gesturechange', 'gestureend']) {
+          document.addEventListener(g, swallow, { passive: false });
+        }
+        // Double tap is an IN-GAME action (camera, the same one as the tg-camera pad),
+        // never a page zoom; dblclick is swallowed so it cannot zoom either.
+        let lastTap = 0, lastX = 0, lastY = 0;
+        const dbl = (e) => {
+          e.preventDefault();
+          const now = performance.now();
+          const x = e.clientX || 0, y = e.clientY || 0;
+          if (now - lastTap < 320 && Math.hypot(x - lastX, y - lastY) < 32) this.tap('camera');
+          lastTap = now; lastX = x; lastY = y;
+        };
+        document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
+        document.addEventListener('pointerup', (e) => {
+          if (e.pointerType === 'mouse' || !this.enabled || !this.root) return;
+          if (e.target?.closest?.('#touch-ui')) return;   // pads have their own handlers
+          dbl(e);
+        }, { passive: false });
+      }
       // The knob follows the steer the CAR got, so it visibly self-centres.
       if (typeof requestAnimationFrame === 'function') {
         const tick = () => { if (!this.root) return; this._syncKnob(); this._raf = requestAnimationFrame(tick); };

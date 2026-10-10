@@ -18,7 +18,7 @@ import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
-import { steerCurve, STEER_DEADZONE } from '../game/touch.js';
+import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
 import { settings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 
@@ -530,19 +530,19 @@ function testTouch() {
   input.touch.setAction('throttle', true);
   settle();
   check('touch: left steer + throttle held together',
-    input.state.steer === -1 && input.state.throttle === 1 && input.state.brake === 0,
+    input.state.steer === 1 && input.state.throttle === 1 && input.state.brake === 0,
     `steer=${input.state.steer} throttle=${input.state.throttle}`);
 
   input.touch.setAction('steerLeft', true);          // a second finger, same side
   settle();
   check('touch: two fingers one side stay at one unit of lock',
-    input.state.steer === -1, `steer=${input.state.steer}`);
+    input.state.steer === 1, `steer=${input.state.steer}`);
 
   input.touch.setAction('steerLeft', false);
   input.touch.setAction('steerRight', true);
   settle();
   check('touch: steer follows the live finger',
-    input.state.steer === 1 && input.state.throttle === 1, `steer=${input.state.steer}`);
+    input.state.steer === -1 && input.state.throttle === 1, `steer=${input.state.steer}`);
 
   input.touch.setAction('steerRight', false);
   input.touch.setAction('throttle', false);
@@ -752,6 +752,67 @@ function testTouchOnlyStageFlow() {
       + `padPads=${pads} menuBack=${menuBack} resumed=${resumed} ${trail.join(' ')}`);
 }
 testTouchOnlyStageFlow();
+
+// ---------------------------------------------------------------------------
+// Steering sign chain. The vehicle convention is POSITIVE steer = a LEFT turn
+// (car/steering.js turns the front wheels to body -X), verified here by driving
+// the real car: heading +X, world left = -Z. Pad buttons, the analog thumb drag,
+// the keyboard and the pad knob must all agree with it — one flipped sign in the
+// chain and the on-screen left arrow steers the car right.
+function testSteerSignChain() {
+  const world = new FlatWorld(SURF.ASPHALT);
+  const input = new Input();
+  input.touch.enabled = true;
+  const settle = () => { for (let k = 0; k < 30; k++) input.sample(DT); };
+
+  input.touch.setAction('steerLeft', true); settle();
+  const touchLeft = input.state.steer;
+  input.touch.setAction('steerLeft', false); settle();
+  input.touch.setAction('steerRight', true); settle();
+  const touchRight = input.state.steer;
+  input.touch.setAction('steerRight', false); settle();
+
+  input.down.add('steerLeft'); settle();
+  const keyLeft = input.state.steer;
+  input.down.clear(); settle();
+  input.down.add('steerRight'); settle();
+  const keyRight = input.state.steer;
+  input.down.clear(); settle();
+
+  // a thumb dragged LEFT (negative screen dx) is a left steer, and the knob for a
+  // left steer sits LEFT of the track centre (negative px offset)
+  const dragLeft = steerCurve(dragToSteer(-60, 80), STEER_DEADZONE);
+  const dragRight = steerCurve(dragToSteer(60, 80), STEER_DEADZONE);
+  const knobForLeft = knobOffset(1, 60);          // px from centre
+  const knobForRight = knobOffset(-1, 60);
+
+  // the car itself: feed the number the pad handed over and watch it turn left
+  const turnTo = (steer) => {
+    const car = makeCar(world, {});
+    car.placeAt(0, 0, 0);
+    car.body.vel.x = 14;
+    car.wheels.forEach((wh) => { wh.omega = 14 / wh.rEff; });
+    for (let i = 0; i < 90; i++) {
+      car.setInput({ throttle: 0.3, brake: 0, steer, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+      car.step(DT);
+    }
+    return { z: car.body.pos.z, yaw: Math.atan2(car.body.forward.z, car.body.forward.x) };
+  };
+  const carLeft = turnTo(keyLeft);
+  const carRight = turnTo(keyRight);
+
+  const agree = touchLeft === 1 && keyLeft === 1 && touchLeft === keyLeft
+    && touchRight === -1 && keyRight === -1;
+  const dragAgrees = dragLeft > 0 && dragRight < 0 && Math.sign(dragLeft) === Math.sign(keyLeft);
+  const knobAgrees = knobForLeft < 0 && knobForRight > 0
+    && Math.sign(knobForLeft) === -Math.sign(keyLeft);
+  const turnsLeft = carLeft.z < -0.5 && carLeft.yaw < -0.05 && carRight.z > 0.5 && carRight.yaw > 0.05;
+  check('T15 steering sign chain: pad left == keyboard left == drag left == a real left turn, knob matches',
+    agree && dragAgrees && knobAgrees && turnsLeft,
+    `touch=${touchLeft} key=${keyLeft} drag=${dragLeft.toFixed(3)} knob=${knobForLeft} ` +
+    `carL.z=${carLeft.z.toFixed(2)} carL.yaw=${carLeft.yaw.toFixed(3)} carR.z=${carRight.z.toFixed(2)}`);
+}
+testSteerSignChain();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

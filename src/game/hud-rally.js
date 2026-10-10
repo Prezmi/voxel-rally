@@ -193,7 +193,7 @@ export class RallyHud {
       meta: { x: M.x, y: M.y, w: Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 10), h: 13 },
       signs: { x: M.x + Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 14), y: M.y, w: 0, h: 34 },
       time: { x: M.x, y: M.y + 40, w: 96, h: 33 },
-      prog: { x: M.x, y: M.y + 92, w: Math.min(210, Math.max(120, Math.round(W * 0.32))), h: 26 },
+      prog: { x: M.x, y: M.y + 92, w: Math.min(230, Math.max(120, Math.round(W * 0.32))), h: 30 },
       dial: { x: M.r - 72, y: M.b - 4 - 22 - 4 - 72, w: 72, h: 72 },
       speed: { x: M.r - 72 - 6 - 62, y: M.b - 4 - 22 - 4 - 40, w: 62, h: 40 },
       states: { x: M.r - 114, y: M.b - 26, w: 114, h: 22 },
@@ -741,10 +741,19 @@ export class RallyHud {
     for (const g2 of gates) key += '|' + g2.arc.toFixed(0);
     if (!this._key('prog', key)) return;
     const R = this.L.prog;
-    this._clear({ x: R.x, y: R.y, w: R.w, h: R.h + 4 });
-    drawText(this.g, sec ? `SEKTOR ${sec.index}/${t.sectors.length}  ${Math.round(st.furthest)} M`
-      : `POSTĘP ${Math.round(pos * 100)}%`, R.x, R.y, 1, C.TEXT);
-    const bx = R.x, by = R.y + 11, bw = R.w, bh = 8;
+    // The label had no backing of its own and sat only 11 px above the bar frame, while
+    // the checkpoint blocks and the car tick are drawn from by-4/-6: they cut straight
+    // through the glyph bottoms, so the sector strip read as clipped text over a line.
+    // It now owns a backing row and the bar starts below the glyphs.
+    const label = sec ? `SEKTOR ${sec.index}/${t.sectors.length}  ${Math.round(st.furthest)} M`
+      : `POSTĘP ${Math.round(pos * 100)}%`;
+    const lw = Math.max(96, textWidth(label, 1) + 8);
+    const bw = Math.max(R.w, lw);
+    this._clear({ x: R.x - 2, y: R.y - 3, w: bw + 6, h: R.h + 8 });
+    this.g.fillStyle = C.OUT; this.g.fillRect(R.x - 2, R.y - 3, lw + 2, 14);
+    this.g.fillStyle = C.PANEL; this.g.fillRect(R.x - 1, R.y - 2, lw, 12);
+    drawText(this.g, label, R.x, R.y, 1, C.TEXT);
+    const bx = R.x, by = R.y + 16, bh = 8;
     frameRect(this.g, bx, by, bw, bh, C.SLOT, false);
     if (sec) {                                  // active sector: a lighter block band
       const x0 = bx + 1 + Math.round((sFrom / total) * (bw - 2));

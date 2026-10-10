@@ -114,21 +114,34 @@ MAT_ORDER = list(C)
 
 
 # --------------------------------------------------------------- vegetation
-# A foliage tier is always a *filled* stack of three square plates (dark wide base,
-# mid flanks, lit narrower crown plate) plus one jutting needle/lump box that breaks
-# the square silhouette. Overlapping hz values keep the stack solid, so nothing can
-# be seen through the tree.
+# A foliage cluster is a filled volume, not a slab: the wide shaded base plate stays
+# centred on the branch so the stack can never be seen through, but the mid flanks and
+# the lit crown sit at their own x/y offset with their own half-depths, and two lobes
+# stick out on opposite quarters at different heights and tones. That breaks the
+# "stack of identical square plates" read the in-game capture showed from ground level.
+# Overlapping hz values keep the stack solid; the builder voxelises each tree and fails
+# on any enclosed empty run along X, Y or Z.
 def tier(salt, cx, cz, r, hz, idx, dark, mid, lit, arms=1.0):
-    out = [
-        (cx, 0, cz - hz * 0.42, r * arms, r, hz * 0.46, dark),          # shaded underside
-        (cx, 0, cz + hz * 0.06, r * 0.86 * arms, r * 0.86, hz * 0.56, mid),   # flanks
-        (cx, 0, cz + hz * 0.46, r * 0.62 * arms, r * 0.62, hz * 0.42, lit),   # lit top
-    ]
     a = hsh(salt, idx, 17)
     b = hsh(idx, salt, 23)
+    o = hsh(salt + 5, idx, 41) - 0.5     # cluster offset, always inside r
+    q = hsh(idx, salt + 7, 59) - 0.5
+    lo = hsh(salt + 2, idx, 71)
     side = 1.0 if (salt + idx) % 2 == 0 else -1.0
-    out.append((cx + side * r * (0.66 + 0.18 * a), (b - 0.5) * r * 0.7,
-                cz - hz * 0.10, r * 0.16, r * 0.16, hz * 0.36, dark))    # jutting sprig
+    out = [
+        (cx, 0, cz - hz * 0.42, r * arms, r, hz * 0.46, dark),           # shaded underside
+        (cx + o * r * 0.34, q * r * 0.34, cz + hz * 0.04,
+         r * (0.80 + 0.12 * a) * arms, r * (0.78 + 0.14 * b), hz * 0.30, mid),   # near flank
+        (cx - o * r * 0.26, -q * r * 0.30, cz + hz * 0.20,
+         r * (0.66 + 0.14 * b) * arms, r * (0.70 + 0.12 * a), hz * 0.26, mid),   # far flank
+        (cx + o * r * 0.46, q * r * 0.44, cz + hz * 0.46,
+         r * (0.50 + 0.14 * b) * arms, r * (0.50 + 0.14 * a), hz * 0.42, lit),   # lit crown
+        (cx + side * r * (0.66 + 0.18 * a), (b - 0.5) * r * 0.7,
+         cz - hz * 0.10, r * 0.16, r * 0.16, hz * 0.36, dark),           # jutting sprig
+        (cx - side * r * (0.60 + 0.16 * lo), (a - 0.5) * r * 0.86,
+         cz + hz * 0.24, r * (0.15 + 0.11 * lo), r * (0.15 + 0.13 * lo),
+         hz * (0.28 + 0.20 * abs(q)), lit if lo > 0.5 else mid),          # deeper side lobe
+    ]
     return out
 
 
@@ -360,11 +373,20 @@ def _start_gantry():
     g.append((0, 0, 6.70, 7.10, 0.34, 0.10, "pole_steel"))              # lower chord
     for k in range(-3, 4):
         g.append((k * 2.0, 0, 7.00, 0.09, 0.30, 0.30, "pole_steel"))    # hangers
-    g.append((0, 0.30, 5.55, 4.80, 0.06, 0.78, "gate_dark"))            # start board
-    g.append((0, 0.36, 5.55, 4.60, 0.03, 0.66, "canvas"))
-    for k in range(8):                                                  # chequer tabs
-        g.append((-4.20 + k * 1.20, 0.40, 6.05, 0.60, 0.02, 0.20,
-                  "chequer" if k % 2 else "canvas"))
+    # Start board. The old build was a 0.06 m dark plate at y 0.30, a 0.03 m canvas at
+    # 0.36 and eight 0.02 m pale/near-black chequer tabs at 0.40: three near-coplanar
+    # surfaces over the same 9.2 m span, so the depth pass could not separate them and
+    # the alternating tabs aliased into a white/red checkerboard. One thick opaque plate
+    # with a frame now, plus solid lettering blocks proud of BOTH faces (the gantry is
+    # placed on a road tangent and is read from either side). No alpha anywhere.
+    g.append((0, 0.30, 5.55, 4.80, 0.12, 0.84, "gate_dark"))           # frame, opaque
+    g.append((0, 0.30, 5.55, 4.55, 0.16, 0.70, "canvas"))              # solid canvas plate
+    for s in (-1, 1):
+        for k in range(5):                                            # word row 1
+            g.append((-3.30 + k * 1.65, 0.30 + s * 0.20, 5.80, 0.58, 0.05, 0.17, "gate_red"))
+        for k in range(3):                                            # word row 2
+            g.append((-2.30 + k * 2.30, 0.30 + s * 0.20, 5.25, 0.85, 0.05, 0.13, "gate_dark"))
+        g.append((s * 5.35, 0.30, 5.55, 0.45, 0.16, 0.84, "gate_red"))  # solid end tabs
     return g
 
 
@@ -376,10 +398,18 @@ def _banner_arch():
     rib = (4.55, 5.15, 5.60, 5.85, 5.60, 5.15, 4.55)                    # stepped rib
     for k, z in enumerate(rib):
         g.append((-5.20 + k * 1.73, 0, z, 0.95, 0.32, 0.26, "pole_steel"))
-    g.append((0, 0.34, 4.30, 4.40, 0.05, 0.80, "canvas"))               # banner cloth
-    g.append((0, 0.38, 3.42, 4.40, 0.03, 0.16, "gate_red"))             # lower trim
+    # Banner cloth: one thick plate carrying its own lettering blocks on both faces.
+    # As with the gantry, the old 0.03-0.05 m pale cloth + 0.03 m red trim + 0.05 m
+    # chequer end tabs sat within 5 cm of each other and came back as dithered pale
+    # slabbing over the lane.
+    g.append((0, 0.32, 4.30, 4.55, 0.12, 0.84, "gate_dark"))           # frame, opaque
+    g.append((0, 0.32, 4.30, 4.30, 0.16, 0.70, "canvas"))              # solid cloth plate
     for s in (-1, 1):
-        g.append((s * 4.55, 0.34, 4.30, 0.35, 0.05, 0.80, "chequer"))   # end tabs
+        for k in range(4):                                            # lettering
+            g.append((-2.70 + k * 1.80, 0.32 + s * 0.20, 4.50, 0.62, 0.05, 0.18, "gate_red"))
+        for k in range(2):                                            # lower rule
+            g.append((-1.35 + k * 2.70, 0.32 + s * 0.20, 3.90, 1.05, 0.05, 0.10, "gate_dark"))
+        g.append((s * 4.60, 0.32, 4.30, 0.40, 0.16, 0.84, "gate_red"))  # solid end tabs
     return g
 
 

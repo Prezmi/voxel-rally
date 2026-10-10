@@ -15,7 +15,7 @@ import { CHUNK, WORLD_HEIGHT } from './chunk.js';
 import { blockColor, blockSurface } from './palette.js';
 import { hash01 } from './noise.js';
 
-export const LOD_CELL = [1, 2, 4];
+export const LOD_CELL = [1, 2, 4, 8];
 // AO floor: a crevice may be shaded, never black. 0.56 on the deepest corner, times
 // WALL_SHADE, times the shader's crevice band, is what painted a 1-cell square pit.
 const AO_LEVELS = [1.0, 0.90, 0.81, 0.72];
@@ -117,9 +117,9 @@ export function meshChunk(world, chunk, lod = 0) {
         }
       }
       // Full and simplified LODs keep cliffs honest (max); silhouette averages.
-      const rawH = lod === 2 ? Math.round(sum / Math.max(1, cnt)) : peak;
+      const rawH = lod >= 2 ? Math.round(sum / Math.max(1, cnt)) : peak;
       const wx = x0 + i * cs + (cs >> 1), wz = z0 + j * cs + (cs >> 1);
-      topQ[j * N + i] = lod === 2 ? snapQ(rawH) : relaxQ(rawH, wx, wz);
+      topQ[j * N + i] = lod >= 2 ? snapQ(rawH) : relaxQ(rawH, wx, wz);
       bid[j * N + i] = mode;
     }
   }
@@ -173,7 +173,7 @@ export function meshChunk(world, chunk, lod = 0) {
   const topOutside = (i, j) => {
     const wx = Math.floor(x0 + i * cs + cs * 0.5), wz = Math.floor(z0 + j * cs + cs * 0.5);
     const tq = world.columnTopQAt(wx, wz);
-    return tq < 0 ? 0 : (lod === 2 ? snapQ(tq) : relaxQ(tq, wx, wz));
+    return tq < 0 ? 0 : (lod >= 2 ? snapQ(tq) : relaxQ(tq, wx, wz));
   };
 
   let quads = 0;
@@ -237,7 +237,7 @@ export function meshChunk(world, chunk, lod = 0) {
         const bz = cz === az ? az : bz1 - 1;
         const tx = cx === ax ? -1 : 1;
         const tz = cz === az ? -1 : 1;
-        const ao = lod === 2 ? 1 : AO_LEVELS[aoTop(bx, by, bz, tx, tz)];
+        const ao = lod >= 2 ? 1 : AO_LEVELS[aoTop(bx, by, bz, tx, tz)];
 
         // Local grid cell for this corner + the diagonal neighbour it borders.
         const ci = cx === ax ? i : i + w - 1;
@@ -256,7 +256,7 @@ export function meshChunk(world, chunk, lod = 0) {
         // pw dominates on the corridor: the carve wear band *is* the tone of the
         // carriageway (rut dark, shoulder pale), the geometry terms only add the
         // worn lip on top of it.
-        const wear = lod === 2 ? 0.5 : wearOf(0.10 + drop * 0.22 + (nb !== b ? 0.12 : 0) + pw * 0.60);
+        const wear = lod >= 2 ? 0.5 : wearOf(0.10 + drop * 0.22 + (nb !== b ? 0.12 : 0) + pw * 0.60);
 
         // Surface-to-surface transition: a road panel sharing a corner with grass
         // pulls 1/3 of the grass colour, so the edge is a gradient, not a step.
@@ -290,7 +290,7 @@ export function meshChunk(world, chunk, lod = 0) {
         // plus a small hashed wobble. Free at draw time, keyed by world position so
         // it cannot produce a chunk seam (PLAN §10 "zero szwu").
         let tnx = 0, tnz = 0;
-        if (lod !== 2) {
+        if (lod < 2) {
           const hi = Math.min(N - 1, ci + 1), lo = Math.max(0, ci - 1);
           const hj = Math.min(N - 1, cj + 1), lj = Math.max(0, cj - 1);
           const sX = (topQ[cj * N + hi] - topQ[cj * N + lo]) / (16 * Math.max(1, hi - lo));
@@ -403,14 +403,14 @@ export function meshChunk(world, chunk, lod = 0) {
             const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
             const tz = u === u0 ? -1 : 1;
             const ty = vy === yLo ? -1 : 1;
-            const ao = lod === 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallX(inB, by, bz, ty, tz)];
+            const ao = lod >= 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallX(inB, by, bz, ty, tz)];
             const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;      // 0 in the crevice, 1 at the lip
             const wm = wmBase + (1 - wmBase) * f;
-            const wear = lod === 2 ? 0.5 : wm;
+            const wear = lod >= 2 ? 0.5 : wm;
             let cr = r * (1 + (pw - 0.5) * 0.22), cg = g, cb = bb * (1 + (pw - 0.5) * 0.22);
             if (hasNb) { const k = 0.4 * (1 - wm); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
-            const jy = lod === 2 ? 0 : (hash01(bz, by, RELIEF_SALT + 7) - 0.5) * 0.12;
-            const jz = lod === 2 ? 0 : (hash01(by, bz, RELIEF_SALT + 11) - 0.5) * 0.14;
+            const jy = lod >= 2 ? 0 : (hash01(bz, by, RELIEF_SALT + 7) - 0.5) * 0.12;
+            const jz = lod >= 2 ? 0 : (hash01(by, bz, RELIEF_SALT + 11) - 0.5) * 0.14;
             const inv = 1 / Math.hypot(1, jy, jz);
             vertex(plane, vy, u, inv, jy * inv, jz * inv, cr, cg, cb, ao, surfId, wear);
           }
@@ -424,14 +424,14 @@ export function meshChunk(world, chunk, lod = 0) {
             const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
             const tx = u === x0u ? -1 : 1;
             const ty = vy === yLo ? -1 : 1;
-            const ao = lod === 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallZ(bx, by, inB, tx, ty)];
+            const ao = lod >= 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallZ(bx, by, inB, tx, ty)];
             const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;
             const wm = wmBase + (1 - wmBase) * f;
-            const wear = lod === 2 ? 0.5 : wm;
+            const wear = lod >= 2 ? 0.5 : wm;
             let cr = r * (1 + (pw - 0.5) * 0.22), cg = g, cb = bb * (1 + (pw - 0.5) * 0.22);
             if (hasNb) { const k = 0.4 * (1 - wm); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
-            const jy = lod === 2 ? 0 : (hash01(bx, by, RELIEF_SALT + 7) - 0.5) * 0.12;
-            const jx = lod === 2 ? 0 : (hash01(by, bx, RELIEF_SALT + 13) - 0.5) * 0.14;
+            const jy = lod >= 2 ? 0 : (hash01(bx, by, RELIEF_SALT + 7) - 0.5) * 0.12;
+            const jx = lod >= 2 ? 0 : (hash01(by, bx, RELIEF_SALT + 13) - 0.5) * 0.14;
             const inv = 1 / Math.hypot(1, jy, jx);
             vertex(u, vy, plane, jx * inv, jy * inv, inv, cr, cg, cb, ao, surfId, wear);
           }

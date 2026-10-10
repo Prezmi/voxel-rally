@@ -1,15 +1,15 @@
 {
   "generated_by": "tools/blender/build_stage_props.py",
   "source_glb": "props.glb",
-  "total_triangles": 4080,
-  "file_bytes": 248700,
+  "total_triangles": 4824,
+  "file_bytes": 287816,
   "props": [
     {
       "name": "prop_banner_arch",
       "width_m": 12.72,
       "height_m": 6.11,
-      "depth_m": 0.92,
-      "triangles": 180,
+      "depth_m": 1.03,
+      "triangles": 324,
       "instance": false
     },
     {
@@ -17,7 +17,7 @@
       "width_m": 2.0,
       "height_m": 1.574,
       "depth_m": 2.0,
-      "triangles": 180,
+      "triangles": 252,
       "instance": true
     },
     {
@@ -121,7 +121,7 @@
       "width_m": 14.32,
       "height_m": 7.49,
       "depth_m": 2.12,
-      "triangles": 564,
+      "triangles": 684,
       "instance": false
     },
     {
@@ -134,10 +134,10 @@
     },
     {
       "name": "prop_tree_birch",
-      "width_m": 3.732,
+      "width_m": 3.738,
       "height_m": 7.96,
       "depth_m": 3.9,
-      "triangles": 384,
+      "triangles": 528,
       "instance": true
     },
     {
@@ -153,15 +153,15 @@
       "width_m": 4.837,
       "height_m": 7.372,
       "depth_m": 5.2,
-      "triangles": 324,
+      "triangles": 444,
       "instance": true
     },
     {
       "name": "prop_tree_pine",
-      "width_m": 4.56,
+      "width_m": 4.58,
       "height_m": 9.44,
       "depth_m": 4.56,
-      "triangles": 372,
+      "triangles": 516,
       "instance": true
     }
   ]
