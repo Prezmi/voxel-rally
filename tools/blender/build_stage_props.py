@@ -77,7 +77,14 @@ C = {
     "canvas":      (0xD9CFB4, 0.85),  # marshal tent canvas, sunlit side
     "canvas_shade":(0x8E8672, 0.85),  # tent canvas in shade / back wall
     "chequer":     (0x1A1C1F, 0.60),  # start-line chequer tabs
-    "fence_mesh":  (0xA6A49A, 0.55),  # spectator fence mesh battens
+    "fence_mesh":  (0x8F8D82, 0.60),  # spectator fence mesh battens
+    # Marshal tent tones. The old "canvas" (0xD9CFB4) sheet read as broken geometry
+    # at rally speed, so the tents get their own mid-tan canvas plus a barn-red roof
+    # that sits inside the rally red/white furniture family.
+    "tent_canvas": (0xB5A27C, 0.85),  # sunlit tent wall
+    "tent_shade":  (0x6F6449, 0.85),  # tent wall in shade / back face
+    "tent_roof":   (0x8B3327, 0.70),  # coloured tent roof, matches gate_red
+    "tent_roof_2": (0x5E241C, 0.70),  # shaded roof step / ridge
 }
 
 # ------------------------------------------------------------------ helpers
@@ -266,8 +273,8 @@ PROPS["marshal_post"] = dict(instance=True, blocks=(
     [(0, 0, 1.30, 0.13, 0.13, 1.30, "timber"),
      (0, 0, 0.10, 0.42, 0.42, 0.10, "gate_dark"),
      (0.0, 0.0, 0.80, 0.60, 0.52, 0.45, "bush_dark"),         # cabin
-     (0.0, 0.0, 1.32, 0.70, 0.62, 0.08, "gate_dark"),        # roof
-     (0.0, 0.55, 0.85, 0.40, 0.05, 0.26, "hivis_yel"),       # cabin window / panel
+     (0.0, 0.0, 1.31, 0.70, 0.62, 0.11, "gate_dark"),        # roof, 0.22 m thick
+     (0.0, 0.55, 0.85, 0.40, 0.10, 0.26, "hivis_yel"),       # panel proud of the cabin
      (0.0, 0.0, 2.45, 0.14, 0.14, 0.12, "gate_dark"),        # flag staff top
      (0.26, 0.0, 2.72, 0.26, 0.02, 0.20, "gate_red")]        # flag cloth
 ))
@@ -369,10 +376,20 @@ def _start_gantry():
         for k in range(3):                                              # stepped bracing
             g.append((x, -0.55 + k * 0.55, 0.75 + k * 1.55, 0.09, 0.40, 0.78, "pole_steel"))
             g.append((x, 0.55 - k * 0.55, 0.75 + k * 1.55, 0.09, 0.40, 0.78, "pole_steel"))
-    g.append((0, 0, 7.30, 7.10, 0.34, 0.16, "pole_steel"))              # upper chord
-    g.append((0, 0, 6.70, 7.10, 0.34, 0.10, "pole_steel"))              # lower chord
-    for k in range(-3, 4):
-        g.append((k * 2.0, 0, 7.00, 0.09, 0.30, 0.30, "pole_steel"))    # hangers
+    # Top beam. The old truss was a 0.32 m deep upper chord at 7.30, a 0.20 m lower
+    # chord at 6.70 and seven 0.18 m hangers on a 2.0 m pitch: three thin separated
+    # plates that from the start line read as a stray stepped block row floating
+    # above the banner. One deep solid beam with a tie beam under it and four thick
+    # webs, all in one steel tone, so it reads as the gantry's own top beam. Overall
+    # top stays 7.46 m and the span stays +/-7.10 m, matching the checkpoint gate.
+    g.append((0, 0, 7.20, 7.10, 0.34, 0.26, "pole_steel"))              # top beam
+    g.append((0, 0, 6.60, 7.10, 0.30, 0.14, "pole_steel"))              # tie beam
+    for k in (-2, -1, 1, 2):                                           # webs
+        g.append((k * 3.0, 0, 6.90, 0.60, 0.26, 0.42, "pole_steel"))
+    for k in range(-2, 3):                                            # beam livery
+        if k % 2:
+            continue
+        g.append((k * 2.80, 0.0, 7.20, 0.70, 0.40, 0.22, "gate_red"))
     # Start board. The old build was a 0.06 m dark plate at y 0.30, a 0.03 m canvas at
     # 0.36 and eight 0.02 m pale/near-black chequer tabs at 0.40: three near-coplanar
     # surfaces over the same 9.2 m span, so the depth pass could not separate them and
@@ -416,27 +433,37 @@ def _banner_arch():
 
 
 def _marshal_tent():
+    """Readable marshal hut: 3.0 x 3.0 m footprint, eaves at 2.0 m, ridge at 2.5 m.
+
+    The previous build was a 5.8 x 5.2 m marquee whose walls, back and front were
+    single 0.10-0.12 m near-white canvas quads spanning the whole 5.8 m width, with
+    three 0.60 m pale roof plates stacked over them. At rally distance the shell
+    silhouette was a flat pale sheet with a stepped edge, i.e. broken geometry. Every
+    panel here is a solid box at least 0.16 m thick, no two faces of a different
+    colour are coplanar or closer than 0.12 m, and the roof is a coloured 3-step
+    cap so the silhouette reads as a hut."""
     g = []
+    for sx in (-1, 1):                                                  # ground pads
+        for sy in (-1, 1):
+            g.append((sx * 1.25, sy * 1.25, 0.05, 0.22, 0.22, 0.05, "stone_dark"))
+    # Walls: 0.16 m thick, 1.5 m half-span, eaves at 2.0 m.
+    g.append((0, 1.42, 1.00, 1.50, 0.08, 1.00, "tent_shade"))           # back wall
     for s in (-1, 1):
-        g.append((s * 2.9, -2.4, 1.05, 0.09, 0.09, 1.05, "timber"))     # end posts
-        g.append((s * 2.9, 2.4, 1.05, 0.09, 0.09, 1.05, "timber"))
-        g.append((s * 2.85, 0, 1.55, 0.07, 2.40, 0.07, "timber"))       # side rails
-    g.append((0, 2.45, 1.35, 2.90, 0.06, 1.35, "canvas_shade"))         # back wall
-    for s in (-1, 1):                                                   # side walls
-        g.append((s * 2.85, 0, 1.30, 0.05, 2.40, 1.30, "canvas_shade"))
-    # Roof: three filled steps plus a ridge cap, widest lowest, so nothing shows through
-    for w, z in ((2.95, 1.75), (2.25, 2.15), (1.50, 2.55)):
-        g.append((0, 0, z, w, 2.55, 0.30, "canvas"))
-    g.append((0, 0, 2.88, 0.75, 2.60, 0.10, "canvas_shade"))            # ridge cap
-    g.append((0, -2.45, 1.00, 2.90, 0.05, 1.00, "canvas"))              # front wall
-    for s in (-1, 1):                                                   # door halves
-        g.append((s * 2.05, -2.45, 1.50, 0.85, 0.05, 0.50, "canvas"))
-    g.append((0, -2.45, 2.05, 0.95, 0.05, 0.16, "timber"))              # lintel
-    g.append((0, -1.60, 0.44, 0.90, 0.55, 0.44, "wood_board"))          # table
-    for s in (-1, 1):
-        g.append((s * 1.75, -1.55, 0.26, 0.38, 0.38, 0.26, "timber"))   # crates
-    g.append((0, 2.10, 3.60, 0.05, 0.05, 0.72, "timber"))               # ridge flagpole
-    g.append((0.55, 2.10, 3.95, 0.55, 0.02, 0.34, "gate_red"))
+        g.append((s * 1.42, 0, 1.00, 0.08, 1.42, 1.00, "tent_shade"))   # side walls
+        g.append((s * 1.00, -1.42, 1.00, 0.50, 0.08, 1.00, "tent_canvas"))  # front
+    g.append((0, -1.05, 0.95, 0.50, 0.10, 0.95, "wood_board"))          # door leaf
+    g.append((0, -1.42, 1.95, 0.78, 0.14, 0.12, "timber"))              # lintel
+    # Roof: three filled steps, widest lowest, coloured, ridge at 2.50 m.
+    for w, z, mat in ((1.70, 2.06, "tent_roof"),
+                      (1.34, 2.24, "tent_roof"),
+                      (0.92, 2.42, "tent_roof_2")):
+        g.append((0, 0, z, w, w, 0.12, mat))
+    g.append((0, 0, 2.50, 0.42, 1.50, 0.05, "tent_roof_2"))             # ridge cap
+    g.append((0, -1.75, 0.42, 0.55, 0.22, 0.42, "wood_board"))         # front table
+    for s in (-1, 1):                                                   # crates
+        g.append((s * 1.15, 1.75, 0.26, 0.40, 0.22, 0.26, "timber"))
+    g.append((-1.85, -1.85, 1.30, 0.06, 0.06, 1.30, "timber"))          # corner flag
+    g.append((-1.50, -1.85, 2.42, 0.35, 0.03, 0.24, "gate_red"))
     return g
 
 
@@ -445,10 +472,12 @@ def _fence_panel():
     for s in (-1, 1):
         g.append((s * 1.90, 0, 0.62, 0.09, 0.09, 0.62, "timber"))       # posts
         g.append((s * 1.90, 0, 0.06, 0.22, 0.22, 0.06, "stone_dark"))   # feet
-    g.append((0, 0, 1.12, 1.95, 0.05, 0.07, "wood_board"))              # top rail
-    g.append((0, 0, 0.72, 1.95, 0.05, 0.06, "wood_board"))              # mid rail
-    for k in range(7):                                                  # mesh battens
-        g.append((-1.62 + k * 0.54, 0, 0.55, 0.05, 0.03, 0.55, "fence_mesh"))
+    g.append((0, 0, 1.12, 1.95, 0.06, 0.08, "wood_board"))              # top rail
+    g.append((0, 0, 0.72, 1.95, 0.06, 0.07, "wood_board"))              # mid rail
+    g.append((0, 0, 0.22, 1.95, 0.06, 0.07, "wood_board"))              # kick rail
+    # Battens: solid 0.14 x 0.12 m verticals, not 0.10 x 0.06 m paper strips.
+    for k in range(7):
+        g.append((-1.62 + k * 0.54, 0, 0.53, 0.07, 0.06, 0.42, "fence_mesh"))
     return g
 
 

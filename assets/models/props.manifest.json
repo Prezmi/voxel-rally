@@ -1,8 +1,8 @@
 {
   "generated_by": "tools/blender/build_stage_props.py",
   "source_glb": "props.glb",
-  "total_triangles": 4740,
-  "file_bytes": 283316,
+  "total_triangles": 4728,
+  "file_bytes": 284420,
   "props": [
     {
       "name": "prop_banner_arch",
@@ -72,16 +72,16 @@
       "name": "prop_marshal_post",
       "width_m": 1.4,
       "height_m": 2.92,
-      "depth_m": 1.24,
+      "depth_m": 1.27,
       "triangles": 84,
       "instance": true
     },
     {
       "name": "prop_marshal_tent",
-      "width_m": 5.98,
-      "height_m": 4.32,
-      "depth_m": 5.2,
-      "triangles": 264,
+      "width_m": 3.61,
+      "height_m": 2.66,
+      "depth_m": 3.94,
+      "triangles": 240,
       "instance": false
     },
     {
@@ -113,7 +113,7 @@
       "width_m": 4.24,
       "height_m": 1.24,
       "depth_m": 0.44,
-      "triangles": 156,
+      "triangles": 168,
       "instance": true
     },
     {

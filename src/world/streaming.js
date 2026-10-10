@@ -717,8 +717,12 @@ export class Streaming {
     put('prop_start_gantry', gx, gz, across);
     put('prop_banner_arch', gx + tx * 34, gz + tz * 34, across);
     for (const s of [-1, 1]) {
-      put('prop_marshal_tent', gx + nx * (half + 5.5) * s + tx * 12,
-        gz + nz * (half + 5.5) * s + tz * 12, Math.atan2(-nx * s, -nz * s));
+      // Marshal huts sit clear of the fence line (fence centred at half + 1.4, 0.44 m
+      // deep; hut half-span 1.7 m) with a 2 m apron, and their yaw puts the model +Z
+      // face - the door, since export_yup maps Blender -Y to +Z - straight back at the
+      // carriageway. The old 5.8 m marquee at half + 5.5 overlapped the tree line.
+      put('prop_marshal_tent', gx + nx * (half + 4.0) * s + tx * 14,
+        gz + nz * (half + 4.0) * s + tz * 14, Math.atan2(-nx * s, -nz * s));
       for (let k = 0; k < 14; k++) {
         const d = -14 + k * 4.1;
         put('prop_spectator_fence', gx + tx * d + nx * (half + 1.4) * s,
