@@ -18,6 +18,8 @@ import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
+import { steerCurve, STEER_DEADZONE } from '../game/touch.js';
+import { settings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 
 const G = 9.81;
@@ -348,7 +350,32 @@ function testStageLoad() {
     c.step(DT);
   }
   const ms = (Date.now() - t1) / 1200;
-  check('T9 sim cost per 1/120 step on voxel terrain', ms <= 4, `sim=${ms.toFixed(3)} ms/step (budget <=4) setup=${Date.now() - t0} ms`);
+  // The ground under a loaded wheel must never fall below the terrain height it
+  // stood on (the bed here is a flat column top at 21 m). `rut` is the only field
+  // that could put a column below the carved height, so a driven stage has to leave
+  // it at 0 everywhere, and every wheel contact stays at or above 21 m.
+  let rutCols = 0, worstRut16 = 0;
+  for (const ch of world.chunks.values()) {
+    for (let c = 0; c < 256; c++) {
+      const r = ch.rut[c];
+      if (r < 0) { rutCols++; if (r < worstRut16) worstRut16 = r; }
+    }
+  }
+  let sink = 0;
+  for (const w of c.wheels) {
+    const gx = Math.floor(w.contact.x), gz = Math.floor(w.contact.z);
+    // groundHeight blends the four columns under (gx,gz); only judge points that are
+    // fully inside the generated patch, otherwise the missing columns read as 0.
+    if (world.columnTopAt(gx - 1, gz - 1) < 0 || world.columnTopAt(gx, gz - 1) < 0 ||
+        world.columnTopAt(gx - 1, gz) < 0 || world.columnTopAt(gx, gz) < 0) continue;
+    const bed = Math.max(world.columnTopAt(gx - 1, gz - 1), world.columnTopAt(gx, gz - 1),
+      world.columnTopAt(gx - 1, gz), world.columnTopAt(gx, gz));
+    sink = Math.max(sink, bed - world.groundHeight(w.contact.x, w.contact.z));
+  }
+  // 0.07 m tolerance = the procedural micro relief amplitude (0.06 m) groundHeight
+  // adds, which is not displacement. Any rut at all, or a column below its bed, fails.
+  const noSink = rutCols === 0 && sink <= 0.07;
+  check('T9 sim cost per 1/120 step on voxel terrain', ms <= 4 && noSink, `sim=${ms.toFixed(3)} ms/step (budget <=4) setup=${Date.now() - t0} ms | ground under loaded wheels: rut columns=${rutCols} worst=${(worstRut16 / 16).toFixed(3)} m sink=${sink.toFixed(4)} m (budget 0)`);
 }
 
 // ---------------------------------------------------------------- test 10
@@ -615,6 +642,116 @@ function testMenuStateMachine() {
     `${trail.join(' ')} frozen=${frozen} settings=${openSettings} toggles=${toggles} back=${backToMenu} began=${began} running=${running}`);
 }
 testMenuStateMachine();
+
+// -------------------------------------------------- mobile controls (phone-first)
+// The thumb pad is analog: continuous steer from the thumb's displacement, a real
+// dead zone, progressive near centre, and it self-centres smoothly on lift. Pedals
+// may never fight. Then: the whole stage flow with FINGERS ONLY, no keyboard.
+function testAnalogTouchSteering() {
+  const input = new Input();
+  input.touch.enabled = true;                     // DOM overlay off, state machine on
+  const settle = (n = 40) => { for (let k = 0; k < n; k++) input.sample(DT); };
+
+  // dead zone ~8%: a thumb resting slightly off centre is nothing, either side
+  input.touch.setSteerRaw(0.06); settle();
+  const dzPos = input.state.steer === 0;
+  input.touch.setSteerRaw(-0.07); settle();
+  const dzNeg = input.state.steer === 0;
+  const dzOk = dzPos && dzNeg && steerCurve(0.08, STEER_DEADZONE) === 0 && steerCurve(0.09, STEER_DEADZONE) > 0;
+
+  // progressive near centre: half travel is under half lock, monotonic, full at the rim
+  const q = steerCurve(0.25), half = steerCurve(0.5), rim = steerCurve(1);
+  const progressive = q > 0 && q < half && half < 0.5 && half > 0.25 && rim === 1
+    && steerCurve(-0.5) === -half;
+
+  // the value the car gets is the curve, not a step, and it holds while the thumb sits
+  input.touch.setSteerRaw(0.5); settle();
+  const mid = input.state.steer;
+  const holds = Math.abs(mid - half) < 1e-6 && input.state.steer > 0;
+
+  // self-centring on lift: eases back over the ramp, no step, lands exactly on 0
+  input.touch.releaseSteer();
+  input.sample(DT);
+  const maxStep = (1000 / Math.max(20, settings.steerRampMs)) * DT * 1.5;
+  const eased = Math.abs(mid - input.state.steer) <= maxStep && input.state.steer > 0;
+  settle(60);
+  const centred = input.state.steer === 0;
+
+  // pedals never fight: thumb on gas, thumb on brake -> brake owns the car
+  input.touch.setAction('throttle', true);
+  input.touch.setAction('brake', true);
+  input.touch.setAction('handbrake', true);
+  settle();
+  const brakeWins = input.state.brake === 1 && input.state.throttle === 0 && input.state.handbrake === 1;
+  input.touch.releaseAll();
+
+  const ok = dzOk && progressive && holds && eased && centred && brakeWins;
+  check('T13 analog thumb steering: dead zone + progressive curve + self-centring, brake beats throttle',
+    ok, `dz=${dzOk} curve(q=${q.toFixed(3)} half=${half.toFixed(3)} rim=${rim}) steer@half=${mid.toFixed(3)} `
+      + `liftStep=${(mid - input.state.steer).toFixed(3)}<=${maxStep.toFixed(3)} eased=${eased} centred=${centred} brake=${brakeWins}`);
+}
+testAnalogTouchSteering();
+
+function testTouchOnlyStageFlow() {
+  const SEED = 71, LEN = 700;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const run = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 60 });
+  const wheelStub = () => ({ alpha: 0, kappa: 0, N: 0, slipEnergy: 0, airborneFrames: 0 });
+  const car = { body: { pos: { x: road.x[12], z: road.z[12] }, groundSpeed: 0 }, wheels: [wheelStub(), wheelStub(), wheelStub(), wheelStub()] };
+  const rally = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  const input = new Input();
+  input.touch.enabled = true;
+  const seen = { camera: 0, restart: 0 };
+  let camMode = 0;
+  // The consumer wiring main.js installs, minus the renderer.
+  input.on((code) => {
+    if (code === 'KeyC') { seen.camera++; camMode = (camMode + 1) % 4; }
+    else if (code === 'KeyR') seen.restart++;
+    else if (code === 'KeyP') { if (rally.driving()) rally.openMenu(); else rally.back(); }
+  });
+  const frames = (n) => {
+    for (let i = 0; i < n; i++) {
+      if (rally.driving()) run.step(DT, car);
+      rally.update(DT, { car, stage: run, notes: [], stageName: 'ODCINEK LEŚNY' });
+    }
+  };
+  // a pad tap = exactly what a finger does: push the tap, let sample() drain it
+  const tap = (action) => {
+    input.touch.tap(action);
+    for (let k = 0; k < 4; k++) input.sample(DT);
+  };
+  // a menu row tap = the row's pointerdown handler: focus that row, then activate
+  const rowTap = (act) => { rally.focus = rally.rowIndex(act); rally.activate(); };
+
+  const trail = [];
+  rally.openMenu();
+  frames(90);                                     // sitting on the menu: clock frozen
+  const frozen = run.state === STATE.PRE_START;
+  rowTap('start');                                // finger on START
+  frames(30);
+  const countdown = rally.top() === 'countdown' || rally.driving();
+  frames(Math.round(6 / DT) + 10);                // odliczanie -> RUNNING
+  const driving = run.state === STATE.RUNNING && rally.driving();
+
+  tap('camera'); tap('restart');                  // in-stage pads
+  const pads = seen.camera === 1 && seen.restart === 1 && camMode === 1;
+
+  const cd0 = run.countdown, t0 = run.elapsedRun;
+  tap('menu');                                    // pad MENU = way back, no keyboard
+  frames(60);
+  const menuBack = rally.top() === 'menu' && !rally.driving() && run.countdown === cd0;
+  trail.push(`menu=${rally.top()}`);
+  rowTap('start');                                // START resumes the same stage
+  frames(60);
+  const resumed = rally.driving() && run.state === STATE.RUNNING && run.elapsedRun > t0;
+
+  const ok = frozen && countdown && driving && pads && menuBack && resumed;
+  check('T14 touch-only stage flow: menu START -> countdown -> drive -> pads -> menu -> START',
+    ok, `frozen=${frozen} countdown=${countdown} driving=${driving} cam=${seen.camera} restart=${seen.restart} `
+      + `padPads=${pads} menuBack=${menuBack} resumed=${resumed} ${trail.join(' ')}`);
+}
+testTouchOnlyStageFlow();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

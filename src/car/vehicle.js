@@ -356,11 +356,9 @@ function applyDeformationAndDamage(car, h) {
     const w = car.wheels[i];
     const surf = surface(w.surfaceId);
 
-    // Rut carving (docs/02 §7): soft surfaces, real load.
-    if (surf.sink > 0 && w.N > 2500 && car.world.addRut) {
-      const depth = clamp(0.02 + w.slip * 0.05, 0, 0.09);
-      car.world.addRut(w.contact.x, w.contact.z, depth, 0.18);
-    }
+    // Rut carving is disabled: a loaded wheel must never push the ground down. The
+    // soft-surface feel stays (tyre.js reads world.rutAt(), which now reports 0, and
+    // the `sink` term of the tyre); only the heightfield displacement is gone.
 
     // Block break-off (docs/02 §7): loose surface + a hard vertical hit.
     if (surf.loose && w.vy < -6 && car.world.breakLooseBlock) {

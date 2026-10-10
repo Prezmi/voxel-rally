@@ -25,8 +25,8 @@ export class ChaseCamera {
     this._init = false;
   }
 
-  /** Impacts feed this; cameraShake scales it (docs/04). */
-  addShake(amount) { this.shake = Math.min(1.2, this.shake + amount); }
+  /** Impacts feed this; cameraShake scales it (docs/04). Capped low on purpose. */
+  addShake(amount) { this.shake = Math.min(0.45, this.shake + amount); }
 
   update(car, dt, mode = settings.cameraMode) {
     const b = car.body;
@@ -98,14 +98,19 @@ export class ChaseCamera {
 
     this._apply(_want, _target, bumper ? 26 : 7.5, dt, this.baseFov + Math.min(20, speed * 0.32));
 
-    if (this.shake > 0.001) {
-      const k = this.shake * settings.cameraShake;
+    // Feel, not noise. This used to reach 0.45*1.2 = ~0.5 m of peak-to-peak swing
+    // (a quarter of a metre on Y alone) because every substep's suspension chatter
+    // fed `shake` up to a 1.2 cap. Now: a small speed wash plus a decaying landing
+    // bump, sub-centimetre amplitudes, and main.js only forwards real landings.
+    const speedFeel = Math.min(0.45, speed * 0.0055);   // 0.45 by ~80 m/s
+    const k = (this.shake * 0.45 + speedFeel * 0.30) * settings.cameraShake;
+    if (k > 0.002) {
       const t = performance.now() * 0.001;
-      this.camera.position.x += Math.sin(t * 41.3) * 0.09 * k;
-      this.camera.position.y += Math.sin(t * 57.7) * 0.12 * k;
-      this.camera.position.z += Math.sin(t * 33.1) * 0.09 * k;
-      this.shake = Math.max(0, this.shake - dt * 2.6);
+      this.camera.position.x += Math.sin(t * 41.3) * 0.010 * k;
+      this.camera.position.y += Math.sin(t * 57.7) * 0.014 * k;
+      this.camera.position.z += Math.sin(t * 33.1) * 0.010 * k;
     }
+    if (this.shake > 0.001) this.shake = Math.max(0, this.shake - dt * 3.4);
   }
 
   _apply(want, target, rate, dt, fov) {

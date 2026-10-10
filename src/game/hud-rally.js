@@ -327,6 +327,7 @@ export class RallyHud {
     } else if (name === 'settings') {
       rows.push({ label: `Bloki nawierzchni: ${on(settings.blockTiles)}`, act: 'toggle:blockTiles' });
       rows.push({ label: `Sterowanie dotykiem: ${TOUCH_LABEL[settings.touchOverlay] || 'auto'}`, act: 'cycle:touchOverlay' });
+      rows.push({ label: `Kciuk sterujący: ${settings.touchHandedness === 'left' ? 'lewy' : 'prawy'}`, act: 'cycle:touchHandedness' });
       rows.push({ label: `Strzałki pilota: ${on(settings.showCoDriverArrows)}`, act: 'toggle:showCoDriverArrows' });
       rows.push({ label: `HUD: ${MODE_LABEL[this.mode]}`, act: 'hudmode' });
       rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });

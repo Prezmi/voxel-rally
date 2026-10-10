@@ -31,7 +31,7 @@ export const settings = {
 
   // Camera
   cameraMode: 'CHASE',       // CHASE | ONBOARD | BUMPER | CINEMATIC | FREE
-  cameraShake: 1.0,
+  cameraShake: 0.35,        // was 1.0: the rig swung half a metre and swam
   // docs/04 §6 wants dirt on the lens; PLAN.md §8 #5 says the camera must not
   // "swim" and the player must read the road. The lens is the dirt the player
   // cannot look away from, so it is a dialled accent by default, not a effect.
@@ -47,6 +47,8 @@ export const settings = {
   // Nakładka sterowania dotykowego (skills/game-ui-ux #7): 'auto' = pokaż przy
   // coarse pointerze / ?touch=on, 'on' | 'off' ustawia menu USTAWIENIA.
   touchOverlay: 'auto',
+  // 'right' = kolumna gazu/hamulca pod prawym kciukiem (domyślne), 'left' = lustro.
+  touchHandedness: 'right',
 
   // Debug
   showPhysicsHud: false,

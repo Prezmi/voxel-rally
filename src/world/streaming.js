@@ -62,7 +62,9 @@ const TILE_CAP_CHUNK = 192;
 const TILE_CAPACITY = 4096;
 const VERGE = 2.4;                 // m past carriageway+shoulder that still counts
 const TILE_LIFT = 0.02;            // hairline gap so a tile never z-fights the terrain
-const TILE_RING_MAX = 1;           // tiles only on the full/simplified rings
+const TILE_RING_MAX = 0;           // tiles on the full ring only: a 0.18 m block past 110 m is
+// sub-pixel, and every tile instance costs its own geometry in every pass (4 k instances
+// were most of the 12.8 M frame triangles measured by ?perftest=1).
 
 export class Streaming {
   constructor(world, terrain, road, carveIndex, renderer, stage) {
@@ -114,7 +116,8 @@ export class Streaming {
     this._euler = new THREE.Euler();
 
     this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
-    this._lastRingKey = '';
+    this._lastInst = 0;              // 4 Hz gate on the instance rebuild/upload
+    this._lastCx = null; this._lastCz = null; this._lastCount = -1;
     this._gatesPlaced = false;
     // Start-line furniture: one InstancedMesh per extra props.glb node, allocated once.
     this.startMeshes = new Map();
@@ -185,7 +188,7 @@ export class Streaming {
       // Chunks streamed before the glb resolved carry empty tile tables: drop them so
       // the next update fills them.
       for (const rec of this.records.values()) rec.tiles = null;
-      this._lastRingKey = '';                            // force one rebuild now
+      this._lastCx = null; this._lastCount = -1;        // force one rebuild now
     }
     return this.blockActive;
   }
@@ -285,11 +288,19 @@ export class Streaming {
       if (d > R + CHUNK * 2) {
         if (rec.mesh) { this.renderer.scene.remove(rec.mesh); rec.mesh.geometry.dispose(); }
         this.records.delete(key);
+        // The voxel columns go the same way as their mesh: generation + carve are
+        // deterministic in (cx,cz,seed), so keeping them forever only grew the Map
+        // (~16 KB of column arrays per chunk, 293 chunks in 30 s of driving).
+        this.world.dropChunk(rec.cx, rec.cz);
       }
     }
 
-    // 2) collect work
-    const jobs = [];
+    // 2) collect work. The job list and its records are pooled: this ran ~60 times a
+    // second and allocated a fresh array plus one object per candidate chunk (up to
+    // ~120 objects/frame) every time.
+    const jobs = this._jobs || (this._jobs = []);
+    const pool = this._jobPool || (this._jobPool = []);
+    jobs.length = 0;
     for (let dz = -span; dz <= span; dz++) {
       for (let dx = -span; dx <= span; dx++) {
         const cx = cxFocus + dx, cz = czFocus + dz;
@@ -298,7 +309,10 @@ export class Streaming {
         if (dist > R) continue;
         const ring = this._ring(dist);
         if (ring < 0) continue;
-        jobs.push({ cx, cz, ring, dist });
+        let job = pool[jobs.length];
+        if (!job) job = pool[jobs.length] = { cx: 0, cz: 0, ring: 0, dist: 0 };
+        job.cx = cx; job.cz = cz; job.ring = ring; job.dist = dist;
+        jobs.push(job);
       }
     }
     jobs.sort((a, b) => a.dist - b.dist);
@@ -351,10 +365,20 @@ export class Streaming {
     if (!this._gatesPlaced) { this._placeGates(); this._gatesPlaced = true; }
     if (!this._startPlaced) this._placeStartProps();
 
-    // 5) rebuild prop instances when the visible chunk set changed
-    const ringKey = `${cxFocus},${czFocus},${this.records.size}`;
-    if (ringKey !== this._lastRingKey || this._tilesOn !== (settings.blockTiles && this.blockActive)) {
-      this._lastRingKey = ringKey;
+    // 5) rebuild prop instances when the visible chunk set changed. Numeric key:
+    // the template string this used to build cost an allocation on every frame.
+    // Throttled to 4 Hz: while the car is moving the trigger above is true on
+    // *every* frame, and each rebuild re-uploads the full instance buffers of 9
+    // tile meshes (4096 x 64 B each) plus 9 prop meshes - ~3 MB of bufferSubData
+    // per frame, growing with the resident chunk count. A quarter-second of
+    // latency on a far-ring pop-in is free; the upload at frame rate is not.
+    const nowMs = performance.now();
+    if ((cxFocus !== this._lastCx || czFocus !== this._lastCz ||
+        this.records.size !== this._lastCount ||
+        this._tilesOn !== (settings.blockTiles && this.blockActive)) &&
+        nowMs - this._lastInst >= 250) {
+      this._lastInst = nowMs;
+      this._lastCx = cxFocus; this._lastCz = czFocus; this._lastCount = this.records.size;
       this._rebuildProps();
       this._rebuildTiles();
     }
@@ -473,7 +497,9 @@ export class Streaming {
   }
 
   _rebuildProps() {
-    const buckets = new Map();
+    // Pooled buckets: this used to allocate a Map plus one array per species on
+    // every rebuild, which is what made the GC churn visible as a hitch.
+    const buckets = this._buckets || (this._buckets = new Map());
     for (const rec of this.records.values()) {
       if (!rec.props) continue;
       for (const p of rec.props) {
@@ -502,5 +528,6 @@ export class Streaming {
       total += n;
     }
     this.stats.props = total;
+    for (const a of buckets.values()) a.length = 0;      // keep the arrays, drop the items
   }
 }

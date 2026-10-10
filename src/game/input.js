@@ -14,7 +14,9 @@ const KEYMAP = {
   KeyQ: 'shiftDown', KeyE: 'shiftUp',
 };
 
-const TOUCH_TAPS = [['camera', 'KeyC'], ['restart', 'KeyR']];
+// Pads that are a tap, not a hold: the same consumer path as the keyboard key.
+// 'menu' is the touch-only way out of the stage (pause -> menu -> START resumes).
+const TOUCH_TAPS = [['camera', 'KeyC'], ['restart', 'KeyR'], ['menu', 'KeyP']];
 
 export class Input {
   constructor() {
@@ -69,11 +71,18 @@ export class Input {
     s.throttle = held('throttle') ? 1 : 0;
     s.brake = held('brake') ? 1 : 0;
     s.handbrake = held('handbrake') ? 1 : 0;
+    // Two thumbs on one pedal: braking always wins, the pedals never fight.
+    if (s.brake > 0) s.throttle = 0;
 
     // Touch buttons for camera/restart feed the same consumer path as KeyC/KeyR.
     for (const [name, code] of TOUCH_TAPS) if (t.drain(name)) for (const fn of this.consumers) fn(code);
 
-    const want = clamp((held('steerRight') ? 1 : 0) - (held('steerLeft') ? 1 : 0), -1, 1);
+    // The thumb pad is analog (continuous, deadzoned, curved in touch.js); the
+    // keyboard and the pad axes stay binary and ramp below.
+    const analog = (t.enabled && typeof t.analogSteer === 'number') ? t.analogSteer : null;
+    const want = analog !== null
+      ? clamp(analog, -1, 1)
+      : clamp((held('steerRight') ? 1 : 0) - (held('steerLeft') ? 1 : 0), -1, 1);
     if (settings.keyboardAsPad) {
       // First-order ramp: the same response a wheel with a real rate limit gives.
       const rate = 1000 / Math.max(20, settings.steerRampMs);
@@ -85,6 +94,7 @@ export class Input {
       s.steer = want;
     }
     if (settings.invertSteer) s.steer = -s.steer;
+    t.steerVisual = s.steer;   // the pad knob shows the value the car got
 
     s.shiftUp = this._shiftUp; this._shiftUp = 0;
     s.shiftDown = this._shiftDown; this._shiftDown = 0;

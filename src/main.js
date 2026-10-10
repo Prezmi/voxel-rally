@@ -24,6 +24,7 @@ import { DirtSystem } from './dirt/dirt.js';
 import { attachDirtLens } from './render/dirt-lens.js';
 import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
+import { startPerfHarness } from './debug/perf-harness.js';
 import { DT } from './core/time.js';
 import { settings, applyDifficulty, qualityPreset, QUALITY } from './core/settings.js';
 
@@ -64,6 +65,9 @@ function params() {
   else if (hudMode === 'FULL') settings.hudMode = 'FULL';
   // ?stats=1 keeps the render-cost read-out on screen (shot-mode harness).
   const stats = q.get('stats') === '1';
+  // ?perftest=1: the in-game perf harness (src/debug/perf-harness.js). Off unless the
+  // flag is present, so nothing here ever runs in a normal game.
+  const perftest = q.get('perftest') === '1';
   // ?q=LOW|MED|HIGH picks the quality preset before the renderer is built, so the
   // quality tiers are testable from a headless shot (docs/07 §Budżety).
   const qName = (q.get('q') || '').toUpperCase();
@@ -75,7 +79,7 @@ function params() {
   // ?menu=off / ?frames=N: the car drives off at boot. ?shot=1 only makes the boot
   // fast for the headless harness - the menu still owns the first screen, so nothing
   // drives until START.
-  const autoStart = frames > 0 || q.get('menu') === 'off';
+  const autoStart = frames > 0 || perftest || q.get('menu') === 'off';
   const shotBoot = autoStart || q.get('shot') === '1';
   const menuScreen = q.get('menu') && q.get('menu') !== 'off' ? q.get('menu') : '';
   return {
@@ -83,7 +87,7 @@ function params() {
     autoStart, shotBoot, menuScreen,
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
-    surfaceKey, frames, rain, cam, ref, tod, stats,
+    surfaceKey, frames, rain, cam, ref, tod, stats, perftest,
   };
 }
 
@@ -188,6 +192,9 @@ async function main() {
       const order = ['auto', 'on', 'off'];
       settings.touchOverlay = order[(order.indexOf(settings.touchOverlay) + 1) % order.length];
       applyTouch();
+    } else if (it.act === 'cycle:touchHandedness') {
+      settings.touchHandedness = settings.touchHandedness === 'left' ? 'right' : 'left';
+      input.touch.setHandedness(settings.touchHandedness);
     } else if (it.act === 'quality') {
       const q = (settings.quality + 1) % 3;
       qualityPreset(q);
@@ -230,6 +237,7 @@ async function main() {
   // real loop uses, so the dirt in the PNG is the dirt the game would have made.
   const driveIn = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
   let stuckDrive = 0;
+  let simTick = 0;                    // perftest only: step counter for the pilot
   function autoDrive(i) {
     // Pure pursuit along the spline (same pattern as tools/smoke.mjs), with a
     // recovery re-place so a screenshot always shows the car on the tested lane.
@@ -292,6 +300,10 @@ async function main() {
       else loop.time.paused = !loop.time.paused;
     }
     else if (code === 'KeyR') { restartRun(); }
+    // KeyP = touch pad MENU (and the keyboard equivalent): the only way back to the
+    // menu without a keyboard. openMenu() pushes a menu screen, so driving() goes
+    // false and the stage clock + car freeze the same way as on any menu screen.
+    else if (code === 'KeyP') { if (rally.driving()) rally.openMenu(); else rally.back(); }
     else if (code === 'KeyN') {
       // Gęstość HUD-u jak w opcjach CMR: pełny -> minimalny -> wyłączony (PLAN §10).
       const m = rally.cycleMode();
@@ -346,16 +358,26 @@ async function main() {
       // the handbrake, so the stage cannot start before the player presses START.
       const driving = rally.driving();
       const smp = input.sample(dt);
-      if (!driving) { smp.throttle = 0; smp.brake = 0; smp.steer = 0; smp.handbrake = 1; }
-      car.setInput(smp);
+      if (!driving && !cfg.perftest) { smp.throttle = 0; smp.brake = 0; smp.steer = 0; smp.handbrake = 1; }
+      if (cfg.perftest) {                          // harness pilot, flag-gated
+        simTick++;
+        const p = autoDrive(simTick);
+        p.handbrake = 0;
+        car.setInput(p);
+      } else car.setInput(smp);
       const events = car.step(dt);
+      // Only a real landing moves the camera. The solver emits an `impact` every
+      // substep a corner is unloading (impulse ~3e3 N at 4 m/s), which used to pin
+      // `shake` at its cap on flat road; 18 kN is below anything but a jump.
       for (const e of events) {
-        if (e.type === 'impact') view3d.addShake(Math.min(0.6, e.impulse / 90000) * settings.cameraShake);
+        if (e.type === 'impact' && e.impulse > 18000) {
+          view3d.addShake(Math.min(0.45, (e.impulse - 18000) / 130000) * settings.cameraShake);
+        }
       }
       dirt.step(car, dt);
       // Stage clock + gates advance on the same fixed step as the physics, so the
       // stage times a replay produces are identical (PLAN.md §8 #7).
-      if (driving) stageRun.step(dt, car);
+      if (driving || cfg.perftest) stageRun.step(dt, car);
       const i = stage.road.nearest(car.body.pos.x, car.body.pos.z);
       ctx.arc = i >= 0 ? stage.road.s[i] : ctx.arc;
       // Co-driver runs on the same fixed step as the physics: the note a replayed
@@ -386,11 +408,15 @@ async function main() {
     },
   });
 
+  // ?perftest=1: the in-game perf harness. Flag-gated, so a normal boot never
+  // wraps the loop and never logs.
+  if (cfg.perftest) startPerfHarness({ loop, renderer, stream, dirt });
+
   // Shot mode: run the whole drive synchronously at boot, then freeze the sim.
   // --virtual-time-budget does not drive rAF at 60 Hz on a headless box, so a
   // fixed number of *sim* steps up front is the only reproducible way to get
   // "30 s of driving" into a screenshot.
-  if (cfg.frames > 0) {
+  if (cfg.frames > 0 && !cfg.perftest) {
     hud.boot(`tryb zrzutu: ${cfg.frames} kroków symulacji (1/120 s)\nnawierzchnia ${cfg.surfaceKey || cfg.biome}`);
     const idle = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
     for (let i = 0; i < cfg.frames; i++) {
@@ -416,7 +442,7 @@ async function main() {
     // numbers are printed into the boot overlay so a headless PNG carries them.
     loop.time.paused = true;   // the picture stays exactly where the drive ended
   }
-  if (cfg.frames > 0) {
+  if (cfg.frames > 0 && !cfg.perftest) {
     // Per-pass cost of the new pipeline: full composite, composite without the
     // sunshafts, raw render (docs/07 "Budżety techniczne": render <= 13 ms).
     const full = renderer.measureFrame(36);

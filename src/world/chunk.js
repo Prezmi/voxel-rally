@@ -91,6 +91,8 @@ export class VoxelWorld {
   constructor(seed = 1) {
     this.seed = seed >>> 0;
     this.chunks = new Map();
+    // Scratch list, capped (see ensureChunk): it used to be append-only and held a
+    // reference to every chunk ever touched, i.e. it grew with distance travelled.
     this.dirtyQueue = [];
     this.blocksBroken = 0;
     this.maxBlocksBroken = 400;      // docs/02 §7
@@ -103,8 +105,21 @@ export class VoxelWorld {
   ensureChunk(cx, cz) {
     const k = chunkKey(cx, cz);
     let c = this.chunks.get(k);
-    if (!c) { c = new Chunk(cx, cz); this.chunks.set(k, c); this.dirtyQueue.push(c); }
+    if (!c) { c = new Chunk(cx, cz); this.chunks.set(k, c); }
+    // Never accumulate: the queue is scratch space, not a history.
+    if (this.dirtyQueue.length > 64) this.dirtyQueue.length = 0;
     return c;
+  }
+
+  /**
+   * Release a chunk the player cannot see any more. Terrain generation and the road
+   * carve are pure functions of (cx,cz,seed), so a chunk that comes back into range
+   * regenerates to exactly the same columns. Without this the chunk Map - ~16 KB of
+   * column arrays per chunk - grew for the whole stage (293 chunks in 30 s of
+   * driving) and the GC pressure of that pile is part of the frame-rate sag.
+   */
+  dropChunk(cx, cz) {
+    return this.chunks.delete(chunkKey(cx, cz));
   }
 
   // ---- world-space block access (integer block coords) ----
@@ -269,28 +284,19 @@ export class VoxelWorld {
     return true;
   }
 
-  /** Dig a rut (docs/02 §7): negative sub-block offset, radius in metres. */
-  addRut(x, z, depthM, radius = 0.18) {
-    const d16 = Math.max(1, Math.round(depthM * 16));
-    const r = Math.max(1, Math.ceil(radius));
-    let changed = false;
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const px = Math.floor(x) + dx, pz = Math.floor(z) + dz;
-        const dist = Math.hypot(px + 0.5 - x, pz + 0.5 - z);
-        if (dist > radius + 0.35) continue;
-        const cx = Math.floor(px / CHUNK), cz = Math.floor(pz / CHUNK);
-        const c = this.chunks.get(chunkKey(cx, cz));
-        if (!c) continue;
-        const lx = px - cx * CHUNK, lz = pz - cz * CHUNK;
-        const col = lz * CHUNK + lx;
-        if (c.height[col] < 1) continue;
-        const fall = 1 - dist / (radius + 0.35);
-        const want = Math.max(-64, c.rut[col] - Math.round(d16 * fall));
-        if (want !== c.rut[col]) { c.rut[col] = want; c.dirty = true; changed = true; }
-      }
-    }
-    return changed;
+  /**
+   * Rut carving is OFF as a height change (docs/02 §7 stays as a look only).
+   * A loaded wheel used to push the column top down by up to 4 m of accumulated
+   * `rut` (measured: -1.13 m worst, 62 m of total displacement in 30 s), which both
+   * sank the car into the road and flagged every touched chunk dirty, so the mesher
+   * rebuilt the terrain under the car several times a second. `rut` remains a field
+   * the mesher and the wear shader read, pinned at 0, so the surface can never fall
+   * below the height the carve left it at: the ground is graded, never pressed down
+   * by the car. The wheel-line tone the rut used to buy is painted by the carve's
+   * `wear` band already.
+   */
+  addRut() {
+    return false;
   }
 
   /** Break a loose block (docs/02 §7). Returns true if a block was removed. */
@@ -306,8 +312,7 @@ export class VoxelWorld {
     if (c.height[col] !== y) return false;      // only surface blocks pop
     c.blocks[col * WORLD_HEIGHT + y] = BLOCK.AIR;
     c.refreshColumn(lx, lz);
-    // Column drops ~0.06 m (docs/02 §7)
-    c.rut[col] = Math.max(-16, c.rut[col] - 1);
+    // No extra `rut` push here either: the ground under the car never sinks.
     c.dirty = true;
     this.blocksBroken++;
     this.markDirty(cx, cz);
