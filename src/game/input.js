@@ -3,6 +3,7 @@
 // The state object is plain data, so the same code path runs headless in tests.
 import { settings } from '../core/settings.js';
 import { clamp } from '../core/math3.js';
+import { createTouchInput } from './touch.js';
 
 const KEYMAP = {
   KeyW: 'throttle', ArrowUp: 'throttle',
@@ -13,6 +14,8 @@ const KEYMAP = {
   KeyQ: 'shiftDown', KeyE: 'shiftUp',
 };
 
+const TOUCH_TAPS = [['camera', 'KeyC'], ['restart', 'KeyR']];
+
 export class Input {
   constructor() {
     this.state = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
@@ -22,12 +25,14 @@ export class Input {
     this._shiftUp = 0;
     this._shiftDown = 0;
     this.consumers = [];        // (action) => void, for pause/reset/camera keys
+    this.touch = createTouchInput();  // touch mirrors the same action state
   }
 
   attach(target = window) {
     target.addEventListener('keydown', (e) => this._key(e, true));
     target.addEventListener('keyup', (e) => this._key(e, false));
     target.addEventListener('blur', () => this.down.clear());
+    this.touch.attach(target);
     return this;
   }
 
@@ -59,11 +64,16 @@ export class Input {
   /** dt is the *sim* step so the ramp is deterministic. */
   sample(dt) {
     const s = this.state;
-    s.throttle = this.down.has('throttle') ? 1 : 0;
-    s.brake = this.down.has('brake') ? 1 : 0;
-    s.handbrake = this.down.has('handbrake') ? 1 : 0;
+    const t = this.touch;
+    const held = (a) => this.down.has(a) || (t.enabled && t.isHeld(a));
+    s.throttle = held('throttle') ? 1 : 0;
+    s.brake = held('brake') ? 1 : 0;
+    s.handbrake = held('handbrake') ? 1 : 0;
 
-    const want = (this.down.has('steerRight') ? 1 : 0) - (this.down.has('steerLeft') ? 1 : 0);
+    // Touch buttons for camera/restart feed the same consumer path as KeyC/KeyR.
+    for (const [name, code] of TOUCH_TAPS) if (t.drain(name)) for (const fn of this.consumers) fn(code);
+
+    const want = clamp((held('steerRight') ? 1 : 0) - (held('steerLeft') ? 1 : 0), -1, 1);
     if (settings.keyboardAsPad) {
       // First-order ramp: the same response a wheel with a real rate limit gives.
       const rate = 1000 / Math.max(20, settings.steerRampMs);
@@ -85,5 +95,5 @@ export class Input {
     if (dir > 0) this._shiftUp++; else this._shiftDown++;
   }
 
-  releaseAll() { this.down.clear(); this.state.steer = 0; }
+  releaseAll() { this.down.clear(); this.touch.releaseAll(); this.state.steer = 0; }
 }

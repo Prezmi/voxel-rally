@@ -17,6 +17,7 @@ import { solveGhost } from '../game/ghost.js';
 import { planGates } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
+import { Input } from '../game/input.js';
 
 const G = 9.81;
 
@@ -488,6 +489,71 @@ if (!only) {
 } else {
   all[only - 1]();
 }
+
+// ---------------------------------------------------------------- touch controls
+// The touch layer has to hand the car exactly the action state the keyboard and
+// a pad hand it, so no consumer downstream learns where an action came from.
+function testTouch() {
+  const input = new Input();
+  input.touch.enabled = true;              // DOM overlay off, state machine on
+  const settle = () => { for (let k = 0; k < 60; k++) input.sample(DT); };
+
+  input.touch.setAction('steerLeft', true);
+  input.touch.setAction('throttle', true);
+  settle();
+  check('touch: left steer + throttle held together',
+    input.state.steer === -1 && input.state.throttle === 1 && input.state.brake === 0,
+    `steer=${input.state.steer} throttle=${input.state.throttle}`);
+
+  input.touch.setAction('steerLeft', true);          // a second finger, same side
+  settle();
+  check('touch: two fingers one side stay at one unit of lock',
+    input.state.steer === -1, `steer=${input.state.steer}`);
+
+  input.touch.setAction('steerLeft', false);
+  input.touch.setAction('steerRight', true);
+  settle();
+  check('touch: steer follows the live finger',
+    input.state.steer === 1 && input.state.throttle === 1, `steer=${input.state.steer}`);
+
+  input.touch.setAction('steerRight', false);
+  input.touch.setAction('throttle', false);
+  settle();
+  check('touch: lifting every finger clears every action',
+    input.state.steer === 0 && input.state.throttle === 0 && input.state.handbrake === 0,
+    `throttle=${input.state.throttle}`);
+
+  input.touch.setAction('brake', true);
+  input.touch.setAction('handbrake', true);
+  settle();
+  check('touch: brake and handbrake stay separate',
+    input.state.brake === 1 && input.state.handbrake === 1 && input.state.throttle === 0,
+    `brake=${input.state.brake} hand=${input.state.handbrake}`);
+  input.touch.setAction('brake', false);
+  input.touch.setAction('handbrake', false);
+
+  let got = null;
+  input.on((code) => { got = code; });
+  input.touch.tap('camera'); settle();
+  const cam = got === 'KeyC';
+  input.touch.tap('restart'); settle();
+  check('touch: camera/restart taps reuse the keyboard consumer path',
+    cam && got === 'KeyR', `cam=${cam} restart=${got}`);
+
+  input.down.add('throttle');                        // keyboard path untouched
+  settle();
+  check('touch layer leaves the keyboard path working', input.state.throttle === 1,
+    `throttle=${input.state.throttle}`);
+
+  // and the car really drives off the touch state
+  const w = new FlatWorld(SURF.ASPHALT);
+  const car = makeCar(w, { bias: 0.55 });
+  car.placeAt(0, 0, 0);
+  input.touch.setAction('throttle', true);
+  for (let i = 0; i < Math.round(1.5 / DT); i++) { input.sample(DT); car.setInput(input.state); car.step(DT); }
+  check('touch: the car accelerates from the touch state', car.body.vel.x > 10, `vx=${car.body.vel.x.toFixed(1)}`);
+}
+testTouch();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
