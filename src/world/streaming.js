@@ -2,18 +2,62 @@
 // Rings: full 0-110 m, simplified 110-200 m, silhouette 200-260 m.
 // Remeshing is budgeted per frame so a fast drive never hitches.
 import * as THREE from 'three';
-import { CHUNK, chunkKey, keyToCx, keyToCz } from './chunk.js';
+import { CHUNK, COLS, chunkKey, keyToCx, keyToCz } from './chunk.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
-import { carveChunk } from './road-carve.js';
+import { carveChunk, SHOULDER } from './road-carve.js';
+import { SURF } from './surfaces.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES } from './props.js';
 import { settings } from '../core/settings.js';
+import { loadModelNodes } from '../render/assets.js';
+
+// Species -> glb node name (assets/models/props.glb, tools/blender/build_stage_props.py).
+// A species with no entry, or a node the glb does not have, keeps its procedural geo.
+const ASSET_NODES = {
+  [PROP.PINE]: 'prop_tree_pine',
+  [PROP.OAK]: 'prop_tree_deciduous',
+  [PROP.DEAD]: 'prop_tree_dead',
+  [PROP.BUSH]: 'prop_bush',
+  [PROP.SPECTATOR]: 'prop_spectator',
+  [PROP.MARSHAL]: 'prop_marshal_post',
+  [PROP.BIRCH]: 'prop_tree_birch',
+  [PROP.POST]: 'prop_fence_post',
+  [PROP.GATE]: 'prop_gate_checkpoint',
+};
 
 const CAPACITY = {
   [PROP.OAK]: 1400, [PROP.PINE]: 1400, [PROP.DEAD]: 700,
   [PROP.SPECTATOR]: 1000, [PROP.POST]: 900, [PROP.MARSHAL]: 40, [PROP.GATE]: 24,
   [PROP.BIRCH]: 900, [PROP.BUSH]: 1400, [PROP.FERN]: 1600,
 };
+
+// ---- block tile layer (visual only) ---------------------------------------
+// The carve already writes a surface id into every corridor column
+// (chunk.surface[c], read by physics). This layer instances the matching node of
+// assets/models/stage_blocks.glb over that same column, top face laid on the
+// column's own carved top, so the carriageway reads as asphalt/dirt blocks and the
+// verge as gravel/grass blocks. Heightfield, `fine`/`rut` and physics are untouched.
+const BLOCK_NODE = {
+  [SURF.ASPHALT]: 'block_asphalt',
+  [SURF.GRAVEL]: 'block_gravel',
+  [SURF.DIRT]: 'block_dirt',
+  [SURF.MUD]: 'block_mud',
+  [SURF.GRASS]: 'block_grass',
+  [SURF.STONE]: 'block_stone',
+  [SURF.SAND]: 'block_sand',
+  [SURF.PEAT]: 'block_peat',
+  [SURF.SNOW]: 'block_snow',
+  [SURF.ICE]: 'block_ice',
+};
+const BLOCK_SURFACES = Object.keys(BLOCK_NODE).map(Number);
+// Hard caps: 192 tiles per chunk (a 16x16 chunk crossed by an 18 m corridor cannot
+// carry more, and the cap makes the instance budget fixed), one InstancedMesh per
+// surface type with a fixed capacity allocated once at boot. No allocation per frame.
+const TILE_CAP_CHUNK = 192;
+const TILE_CAPACITY = 4096;
+const VERGE = 2.4;                 // m past carriageway+shoulder that still counts
+const TILE_LIFT = 0.02;            // hairline gap so a tile never z-fights the terrain
+const TILE_RING_MAX = 1;           // tiles only on the full/simplified rings
 
 export class Streaming {
   constructor(world, terrain, road, carveIndex, renderer, stage) {
@@ -43,15 +87,173 @@ export class Streaming {
       this.propMeshes.set(p, im);
     }
 
+    // Asset-backed props: swap container geometry/material once the glb resolves.
+    // Instancing, CAPACITY and the placement code below are untouched; a missing
+    // glb or a missing node leaves the procedural container in place.
+    this.assetsApplied = false;
+    loadModelNodes('props').then((nodes) => { this._adoptAssetProps(nodes); });
+
+    // Block tiles: one InstancedMesh per surface type, allocated once, never per frame.
+    // A missing glb or a missing node leaves this.map empty and the layer does nothing.
+    this.blockMeshes = new Map();     // surface id -> InstancedMesh
+    this.blockOff = new Map();        // surface id -> {x,y,z} fit offset of the node geo
+    this._tileCount = new Map();      // scratch counters, reused every rebuild
+    this.blockActive = false;
+    this._tilesOn = false;
+    if (settings.blockTiles) loadModelNodes('stage_blocks').then((nodes) => this._adoptBlockTiles(nodes));
+
     this._mat4 = new THREE.Matrix4();
     this._quat = new THREE.Quaternion();
     this._scale = new THREE.Vector3();
     this._pos = new THREE.Vector3();
     this._euler = new THREE.Euler();
 
-    this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0 };
+    this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
     this._lastRingKey = '';
     this._gatesPlaced = false;
+  }
+
+  /** Swap a species container's procedural geo for the baked glb node geo. */
+  _adoptAssetProps(nodes) {
+    if (!nodes || !nodes.size || this.assetsApplied) return false;
+    for (const [type, im] of this.propMeshes) {
+      const name = ASSET_NODES[type];
+      if (!name) continue;
+      const rec = nodes.get(name);
+      if (!rec || !rec.geometry) continue;                 // node absent -> keep procedural
+      const mat = rec.material;
+      if (mat && !Array.isArray(mat) && mat.vertexColors && !rec.geometry.getAttribute('color')) {
+        mat.vertexColors = false;                          // nothing to feed USE_COLOR
+      }
+      im.geometry = rec.geometry;
+      if (mat) im.material = mat;
+    }
+    this.assetsApplied = true;
+    return true;
+  }
+
+  /**
+   * Adopt the stage_blocks.glb nodes: one InstancedMesh per surface id the carve can
+   * assign. The node slab is fitted so its TOP face lands on the instance origin
+   * (origin + (0,0,0) == top of the block) and its centre is on the column centre,
+   * whatever corner the exported geometry was built around. Silent on any absence.
+   */
+  _adoptBlockTiles(nodes) {
+    if (!settings.blockTiles) {
+      console.log('[blocks] block tile layer: off (settings.blockTiles = false)');
+      return false;
+    }
+    for (const sid of BLOCK_SURFACES) {
+      const rec = nodes && nodes.size ? nodes.get(BLOCK_NODE[sid]) : null;
+      if (!rec || !rec.geometry) continue;                 // node absent -> no tiles
+      const geo = rec.geometry;
+      if (!geo.boundingBox) geo.computeBoundingBox();
+      const bb = geo.boundingBox;
+      if (!bb || !isFinite(bb.min.x) || !isFinite(bb.max.y)) continue;
+      this.blockOff.set(sid, {
+        x: -0.5 * (bb.min.x + bb.max.x),
+        y: -bb.max.y,
+        z: -0.5 * (bb.min.z + bb.max.z),
+        w: Math.min(1.4, Math.max(0.6, bb.max.x - bb.min.x)),
+        d: Math.min(1.4, Math.max(0.6, bb.max.z - bb.min.z)),
+      });
+      const mat = rec.material ? rec.material.clone() : this.renderer.propMaterial;
+      if (mat.vertexColors && !geo.getAttribute('color')) mat.vertexColors = false;
+      const im = new THREE.InstancedMesh(geo, mat, TILE_CAPACITY);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.castShadow = false;                                // a 0.18 m slab: no own shadow
+      im.receiveShadow = true;
+      im.count = 0;
+      im.visible = false;
+      im.frustumCulled = false;
+      this.renderer.scene.add(im);
+      this.blockMeshes.set(sid, im);
+      this._tileCount.set(sid, 0);
+    }
+    this.blockActive = this.blockMeshes.size > 0;
+    console.log(`[blocks] block tile layer: ${this.blockActive ? `active (${this.blockMeshes.size} surfaces, ${TILE_CAP_CHUNK} tiles/chunk)` : 'inactive (stage_blocks.glb or its block_* nodes missing)'}`);
+    if (this.blockActive) {
+      // Chunks streamed before the glb resolved carry empty tile tables: drop them so
+      // the next update fills them.
+      for (const rec of this.records.values()) rec.tiles = null;
+      this._lastRingKey = '';                            // force one rebuild now
+    }
+    return this.blockActive;
+  }
+
+  /** Which columns of one chunk get a tile: the carriageway band plus VERGE beyond it. */
+  _chunkTiles(cx, cz) {
+    const chunk = this.world.chunkAt(cx, cz);
+    if (!chunk || !this.blockActive) return null;
+    const t = new Uint8Array(COLS);
+    t.tiles = 0;
+    const x0 = cx * CHUNK, z0 = cz * CHUNK;
+    const road = this.road;
+    const cand = [];
+    for (let c = 0; c < COLS; c++) {
+      const wx = x0 + (c & (CHUNK - 1)) + 0.5, wz = z0 + (c >> 4) + 0.5;
+      const i = road.nearest(wx, wz);
+      const lat = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i]);
+      if (lat > road.width[i] / 2 + SHOULDER + VERGE) continue;
+      const sid = chunk.surface[c];                        // the id physics already has
+      if (!sid || !this.blockMeshes.has(sid)) continue;
+      cand.push([c, sid, lat]);
+    }
+    // The cap is fixed, so spend it from the carriageway outwards: stopping at the
+    // first 192 columns left raw unbanded strips in the middle of the corridor.
+    cand.sort((a, b) => a[2] - b[2]);
+    let n = 0;
+    for (const [c, sid] of cand) {
+      if (n >= TILE_CAP_CHUNK) break;
+      t[c] = sid;
+      n++;
+    }
+    t.tiles = n;                                           // count kept on the same array
+    return t;
+  }
+
+  /** Refill the instanced buffers from the streamed chunks. Allocation-free. */
+  _rebuildTiles() {
+    const on = settings.blockTiles && this.blockActive;
+    for (const [sid, im] of this.blockMeshes) { this._tileCount.set(sid, 0); im.count = 0; }
+    if (on) {
+      for (const rec of this.records.values()) {
+        const t = rec.tiles;
+        if (!t || !t.tiles) continue;
+        const chunk = this.world.chunkAt(rec.cx, rec.cz);
+        if (!chunk) continue;
+        const x0 = rec.cx * CHUNK, z0 = rec.cz * CHUNK;
+        for (let c = 0, seen = 0; c < COLS && seen < t.tiles; c++) {
+          const sid = t[c];
+          if (!sid) continue;
+          seen++;
+          const im = this.blockMeshes.get(sid);
+          const off = this.blockOff.get(sid);
+          if (!im || !off) continue;
+          const used = this._tileCount.get(sid);
+          if (used >= TILE_CAPACITY) continue;
+          const y = chunk.columnTop(c);                    // tile stands on the real ground
+          if (y < 0) continue;
+          this._pos.set(x0 + (c & (CHUNK - 1)) + 0.5 + off.x, y + TILE_LIFT + off.y,
+            z0 + (c >> 4) + 0.5 + off.z);
+          this._quat.identity();
+          this._scale.set(off.w, 1, off.d);
+          this._mat4.compose(this._pos, this._quat, this._scale);
+          im.setMatrixAt(used, this._mat4);
+          this._tileCount.set(sid, used + 1);
+        }
+      }
+    }
+    let total = 0;
+    for (const [sid, im] of this.blockMeshes) {
+      const n = this._tileCount.get(sid) || 0;
+      im.count = n;
+      im.visible = n > 0;
+      im.instanceMatrix.needsUpdate = true;
+      total += n;
+    }
+    this._tilesOn = on;
+    this.stats.tiles = total;
   }
 
   _ring(dist) {
@@ -132,6 +334,7 @@ export class Streaming {
       if (!rec.props) {
         rec.props = generateChunkProps(job.cx, job.cz, this.stage);
       }
+      if (!rec.tiles && job.ring <= TILE_RING_MAX) rec.tiles = this._chunkTiles(job.cx, job.cz) || null;
     }
     this.stats.remeshes = remeshes;
 
@@ -140,7 +343,11 @@ export class Streaming {
 
     // 5) rebuild prop instances when the visible chunk set changed
     const ringKey = `${cxFocus},${czFocus},${this.records.size}`;
-    if (ringKey !== this._lastRingKey) { this._lastRingKey = ringKey; this._rebuildProps(); }
+    if (ringKey !== this._lastRingKey || this._tilesOn !== (settings.blockTiles && this.blockActive)) {
+      this._lastRingKey = ringKey;
+      this._rebuildProps();
+      this._rebuildTiles();
+    }
 
     let tris = 0;
     for (const rec of this.records.values()) if (rec.mesh) tris += rec.mesh.geometry.index.count / 3;

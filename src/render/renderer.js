@@ -249,7 +249,10 @@ float fbm1(vec2 p) { return vnoise(p); }
     m.customProgramCacheKey = () => 'vr-terrain-f9';
     this.terrainMaterial = m;
 
-    this.propMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    // Standard, not Lambert: props take the same lighting model as the car body so
+    // instanceColor and the baked vertex colours still feed USE_INSTANCING_COLOR /
+    // USE_COLOR in the standard shader (both materials support them).
+    this.propMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.0 });
     this.carMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.25 });
   }
 

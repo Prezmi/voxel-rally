@@ -26,8 +26,10 @@ import { STATE } from './stage.js';
 import { settings } from '../core/settings.js';
 import { drawText, textWidth } from './pixel-font.js';
 import { drawSignBoard, signMetrics, bendKind, signWord } from './sign-board.js';
+import { selectNotes } from './pace-notes.js';
 
 const RAD2DEG = 180 / Math.PI;
+const DIAL_MAX = 200;          // km/h at the end of the dial sweep (face labels i*10)
 const WHEEL_LABELS = ['PRZ L', 'PRZ P', 'TYŁ L', 'TYŁ P'];
 const MODES = ['FULL', 'MINIMAL', 'OFF'];
 
@@ -115,7 +117,6 @@ export class RallyHud {
     this._acc = 0; this._accGauge = 0; this._accSign = 0; this._accSlow = 0; this._accWheel = 0;
     this._events = { checkpoints: [], penalties: [], result: null, countdown: -1 };
     this._padPrev = [false, false, false, false];
-    this._pick = [{ n: null, d: 0 }, { n: null, d: 0 }, { n: null, d: 0 }, { n: null, d: 0 }];
     this._popFrames = [0, 0, 0, 0];   // 2-frame board pop (hard steps, no easing)
     this._wheelCol = ['', '', '', ''];
     this._wheelLabel = ['', '', '', ''];
@@ -334,7 +335,14 @@ export class RallyHud {
       this._buildMenu([]);
       this._pushStack('countdown');
     }
-    if (this._dirtyAll && this.g) { this.g.clearRect(0, 0, this.W, this.H); this._dirtyAll = false; }
+    if (this._dirtyAll && this.g) {
+      this.g.clearRect(0, 0, this.W, this.H);
+      this._dirtyAll = false;
+      // A full-canvas clear (modal, resize, mode change) must invalidate every cached
+      // value, otherwise the panels whose number did not change stay erased - that is
+      // what left the stage/meta strip and the pace-note boards blank.
+      for (const k in this._keys) this._keys[k] = '';
+    }
     if (this.mode === 'OFF') {
       if (this.top() !== 'hud') { this._drawModal(ctx); this._pollMenu(); }
       return;
@@ -379,56 +387,50 @@ export class RallyHud {
     if (!this.g) return;
     const t = ctx.stage.timing, sec = t.activeSector;
     const line = `${this._stageName}  ·  SEKTOR ${sec ? sec.index : t.sectors.length}/${t.sectors.length}`;
-    if (!this._key('meta', line)) return;
     const r = this.L.meta;
     r.w = Math.min(this.W - 8, textWidth(line, 1) + 10);
-    this._clear({ x: r.x, y: r.y, w: Math.max(r.w, 200), h: r.h });
+    // The note row begins after this panel, so its x is recomputed on EVERY update, not
+    // only when the text changes: the 20 Hz sign strip clears everything right of its
+    // own x, and a stale (too small) x wiped the meta panel and drifted the boards over it.
+    this.L.signs.x = Math.min(this.W - 40, r.x + r.w + 4);
+    if (!this._key('meta', line)) return;
+    this._clear({ x: r.x, y: r.y, w: r.w, h: r.h });
     frameRect(this.g, r.x, r.y, r.w, r.h, C.PANEL, true);
     drawText(this.g, line, r.x + 5, r.y + 3, 1, C.TEXT);
-    this.L.signs.x = Math.min(this.W - 40, r.x + r.w + 4);
   }
 
   // ---------- 2. pace notes as wooden sign boards ----------
+  // Exactly one board for the corner being approached + one small preview. The metre
+  // count and the seconds countdown come from the real distance to that apex at the
+  // car's current speed (src/game/pace-notes.js selectNotes), not from the ghost lead.
   _drawSigns(ctx) {
-    const t = ctx.stage.timing, st = ctx.stage;
-    const chips = this.mode === 'FULL' ? 4 : 1;
+    const st = ctx.stage;
     const list = ctx.notes || [];
-    const arc = st.arc;
-    const v = ctx.car.body ? ctx.car.body.groundSpeed : 0;
-    const win = 110 + v * 3.0;
+    const v = ctx.car && ctx.car.body ? ctx.car.body.groundSpeed : 0;
+    const sel = selectNotes(list, st.arc || 0, v);
     const spoken = ctx.voice && ctx.voice.currentText ? ctx.voice.currentText : '';
-    let n = 0;
-    if (this.arrows) {
-      for (let i = 0; i < list.length && n < chips; i++) {
-        const a = list[i];
-        if (a.apexArc < arc - 25) continue;
-        const dd = a.apexArc - arc;
-        if (dd > win + (a.priority >= 3 ? 90 : 0)) continue;
-        this._pick[n].n = a;
-        this._pick[n].d = Math.max(0, Math.round(dd / 5) * 5);
-        n++;
-      }
-    }
+    const picks = [];
+    if (sel.active) picks.push({ n: sel.active, d: sel.activeDist, eta: sel.activeEta, big: true });
+    if (sel.preview && this.mode === 'FULL') picks.push({ n: sel.preview, d: sel.previewDist, eta: sel.previewEta, big: false });
     let key = '';
-    for (let i = 0; i < chips; i++) {
-      const a = this._pick[i].n;
-      key += (a ? a.apexArc + ':' + this._pick[i].d + (a === spoken ? '*' : '') : '-') + '|';
-    }
-      if (!this._key('signs', key)) { for (let i = 0; i < 4; i++) if (this._popFrames[i] > 0) this._popFrames[i]--; }
+    for (const p of picks) key += `${p.n.apexArc}:${p.d}:${p.eta.toFixed(1)}${p.n.text === spoken ? '*' : ''}|`;
+    if (!this._key('signs', key)) { for (let i = 0; i < this._popFrames.length; i++) if (this._popFrames[i] > 0) this._popFrames[i]--; }
     if (!this.g) return;
     const S = this.L.signs;
     this._clear({ x: S.x, y: S.y, w: Math.max(1, this.W - S.x - 2), h: S.h + 4 });
     let x = S.x;
-    for (let i = 0; i < chips; i++) {
-      const a = this._pick[i].n;
-      if (i >= n || !a) { if (this._pop[i] > 0) this._pop[i] = 0; continue; }
+    for (let i = 0; i < picks.length; i++) {
+      const a = picks[i].n;
       if (this._signKey[i] !== a.apexArc) { this._signKey[i] = a.apexArc; this._popFrames[i] = 2; }
       else if (this._popFrames[i] > 0) this._popFrames[i]--;
       const spec = {
-        kind: a.kind === 'corner' ? (a.parts > 1 && !a.hairpin ? 'double' : bendKind(a.severity, a.hairpin, a.parts))
-          : (a.text === 'HANT' ? 'straight' : 'straight'),
-        dir: a.dir, sev: a.severity, big: i === 0,
-        word: signWord(a), dist: `${this._pick[i].d} M`,
+        // the glyph is the corner itself: plain / sharp / hairpin, always carrying the
+        // side of the bend the spline makes at this distance
+        kind: a.kind === 'corner' ? bendKind(a.severity, a.hairpin, a.dir) : 'straight',
+        dir: a.dir, sev: a.severity, big: picks[i].big, dim: !picks[i].big,
+        word: signWord(a),
+        dist: `${Math.max(0, Math.round(picks[i].d / 5) * 5)} M`,
+        eta: `${picks[i].eta.toFixed(1)} s`,
         spoken: !!spoken && a.text === spoken, pop: this._popFrames[i],
       };
       const w = signMetrics(spec).w;
@@ -436,6 +438,7 @@ export class RallyHud {
       drawSignBoard(this.g, x, S.y, spec);
       x += w + 4;
     }
+    for (let i = picks.length; i < this._signKey.length; i++) this._signKey[i] = '';
   }
 
   // ---------- 3. blocky speedometer + gear slot + big speed digits ----------
@@ -444,11 +447,15 @@ export class RallyHud {
     const redline = (car.params && car.params.engine && car.params.engine.redline) || 7000;
     const maxRpm = Math.ceil(redline / 1000) * 1000;
     const rpm = Math.max(0, pt ? pt.rpm : 0);
-    const f = Math.max(0, Math.min(1, rpm / maxRpm));
+    const fr = Math.max(0, Math.min(1, rpm / maxRpm));
+    // ONE speed source: the body's ground speed, scaled to km/h exactly once. The dial
+    // face is labelled in km/h, so its needle must read that same number (it used to
+    // sweep on the rev fraction, so dial and digits disagreed).
     const kmh = Math.round((car.body ? car.body.groundSpeed : (car.speed || 0)) * 3.6);
+    const f = Math.max(0, Math.min(1, kmh / DIAL_MAX));
     const gear = pt ? pt.gear : 0;
     const gl = kmh > 2 ? String(gear + 1) : 'N';
-    if (this._key('cluster', `${f.toFixed(3)}|${kmh}|${gl}|${this.mode}`) || this._dirtyAll) {
+    if (this._key('cluster', `${f.toFixed(3)}|${kmh}|${gl}|${fr.toFixed(3)}|${this.mode}`) || this._dirtyAll) {
       if (this.g && this._dialFace) {
         const D = this.L.dial, G2 = this.g;
         this._clear(D);
@@ -456,14 +463,14 @@ export class RallyHud {
         const geo = this._dialGeo;
         const deg = geo.START + f * geo.SWEEP;
         // needle = stacked 2x2 blocks along the radius, not an antialiased line
-        G2.fillStyle = f >= 0.93 ? C.WHITE : C.OUT;
+        G2.fillStyle = fr >= 0.93 ? C.WHITE : C.OUT;
         for (let r = 2; r <= 28; r += 2) {
           const a = deg * Math.PI / 180;
           G2.fillRect(D.x + Math.round(geo.cx + Math.cos(a) * r) - 1, D.y + Math.round(geo.cy + Math.sin(a) * r) - 1, 2, 2);
         }
         G2.fillStyle = C.OUT;
         G2.fillRect(D.x + geo.cx - 2, D.y + geo.cy - 2, 4, 4);
-        if (f >= 0.93) {                          // redline flash: alternating red / white blocks
+        if (fr >= 0.93) {                        // rev limiter flash: red / white blocks
           G2.fillStyle = (this._flash = !this._flash) ? C.WHITE : C.RED;
           for (const r of geo.red) G2.fillRect(D.x + r[0], D.y + r[1], r[2], r[3]);
         }

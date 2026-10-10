@@ -16,7 +16,10 @@ import { blockColor, blockSurface } from './palette.js';
 import { hash01 } from './noise.js';
 
 export const LOD_CELL = [1, 2, 4];
-const AO_LEVELS = [1.0, 0.82, 0.68, 0.56];
+// AO floor: a crevice may be shaded, never black. 0.56 on the deepest corner, times
+// WALL_SHADE, times the shader's crevice band, is what painted a 1-cell square pit.
+const AO_LEVELS = [1.0, 0.90, 0.81, 0.72];
+const AO_MIN = 0.80;                 // combined-darkening clamp (see vertex())
 const RELIEF_SALT = 0x51b7c3d9;
 const TONE_SALT = 0x2c9a1f7b;
 // Bed lattice for the MESH, in 1/16-block units. A carved road bed has a different
@@ -28,6 +31,23 @@ const TONE_SALT = 0x2c9a1f7b;
 // the physics surface — are untouched, so rendered and simulated height differ <= 6 cm.
 const BED_GRID = 2;
 const snapQ = (q) => Math.round(q / BED_GRID) * BED_GRID;
+// Flat-zone relaxation (measured cause of the "plowed field", SYSTEM-NOTES §22):
+// across the loaded corridor 8.7 % of adjacent column pairs differ by 6-94 cm and
+// 81 % are exactly equal - the sub-block jitter comes from the carved `fine` on every
+// corridor column plus `rut`. Every one of those pairs produced a 1x1 top panel, a
+// full wall band and crevice AO: 4530 wall quads shorter than 20 cm on ground that is
+// flat to within 20 cm. In a near-flat zone the RENDERED lattice is therefore
+// coarsened so the greedy merge emits one sheet instead of a field of pitted panels.
+// RELAX_FLAT_Q: 3x3 relief that still counts as "near flat".
+// A column whose raw top is not a whole block carries a carved `fine`, i.e. it is in
+// the corridor: it gets the 25 cm lattice (the bank must keep its sub-block blend onto
+// the verge, PLAN §10 criterion 3). Natural ground snaps to the block lattice so
+// terrace bands merge instead of each column standing on its own 1x1 panel.
+const RELAX_WORN_Q = 16;
+const RELAX_NATURAL_Q = 32;
+const GRID_WORN = BED_GRID;   // 1/8 m: the graded bed keeps its true steps (see §22)
+const GRID_NATURAL = 16;
+const RISER_Q = 4;                   // <= 25 cm: a riser, not a wall
 const wearOf = (v) => (v > 1 ? 1 : v < 0 ? 0 : v);
 // Hard albedo ceiling. The worn-lip chain (mesher `wear` * shader `mix(0.80,1.17,wear)`
 // * the worn-bed `sep` boost * the pale GRAVEL tone) clipped gravel panels to a
@@ -41,12 +61,36 @@ const ALBEDO_MAX = 0.70;
 // glowing pale lips of the reference frame. Wall albedo is baked down to compensate and
 // the bright end of the sub-band ramp is moved off the lip onto the crevice side.
 const WALL_SHADE = 0.66;
-const ALBEDO_WALL_MAX = 0.50;
+const ALBEDO_WALL_MAX = 0.60;
 
 export function meshChunk(world, chunk, lod = 0) {
   const cs = LOD_CELL[lod] || 1;
   const N = CHUNK / cs;
   const x0 = chunk.cx * CHUNK, z0 = chunk.cz * CHUNK;
+
+  // Relaxation is keyed on WORLD coordinates and on the raw column tops only, so a
+  // cell gets the same rendered height from either side of a chunk border (no seam)
+  // and topOutside() can reproduce its neighbour chunk's value exactly.
+  const rawTopQAt = (wx, wz) => { const q = world.columnTopQAt(wx, wz); return q < 0 ? 0 : q; };
+  const range3x3 = (wx, wz) => {
+    let lo = 1 << 20, hi = -(1 << 20);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const q = rawTopQAt(wx + dx, wz + dz);
+        if (q < lo) lo = q; if (q > hi) hi = q;
+      }
+    }
+    return hi - lo;
+  };
+  const relaxQ = (q, wx, wz) => {
+    if (q <= 0) return 0;
+    const worn = q % 16 !== 0;                 // a carved `fine` -> corridor column
+    const range = range3x3(wx, wz);
+    const g = worn ? (range <= RELAX_WORN_Q ? GRID_WORN : BED_GRID)
+      : (range <= RELAX_NATURAL_Q ? GRID_NATURAL : BED_GRID);
+    const r = Math.round(q / g) * g;
+    return r < 0 ? 0 : r;
+  };
 
   // ---- LOD height/material grid ----
   // Heights are carried in 1/16-block units so a carved road bed merges greedily
@@ -74,7 +118,8 @@ export function meshChunk(world, chunk, lod = 0) {
       }
       // Full and simplified LODs keep cliffs honest (max); silhouette averages.
       const rawH = lod === 2 ? Math.round(sum / Math.max(1, cnt)) : peak;
-      topQ[j * N + i] = snapQ(rawH);
+      const wx = x0 + i * cs + (cs >> 1), wz = z0 + j * cs + (cs >> 1);
+      topQ[j * N + i] = lod === 2 ? snapQ(rawH) : relaxQ(rawH, wx, wz);
       bid[j * N + i] = mode;
     }
   }
@@ -114,7 +159,11 @@ export function meshChunk(world, chunk, lod = 0) {
   const vertex = (x, y, z, nx, ny, nz, r, g, b, ao, surfId, wear) => {
     pos.push(x, y, z);
     nor.push(nx, ny, nz);
-    col.push(r * ao, g * ao, b * ao);
+    // One face may be darkened by AO, by the wall tone ramp and by the shader's crevice
+    // band, but the product of the baked terms is floored: a 1-cell dark square is the
+    // pit illusion, and it is the *product* that creates it, not any one term.
+    const a = ao < AO_MIN ? AO_MIN : ao;
+    col.push(r * a, g * a, b * a);
     // aSurface carries the surface id in its integer part and the edge-weathering
     // factor in its fraction: one attribute instead of two, and streaming.js keeps
     // its single `aSurface` buffer (docs/03 §1).
@@ -122,8 +171,9 @@ export function meshChunk(world, chunk, lod = 0) {
   };
 
   const topOutside = (i, j) => {
-    const tq = world.columnTopQAt(Math.floor(x0 + i * cs + cs * 0.5), Math.floor(z0 + j * cs + cs * 0.5));
-    return tq < 0 ? 0 : snapQ(tq);
+    const wx = Math.floor(x0 + i * cs + cs * 0.5), wz = Math.floor(z0 + j * cs + cs * 0.5);
+    const tq = world.columnTopQAt(wx, wz);
+    return tq < 0 ? 0 : (lod === 2 ? snapQ(tq) : relaxQ(tq, wx, wz));
   };
 
   let quads = 0;
@@ -174,7 +224,7 @@ export function meshChunk(world, chunk, lod = 0) {
       // differ by the coarse field (>= 12 % value spread), not by per-cell noise.
       const pn = hash01(ax >> 3, az >> 3, TONE_SALT);
       const pn2 = hash01(ax >> 1, az >> 1, TONE_SALT ^ 0x2f1b3d77);
-      const pv = 1 + (pn - 0.5) * 0.26 + (pn2 - 0.5) * 0.08;  // value spread ~ +/-17 %
+      const pv = 1 + (pn - 0.5) * 0.18 + (pn2 - 0.5) * 0.05;  // value spread ~ +/-12 %
       const pf = hash01(az + 7, ax - 3, TONE_SALT ^ 0x5bd1e995);
       const ph = (pf - 0.5) * 0.12;                           // warm/cool hue drift
       const pw = wPanel[c0] / 255;                            // 0 natural .. 1 worn bed
@@ -313,10 +363,16 @@ export function meshChunk(world, chunk, lod = 0) {
         const pw = (axis === 0 ? wearG[q * N + p] : wearG[p * N + q]) / 255;
         const yBot = lo / 16, yTop = hi / 16;
         const spanAll = yTop - yBot;
-        // A whole 1 m shelf as one flat quad is exactly what reads as a step. Split a
-        // tall band into sub-bands, each with its own tone ramp (and its own AO only on
-        // the lowest one) so a bank face carries a gradient instead of one value.
-        const parts = spanAll > 0.34 ? Math.min(3, Math.ceil(spanAll / 0.34)) : 1;
+        // A step of <= 25 cm is a *riser*, not a wall: it gets the surface tone at
+        // almost full value and no AO. Before this, every 6-25 cm step in the carved
+        // bed took WALL_SHADE * AO * the shader crevice band and read as a dark pit.
+        const isRiser = (hi - lo) <= RISER_Q;
+        // Sub-banding a 1 m riser into three 33 cm bands with independent hashed ramps
+        // is literally the "carpet of 1-block shelves" in the reference frame: only a
+        // genuinely tall bank face gets a gradient.
+        const parts = isRiser ? 1 : (spanAll > 1.6 ? 2 : 1);
+        const shade = isRiser ? 0.74 : WALL_SHADE;
+        const wmBase = isRiser ? 0.62 : 0.34;     // never the darkest band in the shader
         // The surface below the wall (verge under a road lip, grass under a
         // terrace): its colour bleeds into the base of the band, so a material
         // change reads as a gradient instead of a hard 1-block step (PLAN §10).
@@ -329,12 +385,13 @@ export function meshChunk(world, chunk, lod = 0) {
         const yLo = yBot + spanAll * (s / parts);
         const yHi = yBot + spanAll * ((s + 1) / parts);
         const spanY = yHi - yLo;
-        const ramp = 1 + 0.18 * ((s + 0.5) / parts - 0.5)
-          + (hash01(q * 4 + s, p + axis * 31, RELIEF_SALT + 17) - 0.5) * 0.11;
-        let r = rB * ramp * WALL_SHADE, g = gB * ramp * WALL_SHADE, bb = bB * ramp * WALL_SHADE;
-        if (r > ALBEDO_WALL_MAX) r = ALBEDO_WALL_MAX;
-        if (g > ALBEDO_WALL_MAX) g = ALBEDO_WALL_MAX;
-        if (bb > ALBEDO_WALL_MAX) bb = ALBEDO_WALL_MAX;
+        const ramp = isRiser ? 1 : 1 + 0.14 * ((s + 0.5) / parts - 0.5)
+          + (hash01(q * 4 + s, p + axis * 31, RELIEF_SALT + 17) - 0.5) * 0.05;
+        let r = rB * ramp * shade, g = gB * ramp * shade, bb = bB * ramp * shade;
+        const cap = isRiser ? ALBEDO_MAX : ALBEDO_WALL_MAX;
+        if (r > cap) r = cap;
+        if (g > cap) g = cap;
+        if (bb > cap) bb = cap;
         const base = pos.length / 3;
 
         if (axis === 0) {
@@ -346,11 +403,12 @@ export function meshChunk(world, chunk, lod = 0) {
             const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
             const tz = u === u0 ? -1 : 1;
             const ty = vy === yLo ? -1 : 1;
-            const ao = lod === 2 || s > 0 ? 1 : AO_LEVELS[aoWallX(inB, by, bz, ty, tz)];
+            const ao = lod === 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallX(inB, by, bz, ty, tz)];
             const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;      // 0 in the crevice, 1 at the lip
-            const wear = lod === 2 ? 0.5 : f;
+            const wm = wmBase + (1 - wmBase) * f;
+            const wear = lod === 2 ? 0.5 : wm;
             let cr = r * (1 + (pw - 0.5) * 0.22), cg = g, cb = bb * (1 + (pw - 0.5) * 0.22);
-            if (hasNb) { const k = 0.45 * (1 - f); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
+            if (hasNb) { const k = 0.4 * (1 - wm); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
             const jy = lod === 2 ? 0 : (hash01(bz, by, RELIEF_SALT + 7) - 0.5) * 0.12;
             const jz = lod === 2 ? 0 : (hash01(by, bz, RELIEF_SALT + 11) - 0.5) * 0.14;
             const inv = 1 / Math.hypot(1, jy, jz);
@@ -366,11 +424,12 @@ export function meshChunk(world, chunk, lod = 0) {
             const by = vy === yLo ? Math.floor(yLo) : Math.ceil(yHi) - 1;
             const tx = u === x0u ? -1 : 1;
             const ty = vy === yLo ? -1 : 1;
-            const ao = lod === 2 || s > 0 ? 1 : AO_LEVELS[aoWallZ(bx, by, inB, tx, ty)];
+            const ao = lod === 2 || s > 0 || isRiser ? 1 : AO_LEVELS[aoWallZ(bx, by, inB, tx, ty)];
             const f = spanY > 1e-4 ? (vy - yLo) / spanY : 1;
-            const wear = lod === 2 ? 0.5 : f;
+            const wm = wmBase + (1 - wmBase) * f;
+            const wear = lod === 2 ? 0.5 : wm;
             let cr = r * (1 + (pw - 0.5) * 0.22), cg = g, cb = bb * (1 + (pw - 0.5) * 0.22);
-            if (hasNb) { const k = 0.45 * (1 - f); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
+            if (hasNb) { const k = 0.4 * (1 - wm); cr = r * (1 - k) + nrr * k; cg = g * (1 - k) + ngg * k; cb = bb * (1 - k) + nbb * k; }
             const jy = lod === 2 ? 0 : (hash01(bx, by, RELIEF_SALT + 7) - 0.5) * 0.12;
             const jx = lod === 2 ? 0 : (hash01(by, bx, RELIEF_SALT + 13) - 0.5) * 0.14;
             const inv = 1 / Math.hypot(1, jy, jx);

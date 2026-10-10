@@ -116,7 +116,10 @@ export function buildPaceNotes(road, ghost, opts = {}) {
   const groups = [];
   for (const e of extrema) {
     const g = groups[groups.length - 1];
-    if (g && e.arc - g.endArc <= MERGE_GAP) {
+    // Only extrema that turn the SAME way merge into one corner group: a chicane is
+    // two corners and every board has to show the direction of the one it describes
+    // (a mixed-sign group made the sign label disagree with the road).
+    if (g && e.arc - g.endArc <= MERGE_GAP && e.dir === g.dir) {
       g.endArc = e.arc; g.endIndex = e.index;
       if (e.radius < g.radius) { g.radius = e.radius; g.index = e.index; g.kappa = e.kappa; g.dir = e.dir; }
       g.parts++;
@@ -135,7 +138,11 @@ export function buildPaceNotes(road, ghost, opts = {}) {
     if (kRaw > 1e-4 && 1 / kRaw < g.radius) { g.radius = 1 / kRaw; }
     const sev = severityFor(g.radius);
     if (sev > 6) return null;
-    const angle = Math.abs(groupAngle(road, k, Math.max(0, g.startIndex - 8), Math.min(n - 1, g.endIndex + 8)));
+    // Signed turn across the group: that integral is the direction the road really
+    // makes here, so the board's arrow and Polish word can never disagree with it.
+    const turn = groupAngle(road, k, Math.max(0, g.startIndex - 8), Math.min(n - 1, g.endIndex + 8));
+    const angle = Math.abs(turn);
+    g.dir = (Math.abs(turn) > 1e-3 ? turn : (road.kappa[apexIndex] || g.kappa)) > 0 ? 'R' : 'L';
     const hairpin = road.feature[apexIndex] === FEATURE.HAIRPIN || angle >= 150 * Math.PI / 180;
     // Feature inside the corner group (docs/03 §3 markFeatures): crest/dip/jump/water/bridge.
     const feats = [];
@@ -265,6 +272,47 @@ export function buildPaceNotes(road, ghost, opts = {}) {
   };
 
   function trigIsBefore(a, b) { return a.triggerArc < b.triggerArc; }
+}
+
+// ---------------------------------------------------------------------------
+// The HUD note cursor: ONE note (the corner actually being approached) plus at most
+// one small preview of the next. Distances and the countdown are the real metres to
+// the corner and the seconds left at the car's CURRENT speed - never the ghost lead
+// the voice trigger is built on, which is what made signs appear far too early.
+export const NOTE_VIEW_S = 2.6;    // s of road the active sign covers
+export const NOTE_VIEW_MIN = 55;   // m floor: a slow/stopped car still sees the bend
+
+/**
+ * @param notes note array from buildPaceNotes (sorted by apexArc)
+ * @param arc   distance the car has covered on the spline
+ * @param speed current ground speed in m/s
+ * @returns {active, activeDist, activeEta, preview, previewDist, previewEta}
+ */
+export function selectNotes(notes, arc, speed, opts = {}) {
+  const secs = opts.secs ?? NOTE_VIEW_S;
+  const floor = opts.min ?? NOTE_VIEW_MIN;
+  const v = Math.max(0, speed || 0);
+  const win = Math.max(floor, v * secs);
+  const out = { active: null, activeDist: 0, activeEta: 0, preview: null, previewDist: 0, previewEta: 0 };
+  const ahead = [];
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    const dd = n.apexArc - arc;
+    if (dd <= -2) continue;                     // already driven through
+    if (dd > win * 2) break;                    // sorted by apexArc: nothing nearer follows
+    ahead.push({ n, dd });
+  }
+  if (ahead.length && ahead[0].dd <= win) {
+    out.active = ahead[0].n;
+    out.activeDist = Math.max(0, ahead[0].dd);
+    out.activeEta = out.activeDist / Math.max(3, v);
+    if (ahead.length > 1) {
+      out.preview = ahead[1].n;
+      out.previewDist = Math.max(0, ahead[1].dd);
+      out.previewEta = out.previewDist / Math.max(3, v);
+    }
+  }
+  return out;
 }
 
 // The runtime cursor lives in voice.js (Voice.advance walks the note list on the fixed

@@ -13,6 +13,10 @@ export const settings = {
   drawDistance: 260,         // m, docs/03 §1
   fullRadius: 110,
   simpleRadius: 200,
+  // Visual-only block tiles over the road band + verge (assets/models/stage_blocks.glb).
+  // Read-only layer: it reads the surface ids the carve already assigned, it never
+  // touches the heightfield or physics. Switch off with `settings.blockTiles = false`.
+  blockTiles: true,
 
   // Simulation / difficulty (docs/02 §10: assists change limiters, never mu)
   difficulty: 'RALLY',       // NOVICE | RALLY | PRO

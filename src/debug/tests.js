@@ -9,6 +9,14 @@ import { VoxelWorld } from '../world/chunk.js';
 import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE } from '../car/car-params.js';
 import { DT } from '../core/time.js';
+import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES } from '../render/car-asset.js';
+import { PANEL_COUNT } from '../dirt/panel-dirt.js';
+import { makeTerrain } from '../world/terrain-gen.js';
+import { buildRoad } from '../world/road-spline.js';
+import { solveGhost } from '../game/ghost.js';
+import { planGates } from '../game/stage.js';
+import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
+import { signWord, bendKind } from '../game/sign-board.js';
 
 const G = 9.81;
 
@@ -341,8 +349,138 @@ function testStageLoad() {
   check('T9 sim cost per 1/120 step on voxel terrain', ms <= 4, `sim=${ms.toFixed(3)} ms/step (budget <=4) setup=${Date.now() - t0} ms`);
 }
 
+// ---------------------------------------------------------------- test 10
+// The asset car (assets/models/rally_v2.glb) must keep the render contract of
+// the procedural body: aPanel per vertex + non-empty named damage ranges
+// (render/carMesh.js dirt, livery and damage all read them). Headless, so the
+// glTF nodes are stand-ins with the same duck-typed geometry interface.
+class FakeAttr {
+  constructor(array, itemSize) { this.array = array; this.itemSize = itemSize; this.count = array.length / itemSize; }
+}
+function fakeGeo(quads) {
+  const pos = [], nor = [], idx = [];
+  for (const qd of quads) {
+    const off = pos.length / 3;
+    for (const c of qd.c) pos.push(c[0], c[1], c[2]);
+    for (let i = 0; i < qd.c.length; i++) nor.push(qd.n[0], qd.n[1], qd.n[2]);
+    idx.push(off, off + 1, off + 2, off, off + 2, off + 3);
+  }
+  return {
+    index: { array: idx, count: idx.length }, groups: null,
+    getAttribute(name) {
+      if (name === 'position') return new FakeAttr(pos, 3);
+      if (name === 'normal') return new FakeAttr(nor, 3);
+      return null;
+    },
+  };
+}
+
+function fakeNodes() {
+  // Asset frame: ground y = 0, nose +2.1, tail -2.2, width +-0.98.
+  const top = (x0, x1, z0, z1, y) => ({ c: [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], n: [0, 1, 0] });
+  const bot = (x0, x1, z0, z1, y) => ({ c: [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], n: [0, -1, 0] });
+  const side = (z, x0, x1, y0, y1) => ({ c: [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], n: [0, 0, z > 0 ? 1 : -1] });
+  const spec = {
+    car_body: [top(1.0, 1.6, -0.6, 0.6, 1.0), side(0.9, -0.4, 0.6, 0.35, 0.85), bot(-1.0, 1.0, -0.5, 0.5, 0.1)],
+    car_fender: [side(0.95, 0.9, 1.7, 0.3, 0.7), side(-0.95, -1.7, -0.9, 0.3, 0.7)],
+    car_panel: [top(-0.6, 0.4, -0.5, 0.5, 1.43), side(0.85, -0.4, 0.4, 1.0, 1.3)],
+    car_lamps: [side(-0.5, 1.8, 1.9, 0.5, 0.7), side(0.5, 1.8, 1.9, 0.5, 0.7)],
+    car_fascia: [side(0.6, 1.9, 2.1, 0.4, 0.8)],
+    car_grille: [side(0.0, 1.9, 2.0, 0.5, 0.7)],
+    car_splitter: [top(1.7, 2.1, -0.8, 0.8, 0.35)],
+    car_snorkel: [side(-0.9, 0.7, 1.5, 0.8, 1.05)],
+    car_spoiler: [top(-2.2, -1.4, -0.9, 0.9, 1.2)],
+    car_rear: [side(-0.9, -2.1, -2.0, 0.4, 0.7)],
+    car_diffuser: [top(-1.8, -1.1, -0.05, 0.05, 0.3)],
+    car_flap: [side(0.9, -0.8, -0.6, 0.2, 0.4)],
+  };
+  const nodes = new Map();
+  for (const name of BODY_PARTS) nodes.set(name, { geometry: fakeGeo(spec[name]), material: null, node: { name } });
+  for (const n of WHEEL_NODES) nodes.set(n, { geometry: wheelGeo(), material: null, node: { name: n } });
+  return nodes;
+}
+function wheelGeo() {
+  const pos = [], nor = [], r = 0.35;
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2, b = ((k + 1) / 8) * Math.PI * 2;
+    pos.push(Math.cos(a) * r, Math.sin(a) * r, -0.17, Math.cos(b) * r, Math.sin(b) * r, -0.17,
+      Math.cos(b) * r, Math.sin(b) * r, 0.17, Math.cos(a) * r, Math.sin(a) * r, 0.17);
+    for (let i = 0; i < 4; i++) nor.push(Math.cos(a), Math.sin(a), 0);
+  }
+  const idx = [];
+  for (let q = 0; q < 8; q++) { const o = q * 4; idx.push(o, o + 1, o + 2, o, o + 2, o + 3); }
+  return {
+    index: { array: idx, count: idx.length }, groups: null,
+    getAttribute(name) {
+      if (name === 'position') return new FakeAttr(pos, 3);
+      if (name === 'normal') return new FakeAttr(nor, 3);
+      return null;
+    },
+  };
+}
+
+function testCarAsset() {
+  const w = new FlatWorld(SURF.DIRT);
+  const params = makeCar(w, {}).params;
+  const nodes = fakeNodes();
+  const built = buildAssetBody(nodes, params);
+  const need = ['hood', 'flank', 'rear', 'roof', 'glass', 'front', 'under'];
+  const haveRegions = need.filter((r) => built.ranges[r] && built.ranges[r][1] > built.ranges[r][0]);
+  let panels = new Set(), contiguous = true, covered = 0;
+  for (let i = 0; i < built.aPanel.length; i++) panels.add(built.aPanel[i]);
+  for (const k in built.ranges) {
+    const r = built.ranges[k];
+    if (r[0] >= r[1] || r[1] > built.count) contiguous = false;
+    covered += r[1] - r[0];
+  }
+  const ty = tyreScale(nodes, TYRE_BASE.r, WHEEL_NODES[0]);
+  let minY = Infinity;
+  for (let i = 1; i < built.position.length; i += 3) if (built.position[i] < minY) minY = Math.min(minY, built.position[i]);
+  const ok = built.tris > 0 && built.missing.length === 0
+    && !!built.aPanel && built.aPanel.length === built.count
+    && panels.size >= 4 && [...panels].every((p) => p >= 0 && p < PANEL_COUNT)
+    && haveRegions.length === need.length && contiguous && covered === built.count
+    && Math.abs(ty * 0.35 - TYRE_BASE.r) < 1e-6 && Math.abs(minY - (-params.comY)) < 1e-4;
+  check('T10 asset car keeps aPanel + damage ranges', ok,
+    `tris=${built.tris} verts=${built.count} panels=${panels.size} regions=[${Object.keys(built.ranges).join(',')}] fit=${built.scale.toFixed(3)} tyreScale=${ty.toFixed(3)} groundY=${minY.toFixed(3)}`);
+}
+
+// ---------------------------------------------------------------- test 11
+// HUD note cursor: at any sampled arc at most ONE board is active (plus the small
+// preview), and every shown note's direction + Polish word (LEWO/PRAWO) match the
+// direction the road spline actually makes at that corner.
+function testPaceNoteDisplay() {
+  const SEED = 12345, LEN = 4200;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const ghost = solveGhost(road, { seed: SEED, gates: planGates(road, SEED), carId: 'A' });
+  const notes = buildPaceNotes(road, ghost).notes;
+  let maxActive = 0, maxBoards = 0, dirMismatch = 0, wordMismatch = 0, glyphMismatch = 0, sampled = 0;
+  for (let arc = 0; arc < road.length; arc += 20) {
+    const sel = selectNotes(notes, arc, 22);              // 22 m/s ~ 80 km/h
+    const nAct = sel.active ? 1 : 0;
+    maxActive = Math.max(maxActive, nAct);
+    maxBoards = Math.max(maxBoards, nAct + (sel.preview ? 1 : 0));
+    for (const n of [sel.active, sel.preview]) {
+      if (!n || n.kind !== 'corner') continue;
+      sampled++;
+      const i = road.indexAt(n.apexArc);
+      let turn = 0;
+      for (let j = Math.max(0, i - 6); j <= Math.min(road.n - 1, i + 6); j++) turn += road.kappa[j];
+      if (Math.abs(turn) > 1e-3 && (turn > 0 ? 'R' : 'L') !== n.dir) dirMismatch++;
+      const word = signWord(n);
+      if ((n.dir === 'L') !== word.includes('LEWO') || (n.dir === 'R') !== word.includes('PRAWO')) wordMismatch++;
+      const kind = bendKind(n.severity, n.hairpin, n.dir);
+      if (!kind.endsWith(n.dir === 'L' ? 'Left' : 'Right')) glyphMismatch++;
+    }
+  }
+  const ok = maxActive <= 1 && maxBoards <= 2 && dirMismatch === 0 && wordMismatch === 0 && glyphMismatch === 0 && sampled > 40;
+  check('T11 one active pace note + direction matches the spline', ok,
+    `maxActive=${maxActive} (want <=1) maxBoards=${maxBoards} (want <=2) dirMismatch=${dirMismatch} wordMismatch=${wordMismatch} glyphMismatch=${glyphMismatch} samples=${sampled}`);
+}
+
 const only = process.argv[2] ? Number(process.argv[2]) : 0;
-const all = [test1, test2, test3, test4, test5, test6, test7];
+const all = [test1, test2, test3, test4, test5, test6, test7, testCarAsset, testPaceNoteDisplay];
 if (!only) {
   for (const t of all) t();
   testSurfaces();
@@ -355,4 +493,4 @@ const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) process.exitCode = 1;
 
-export { results, arcRun, test1, test2, test3, test4, test5, test6, test7 };
+export { results, arcRun, test1, test2, test3, test4, test5, test6, test7, testCarAsset, testPaceNoteDisplay };

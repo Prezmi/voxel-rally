@@ -1,6 +1,11 @@
 # VOXEL RALLY — plan produkcji
 **Roboczy tytuł:** Voxel Rally · **Kodname:** `mc-rally`
-**Baza:** Three.js (ES modules, bez bundlera wymaganego) · **Zero plików graficznych i dźwiękowych** — cała grafika, tekstury, modele, dźwięk i muzyka są generowane w kodzie.
+**Baza:** Three.js (ES modules, bez bundlera wymaganego)
+
+> **Zmiana kierunku (2026-10-09, decyzja Patryka):** stary filar „zero plików graficznych” **przestaje obowiązywać**.
+> Projekt przechodzi na **realne assety 3D**: modele z Blendera (GLB) i tekstury PBR. Cel: gra ma wyglądać jak gra,
+> nie jak szkic techniczny. Proceduralne zostaje tam, gdzie plik nic nie poprawia: wokselowy teren, koleiny,
+> mapa brudu, cząstki, dźwięk i muzyka. Patrz §11.
 **Inspiracja:** Colin McRae Rally (1998/99) — odcinki przeciw zegarowi, pilot z notatkami, nawierzchnia jako główny przeciwnik, tuning, uszkodzenia. Własne nazwy i własne samochody (voxelowe), zero materiałów licencjonowanych.
 
 ---
@@ -39,7 +44,7 @@ Warunki ukończenia slajdu:
 | P1 | Odcinki przeciw zegarowi, nie wyścig | Brak AI rywali w fazie 1; rywal = duch (ghost) i tabele czasów |
 | P2 | Fizyka 4 kół, osobno | Model koła → siła → moment; żadnego "grip = 0.8" globalnego |
 | P3 | Nawierzchnia jako warstwa danych świata | Każdy blok ma `surface_id`; fizyka i brud czytają ten sam identyfikator |
-| P4 | Wszystko proceduralne | Tekstury z shadera/canvasa, modele z boksu, dźwięk z WebAudio, muzyka z syntezy |
+| P4 | **Zmienione 2026-10-09:** asset 3D jest pierwszoplanowy | Modele GLB z Blendera i tekstury PBR w `assets/models/` i `assets/textures/`; proceduralne tylko dla terenu, brudu, cząstek i audio |
 | P5 | Świat wokselowy, ale trasa jest splajnem | Droga jest splajnem z atrybutami; teren jest wokselowy; trasa rzeźbi teren |
 | P6 | Notatki pilota generowane z trasy | Klasyfikacja zakrętów z krzywizny + profilu + nawierzchni |
 | P7 | Uszkodzenia mają konsekwencje w fizyce | Uszkodzone zawieszenie zmienia sprężynę/tłumienie, nie tylko wygląd |
@@ -110,6 +115,9 @@ F7 hardening     3 dni     wydajność, gamepad, dostępność, balans, zapis
 | Mapa brudu | 1 render target 512² | RGBA8, splat ≤ 24/ms |
 | Węzły WebAudio | ≤ 60 | stały graf, modulacja parametrów, brak tworzenia węzłów w klatce |
 | JS heap | ≤ 220 MB | pula obiektów w fizyce i cząstkach |
+| GLB auta | ≤ 6 MB, ≤ 60 k trójkątów | LOD0 + LOD1, wspólne materiały |
+| Rekwizyt GLB | ≤ 1 MB, ≤ 4 k trójkątów | instancjonowany, jeden materiał |
+| VRAM tekstur | ≤ 48 MB | max 2048², MIP-y, atlas i KTX2 gdzie możliwe |
 
 ---
 
@@ -206,4 +214,36 @@ Referencja wizualna to **CMR 2.0**, nie nowsze rajdówki. Z instrukcji i recenzj
 5. Pas tablic u góry ekranu mieści się w 10% wysokości kadru i nie zakrywa drogi.
 
 Ten kierunek wygrywa z „realizmem wokselowym”: jeśli zaszłość techniczna (np. idealnie prosty blok) psuje kadr, poprawiamy grafikę, nie fizykę. Zmiany graficzne odnotowujemy w `SYSTEM-NOTES.md`.
+
+---
+
+## 11. Pipeline assetów i orkiestracja (dodane 2026-10-09)
+
+**Decyzja:** jakość wizualna ma pochodzić z assetów, nie z shadera. Auto, rekwizyty, checkpointy i elementy HUD-u
+są modelowane jako siatki 3D; teren, brud i dźwięk zostają proceduralne.
+
+### Pipeline
+
+1. **Modelowanie:** Blender headless przez `bpy`, skrypt w `tools/blender/<nazwa>.py` — siatka, materiały, pieczone tekstury.
+2. **Eksport:** `assets/models/<nazwa>.glb` (LOD0 + LOD1) i `assets/textures/<nazwa>_{albedo,normal,roughness}.{png,ktx2}`.
+3. **Ładowanie:** `src/render/assets.js` — GLTFLoader, cache, oraz **zawsze działający fallback** na bryłę proceduralną,
+   gdy pliku brak. Brak assetu nie może zepsuć builda ani przejazdu.
+4. **Przyjęcie assetu:** zrzut przed/po w `shots/` plus test §10.2 (nawierzchnia, krawędź drogi i najbliższy checkpoint
+   rozpoznawalne w mniej niż sekundę).
+
+### Orkiestracja
+
+Agent prowadzący deleguje **jednego subagenta naraz**, jeden skończony cel na delegację, z wymaganym zwrotem
+`path:line`. Subagenci nie edytują tego pliku — zmiany kierunku wpisuje prowadzący. Kolejno:
+
+```
+A pipeline assetów (loader + fallback)   1 delegacja
+B auto: model, materiały, koła           2 delegacje
+C teren i rekwizyty: tonacja, AO, sprite'y  2 delegacje
+D checkpointy, tablice, HUD rajdowy      2 delegacje
+E oświetlenie, cienie, post (jedna klatka)  2 delegacje
+F audio proceduralne                      1 delegacja
+```
+
+Każda delegacja kończy się testem `npm test` i zrzutem w `shots/`.
 

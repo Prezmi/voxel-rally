@@ -4,6 +4,9 @@
 // Damage is shown as physically missing / knocked parts, never as a bar.
 import * as THREE from 'three';
 import { buildBodyGeometry, buildWheelGeometry, carShape } from './car-body.js';
+import { loadModelNodes } from './assets.js';
+import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, tyreScale } from './car-asset.js';
+import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
 import { PANELS, PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
@@ -123,11 +126,132 @@ export function buildCarMesh(car, dirt) {
     }
   }
 
-  return {
+  const view = {
     group, body, wheels, spin: [0, 0, 0, 0], dtex, mat: bodyMat, livery,
     shape, regions, beams, night, dmgKey: -1, brakeOn: -1,
-    tris: { body: built.tris, wheel: wheel.tris },
+    tris: { body: built.tris, wheel: wheel.tris }, asset: false, carParams: p,
   };
+  // Asset-backed car (assets/models/rally_v2.glb): the procedural car above is
+  // the fallback and stays in place if the glb or any node is missing.
+  adoptAssetCar(view, wheels);
+  return view;
+}
+
+let assetCarLogged = false;
+function logAssetCar(active, detail) {
+  if (assetCarLogged) return;
+  assetCarLogged = true;
+  console.log(`[car] asset car "${ASSET_CAR_MODEL}" ${active ? 'ACTIVE' : 'INACTIVE -> procedural car'} (${detail})`);
+}
+
+/**
+ * The four exported wheel pivot nodes driven by the existing per-wheel matrix
+ * code: setMatrixAt writes the pivot's local matrix (already position + spin +
+ * steer + loaded radius), instanceColor writes the tyre tint onto that wheel's
+ * own material. No wheel geometry is rebuilt.
+ */
+function makeWheelPivots(pivots, mats) {
+  // The per-wheel tint is a MULTIPLIER on each part's own material colour (the
+  // procedural wheels multiplied their baked vertex colours by the same ratio),
+  // so a dark tyre stays dark and the alloy stays bright.
+  const base = mats.map((m) => (m && m.color ? { r: m.color.r, g: m.color.g, b: m.color.b } : null));
+  return {
+    isAssetWheels: true,
+    setMatrixAt(i, m) {
+      const p = pivots[i];
+      if (!p) return;
+      p.matrix.copy(m);
+      p.matrixWorldNeedsUpdate = true;
+    },
+    instanceMatrix: { needsUpdate: false },
+    instanceColor: {
+      needsUpdate: false,
+      setXYZ(i, r, g, b) {
+        const m = mats[i]; if (!m) return;
+        const b0 = base[i] || { r: 1, g: 1, b: 1 };
+        m.color.setRGB(b0.r * r, b0.g * g, b0.b * b);
+      },
+    },
+  };
+}
+
+function adoptAssetCar(view, proceduralWheels) {
+  return loadModelNodes(ASSET_CAR_MODEL).then((nodes) => {
+    if (!nodes || !nodes.size) { logAssetCar(false, 'no named nodes in the glb'); return false; }
+    const built = buildAssetBody(nodes, view.carParams);
+    const wheelRecs = WHEEL_NODES.map((n) => nodes.get(n));
+    const gone = WHEEL_NODES.filter((n, i) => !wheelRecs[i] || !wheelRecs[i].geometry || !wheelRecs[i].node);
+    if (!built.tris || built.missing.length || gone.length) {
+      logAssetCar(false, `missing nodes: ${[...built.missing, ...gone].join(', ') || 'no body triangles'}`);
+      return false;
+    }
+
+    // One body BufferGeometry carrying the whole dirt/livery/damage contract.
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(built.position, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(built.normal, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(built.color, 3));
+    geo.setAttribute('aPanel', new THREE.BufferAttribute(built.aPanel, 1));
+    geo.setAttribute('aLivUv', new THREE.BufferAttribute(built.aLivUv, 2));
+    geo.setAttribute('aLiv', new THREE.BufferAttribute(built.aLiv, 1));
+    geo.setAttribute('aLamp', new THREE.BufferAttribute(built.aLamp, 1));
+    bakeFlowAttributes(geo);
+    geo.computeBoundingSphere();
+    const oldGeo = view.body.geometry;
+    view.body.geometry = geo;                       // keeps the patched material
+    if (oldGeo && oldGeo.dispose) oldGeo.dispose();
+    view.tris.body = built.tris;
+
+    const pos = geo.getAttribute('position');
+    const col = geo.getAttribute('color');
+    const regions = {};
+    for (const key in built.ranges) {
+      const r = built.ranges[key];
+      regions[key] = {
+        range: r,
+        pos: Float32Array.prototype.slice.call(pos.array, r[0] * 3, r[1] * 3),
+        col: Float32Array.prototype.slice.call(col.array, r[0] * 3, r[1] * 3),
+      };
+    }
+    view.regions = regions;
+
+    // Wheels: the exported pivots, uniformly scaled so the tyre radius lands on
+    // TYRE_BASE.r; positions come from the physics state every frame anyway.
+    const ts = tyreScale(nodes, TYRE_BASE.r, WHEEL_NODES[0]);
+    const pivots = [], mats = [];
+    for (let i = 0; i < 4; i++) {
+      const node = wheelRecs[i].node;
+      if (node.parent) node.parent.remove(node);
+      node.position.set(0, 0, 0);
+      node.scale.set(ts, ts, ts);
+      node.castShadow = true;
+      node.receiveShadow = true;
+      const src = Array.isArray(wheelRecs[i].material) ? wheelRecs[i].material[0] : wheelRecs[i].material;
+      const mat = src && src.clone ? src.clone() : new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.08 });
+      mat.vertexColors = false;
+      node.material = mat;
+      node.traverse((c) => {                   // multi-primitive wheel: Group of meshes
+        if (!c.isMesh) return;
+        c.material = mat;
+        c.castShadow = true;
+        c.receiveShadow = true;
+      });
+      mats.push(mat);
+      const pivot = new THREE.Object3D();
+      pivot.matrixAutoUpdate = false;
+      pivot.add(node);
+      view.group.add(pivot);
+      pivots.push(pivot);
+    }
+    view.group.remove(proceduralWheels);
+    view.wheels = makeWheelPivots(pivots, mats);
+    view.asset = true;
+    logAssetCar(true, `body tris=${built.tris} fit=${built.scale.toFixed(3)} tyre=${ts.toFixed(3)} regions=${Object.keys(regions).length}`);
+    return true;
+  }).catch((e) => {
+    logAssetCar(false, e && e.message ? e.message : 'asset path threw');
+    return false;
+  });
 }
 
 /**

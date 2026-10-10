@@ -10,39 +10,44 @@ const WOOD_LIGHT = '#B4915C';   // light from the top-left
 const WOOD_DARK = '#7A6138';    // grain
 const EDGE = '#2A1F10';         // dark 1 px outline
 const INK = '#22190E';          // carved lettering
+const INK_DIM = '#4A3620';      // the small preview board: same carving, lighter
 const NAIL = '#3E3E3E';
 
 const H = 34;                  // whole strip stays inside 10 % of the frame height
 
-// Bend glyphs: orthogonal polylines on an 8x8 cell grid (y down), authored for a LEFT
-// bend; a RIGHT bend mirrors the x axis. Cell count = how far the road turns.
+// Bend glyphs: orthogonal polylines on an 8x8 cell grid (y down, x right, the car
+// drives from the bottom of the glyph up). Authored for a LEFT bend; the RIGHT
+// variants mirror the x axis. Sizes are deliberately coarse - a whole cell is 3 px
+// on the active board, so the arrow reads at a glance.
+//   plainLeft/Right     90 deg bend            (5 -> 4 class)
+//   sharpLeft/Right     >90 deg, hooking back  (2 -> 3 class)
+//   hairpinLeft/Right   full U-turn            (1 class / >150 deg)
 const BENDS = {
   straight: [[3, 7], [3, 1]],
-  kink: [[4, 7], [4, 4], [2, 2]],
-  normal: [[5, 7], [5, 3], [2, 3]],
-  sharp: [[5, 7], [5, 3], [3, 3], [3, 5]],
-  hairpin: [[6, 7], [6, 1], [1, 1], [1, 7]],
-  double: [[2, 7], [2, 4], [5, 4], [5, 1]],
+  plainLeft: [[4, 7], [4, 4], [1, 4]],
+  sharpLeft: [[4, 7], [4, 2], [1, 2], [1, 5]],
+  hairpinLeft: [[6, 7], [6, 1], [1, 1], [1, 6]],
 };
+const mirror = (cells) => cells.map(([x, y]) => [7 - x, y]);
+// The RIGHT-handed glyphs are the LEFT ones mirrored on x, built once so a board can
+// never draw an arrow that points the other way than the word next to it says.
+for (const k of ['plain', 'sharp', 'hairpin']) BENDS[k + 'Right'] = mirror(BENDS[k + 'Left']);
 
-/** severity 1..6 / hairpin / multi-part group -> bend glyph name. */
-export function bendKind(sev, hairpin, parts) {
-  if (hairpin) return 'hairpin';
-  if (sev <= 2) return 'sharp';
-  if (sev <= 4) return 'normal';
-  if (sev <= 5) return 'kink';
-  return 'kink';
+/** severity / hairpin / direction -> glyph name; the name always ends with the side. */
+export function bendKind(sev, hairpin, dir) {
+  const side = dir === 'R' ? 'Right' : 'Left';
+  if (hairpin) return 'hairpin' + side;
+  if (sev <= 3) return 'sharp' + side;
+  return 'plain' + side;
 }
 
-function cellsOf(kind, dir) {
-  const src = BENDS[kind] || BENDS.normal;
-  if (dir === 'R') { const out = []; for (const c of src) out.push([7 - c[0], c[1]]); return out; }
-  return src;
+function cellsOf(kind) {
+  return BENDS[kind] || BENDS.plainLeft;
 }
 
 /** The arrow: every cell of the polyline plus a blocky head at the tip. */
-function drawArrow(ctx, ox, oy, B, kind, dir, color) {
-  const pts = cellsOf(kind, dir);
+function drawArrow(ctx, ox, oy, B, kind, color) {
+  const pts = cellsOf(kind);
   const on = new Set();
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
@@ -57,13 +62,14 @@ function drawArrow(ctx, ox, oy, B, kind, dir, color) {
       }
     }
   }
-  // Head: 3 cells wide at the tip, 2 wide one step back.
+  // Head: two wing cells at the tip and two one step back, offset ACROSS the travel
+  // direction, so the arrow reads as a wide blocky head and not as a longer stem.
   const t = pts[pts.length - 1], p = pts.length > 1 ? pts[pts.length - 2] : [t[0], t[1] + 1];
   const dx = Math.sign(t[0] - p[0]), dy = Math.sign(t[1] - p[1]);
   const back = [t[0] - dx, t[1] - dy];
-  const head = dx === 0 ? [[0, 1], [0, -1]] : [[1, 0], [-1, 0]];
+  const wing = dx === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
   on.add(t[0] + ',' + t[1]);
-  for (const h of head) {
+  for (const h of wing) {
     on.add((t[0] + h[0]) + ',' + (t[1] + h[1]));
     on.add((back[0] + h[0]) + ',' + (back[1] + h[1]));
   }
@@ -76,13 +82,12 @@ function drawArrow(ctx, ox, oy, B, kind, dir, color) {
 
 /** Layout metrics of one board (no canvas needed) so the HUD can flow a row. */
 export function signMetrics(spec) {
-  const big = spec.big;
-  const B = big ? 3 : 2;
+  const big = spec.big;  const B = big ? 3 : 2;
   const aw = 8 * B;
   const ds = big ? 2 : 1;
   const digitW = spec.sev ? 5 * ds + 9 : 0;   // digit + its separator column
   const distW = textWidth(spec.dist, ds) + 8;      // the distance sits in a carved plate
-  const wordW = textWidth(spec.word, 1);
+  const wordW = textWidth(spec.word, 1) + (spec.eta ? textWidth(spec.eta, 1) + 6 : 0);
   const colW = Math.max(digitW + distW, wordW);
   return { w: 3 + aw + 4 + colW + 3, h: H, B, ds, colW };
 }
@@ -90,6 +95,7 @@ export function signMetrics(spec) {
 /** spec: { kind, dir, sev, word, dist, big, spoken, pop }  -> board width. */
 export function drawSignBoard(ctx, x, y, spec) {
   const m = signMetrics(spec);
+  const INK2 = spec.dim ? INK_DIM : INK;
   const w = m.w, h = m.h;
   // 2-frame pop: the board is drawn 2 px larger for two redraws, then it is normal.
   // Hard steps only — no easing, no alpha (PLAN.md §10.1).
@@ -122,13 +128,13 @@ export function drawSignBoard(ctx, x, y, spec) {
     ctx.fillRect(X + 1, Y + 2, W - 2, 1);
     ctx.fillRect(X + 2, Y + 2, 1, H2 - 4);
   }
-  drawArrow(ctx, X + 3, Y + Math.round((h - 8 * m.B) / 2), m.B, spec.kind, spec.dir, INK);
+  drawArrow(ctx, X + 3, Y + Math.round((h - 8 * m.B) / 2), m.B, spec.kind, INK2);
   let cx = X + 3 + 8 * m.B + 4;
   const cy = Y + 4;
   if (spec.sev) {
-    drawText(ctx, String(spec.sev), cx, cy, m.ds, INK);
+    drawText(ctx, String(spec.sev), cx, cy, m.ds, INK2);
     cx += 5 * m.ds + 4;
-    ctx.fillStyle = INK;                      // separator: the note digit vs the metres
+    ctx.fillStyle = INK2;                      // separator: the note digit vs the metres
     ctx.fillRect(cx, cy - 1, 1, 7 * m.ds + 4);
     cx += 4;
   }
@@ -139,22 +145,25 @@ export function drawSignBoard(ctx, x, y, spec) {
   ctx.fillRect(cx - 2, cy - 1, dw, 7 * m.ds + 2);
   ctx.fillStyle = '#5D4826';
   ctx.fillRect(cx - 2, cy - 1, dw, 1);
-  drawText(ctx, spec.dist, cx, cy, m.ds, INK);
-  drawText(ctx, spec.word, X + 3 + 8 * m.B + 4, Y + 4 + 7 * m.ds + 4, 1, INK);
+  drawText(ctx, spec.dist, cx, cy, m.ds, INK2);
+  const wx = X + 3 + 8 * m.B + 4, wy = Y + 4 + 7 * m.ds + 4;
+  drawText(ctx, spec.word, wx, wy, 1, INK2);
+  // seconds left at the current speed - the countdown the callout is really timed on
+  if (spec.eta) drawText(ctx, spec.eta, wx + textWidth(spec.word, 1) + 6, wy, 1, INK2);
   return w;
 }
 
 const GRAIN = [[6, 0], [12, 3], [19, 5], [26, 1]];
 
-/** Polish word for a note: LEWY / PRAWY / OSTRO LEWY / NIE SKRACAJ / feature words. */
+/** Polish word for a note: LEWO / PRAWO / OSTRO LEWO / SZYBKI PRAWO / feature words. */
 export function signWord(note) {
   if (note.kind !== 'corner') {
     if (note.text === 'HANT') return 'HANT';
     return note.text.split(' ')[0];              // SKOK / GARB / DOŁ / WODA / MOST
   }
-  const side = note.dir === 'L' ? 'LEWY' : 'PRAWY';
-  if (note.hairpin) return 'NIE SKRACAJ';
-  if (note.severity <= 2) return 'OSTRO ' + side;
+  const side = note.dir === 'L' ? 'LEWO' : 'PRAWO';   // LEWO = left, PRAWO = right
+  if (note.hairpin) return 'ZAWRÓT ' + side;
+  if (note.severity <= 3) return 'OSTRO ' + side;
   if (note.severity >= 5) return 'SZYBKI ' + side;
   return side;
 }

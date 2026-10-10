@@ -1,0 +1,136 @@
+{
+  "generated_by": "tools/blender/build_stage_props.py",
+  "source_glb": "props.glb",
+  "total_triangles": 2916,
+  "file_bytes": 179588,
+  "props": [
+    {
+      "name": "prop_bush",
+      "width_m": 2.0,
+      "height_m": 1.574,
+      "depth_m": 2.0,
+      "triangles": 180,
+      "instance": true
+    },
+    {
+      "name": "prop_fence_post",
+      "width_m": 0.56,
+      "height_m": 1.67,
+      "depth_m": 0.56,
+      "triangles": 36,
+      "instance": true
+    },
+    {
+      "name": "prop_fence_rail",
+      "width_m": 2.48,
+      "height_m": 1.24,
+      "depth_m": 0.24,
+      "triangles": 48,
+      "instance": true
+    },
+    {
+      "name": "prop_flag",
+      "width_m": 1.38,
+      "height_m": 3.3,
+      "depth_m": 0.44,
+      "triangles": 60,
+      "instance": true
+    },
+    {
+      "name": "prop_gate_checkpoint",
+      "width_m": 11.881,
+      "height_m": 6.85,
+      "depth_m": 1.04,
+      "triangles": 276,
+      "instance": true
+    },
+    {
+      "name": "prop_gate_start",
+      "width_m": 11.881,
+      "height_m": 6.85,
+      "depth_m": 1.04,
+      "triangles": 324,
+      "instance": false
+    },
+    {
+      "name": "prop_hedgerow",
+      "width_m": 3.291,
+      "height_m": 1.465,
+      "depth_m": 1.066,
+      "triangles": 276,
+      "instance": true
+    },
+    {
+      "name": "prop_marshal_post",
+      "width_m": 1.4,
+      "height_m": 2.92,
+      "depth_m": 1.24,
+      "triangles": 84,
+      "instance": true
+    },
+    {
+      "name": "prop_rock",
+      "width_m": 1.81,
+      "height_m": 1.26,
+      "depth_m": 1.4,
+      "triangles": 72,
+      "instance": true
+    },
+    {
+      "name": "prop_sign_board",
+      "width_m": 1.16,
+      "height_m": 1.6,
+      "depth_m": 0.18,
+      "triangles": 72,
+      "instance": true
+    },
+    {
+      "name": "prop_spectator",
+      "width_m": 0.64,
+      "height_m": 1.68,
+      "depth_m": 0.36,
+      "triangles": 84,
+      "instance": true
+    },
+    {
+      "name": "prop_stone_wall",
+      "width_m": 2.28,
+      "height_m": 1.18,
+      "depth_m": 0.6,
+      "triangles": 180,
+      "instance": true
+    },
+    {
+      "name": "prop_tree_birch",
+      "width_m": 3.732,
+      "height_m": 7.96,
+      "depth_m": 3.9,
+      "triangles": 384,
+      "instance": true
+    },
+    {
+      "name": "prop_tree_dead",
+      "width_m": 2.02,
+      "height_m": 5.94,
+      "depth_m": 1.82,
+      "triangles": 144,
+      "instance": true
+    },
+    {
+      "name": "prop_tree_deciduous",
+      "width_m": 4.837,
+      "height_m": 7.372,
+      "depth_m": 5.2,
+      "triangles": 324,
+      "instance": true
+    },
+    {
+      "name": "prop_tree_pine",
+      "width_m": 4.56,
+      "height_m": 9.44,
+      "depth_m": 4.56,
+      "triangles": 372,
+      "instance": true
+    }
+  ]
+}
