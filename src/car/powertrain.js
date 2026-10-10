@@ -1,6 +1,7 @@
 // Engine + 6-speed gearbox with a 120 ms shift cut (docs/02 §3.7).
 // Single-node engine model: torque(rpm, throttle) from a procedural curve.
 import { clamp } from '../core/math3.js';
+import { bus } from '../core/events.js';
 
 const CUT_TIME = 0.12;
 const RPM_COUPLE = 18;      // 1/s coupling of engine rpm to the driveline
@@ -9,7 +10,7 @@ function torqueCurve(e, rpm) {
   // Flat rally torque plateau. A launch from idle still delivers torque through
   // the clutch, so the curve must not collapse to zero at idle.
   const lo = 0.52 + 0.48 * smoothstep(e.idle, e.peakRpm * 0.62, rpm);
-  const hi = 1 - 0.34 * smoothstep(e.peakRpm, e.redline, rpm);
+  const hi = 1 - 0.18 * smoothstep(e.peakRpm, e.redline, rpm);   // flat top end: short gear steps, no dead spot
   return e.maxTorque * lo * hi;
 }
 function smoothstep(a, b, x) {
@@ -31,12 +32,26 @@ export class Powertrain {
 
   ratio() { return this.car.params.gears[this.gear] * this.car.params.finalDrive; }
 
-  shiftUp() { if (this.gear < this.car.params.gears.length - 1) { this.gear++; this.cut = CUT_TIME; } }
-  shiftDown() { if (this.gear > 0) { this.gear--; this.cut = CUT_TIME; } }
+  shiftUp() { if (this.gear < this.car.params.gears.length - 1) { this.gear++; this.cut = CUT_TIME; this._emitShift(true); } }
+  shiftDown() { if (this.gear > 0) { this.gear--; this.cut = CUT_TIME; this._emitShift(false); } }
+
+  /** The one place a gear change is announced (docs/06 §4 bus). src/fx/fx.js
+   *  turns this into the backfire plume; nothing in the physics path listens. */
+  _emitShift(up) {
+    const thr = this._lastThrottle || 0;
+    bus.emit('shift', {
+      up,
+      gear: this.gear + 1,
+      rpm: this.rpm,
+      throttle: thr,
+      demand: clamp(thr * (this.rpm / Math.max(1, this.car.params.engine.redline)), 0, 1),
+    });
+  }
 
   step(dt, input) {
     const p = this.car.params, e = p.engine;
     const wheels = this.car.wheels;
+    this._lastThrottle = input.throttle;
 
     // Reference wheel speed for the engaged axle(s).
     let omega = 0, n = 0;

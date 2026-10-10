@@ -10,13 +10,23 @@ export const settings = {
   post: false,               // F5 composite: GATED OFF (see SYSTEM-NOTES §15) — the offscreen
                              // RT -> canvas blit of PostChain composites nothing on this
                              // driver, so the base ACES path is the correct render.
-  drawDistance: 260,         // m, docs/03 §1
+  drawDistance: 330,         // m, docs/03 §1 - must stay past vegFarDistance or the
+                             // vegetation LOD has no chunk to draw in the outer ring
   fullRadius: 110,
-  simpleRadius: 200,
+  simpleRadius: 220,
+  // Outer edge of the far vegetation billboard band (streaming.js _rebuildProps).
+  // The far band is one 2-tri quad per tree, so pushing it out is cheap; the per-band
+  // instance caps, not this radius, are what bound the triangle count.
+  vegFarDistance: 320,
   // Visual-only block tiles over the road band + verge (assets/models/stage_blocks.glb).
   // Read-only layer: it reads the surface ids the carve already assigned, it never
   // touches the heightfield or physics. Switch off with `settings.blockTiles = false`.
   blockTiles: true,
+  // Particle FX (src/fx): exhaust backfire plumes, wheel dust, treeline leaves,
+  // dust motes. One switch for weak devices: `fx` off/on, `fxScale` the capacity
+  // dial (1.0 desktop, 0.5 mobile / LOW, see main.js + qualityPreset).
+  fx: true,
+  fxScale: 1.0,
 
   // Simulation / difficulty (docs/02 §10: assists change limiters, never mu)
   difficulty: 'RALLY',       // NOVICE | RALLY | PRO
@@ -85,7 +95,7 @@ export const SETTINGS_SCHEMA = 2;
 export const SETTINGS_KEY = 'mc-rally.settings.v2';
 export const LEGACY_SETTINGS_KEY = 'mc-rally.v1';   // the untagged docs/06 §2 key
 
-const PERSISTED_KEYS = ['quality', 'shadows', 'drawDistance', 'blockTiles', 'difficulty',
+const PERSISTED_KEYS = ['quality', 'shadows', 'drawDistance', 'vegFarDistance', 'blockTiles', 'fx', 'difficulty',
   'assists', 'keyboardAsPad', 'deadzone', 'invertSteer', 'cameraMode', 'hudMode',
   'showCoDriverArrows', 'touchOverlay', 'touchHandedness', 'lensDirt', 'audioEnabled', 'masterGain'];
 const DEFAULTS = (() => {
@@ -140,12 +150,15 @@ export function qualityPreset(q) {
   settings.quality = q;
   if (q === QUALITY.LOW) {
     settings.renderScale = 0.75; settings.shadows = false; settings.post = false;
-    settings.drawDistance = 170; settings.fullRadius = 80; settings.simpleRadius = 140;
+    settings.drawDistance = 250; settings.fullRadius = 80; settings.simpleRadius = 160;
+    settings.vegFarDistance = 240; settings.fxScale = 0.5;
   } else if (q === QUALITY.MED) {
     settings.renderScale = 1.0; settings.shadows = true; settings.post = false;
-    settings.drawDistance = 260; settings.fullRadius = 110; settings.simpleRadius = 200;
+    settings.drawDistance = 330; settings.fullRadius = 110; settings.simpleRadius = 220;
+    settings.vegFarDistance = 320; settings.fxScale = 1.0;
   } else {
     settings.renderScale = 1.0; settings.shadows = true; settings.post = false;
-    settings.drawDistance = 320; settings.fullRadius = 130; settings.simpleRadius = 240;
+    settings.drawDistance = 380; settings.fullRadius = 130; settings.simpleRadius = 260;
+    settings.vegFarDistance = 360; settings.fxScale = 1.0;
   }
 }

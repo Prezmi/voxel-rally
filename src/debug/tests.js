@@ -10,7 +10,9 @@ import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
-import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES } from '../render/car-asset.js';
+import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust } from '../render/car-asset.js';
+import { FxSystem } from '../fx/fx.js';
+import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
 import { buildRoad } from '../world/road-spline.js';
@@ -22,6 +24,9 @@ import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
+import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP } from '../world/props.js';
+import { buildCarveIndex } from '../world/road-carve.js';
+import { CHUNK } from '../world/chunk.js';
 
 const G = 9.81;
 
@@ -509,8 +514,70 @@ function testPaceNoteDisplay() {
     `maxActive=${maxActive} (want <=1) maxBoards=${maxBoards} (want <=2) dirMismatch=${dirMismatch} wordMismatch=${wordMismatch} glyphMismatch=${glyphMismatch} samples=${sampled}`);
 }
 
+// ---------------------------------------------------------------------------
+// T21 particle FX (src/fx): the pools are hard-capped, a real gearbox upshift
+// lights the backfire plume, and the fixed-step tick allocates nothing once the
+// pools are warm (same buffers, flat heap).
+function testFx() {
+  const fx = new FxSystem({ scale: 1, bus });
+  const car = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  fx.setLocalTips(defaultExhaust(car.params));
+  fx.env.trees = 0.9; fx.env.wind = 4; fx.env.sun = 1;
+  const caps = [fx.flame, fx.dust, fx.leaves, fx.motes];
+
+  // 1) a hostile spawn storm can never pass a capacity
+  for (let i = 0; i < 12000; i++) fx.flame.spawn();
+  let over = 0;
+  for (const P of caps) if (P.count > P.capacity) over++;
+  fx.flame.count = 0;
+
+  // 2) the gearbox's own 'shift' event must produce a non-zero flame burst
+  const input = { throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+  let shifts = 0, flameMax = 0, liveMax = 0, overLive = 0;
+  const off = bus.on('shift', () => { shifts++; });
+  drive(car, input, 4.0, (c) => {
+    fx.step(DT, c, 1);
+    if (fx.flame.count > flameMax) flameMax = fx.flame.count;
+    const live = fx.live();
+    if (live > liveMax) liveMax = live;
+    if (live > fx.maxLive) overLive++;
+    for (const P of caps) if (P.count > P.capacity) over++;
+  });
+  off();
+
+  // 3) steady state allocates nothing: the buffers never change and not one
+  //    typed array / Array / Map / Set is constructed across 1200 fixed steps.
+  const fx2 = new FxSystem({ scale: 1, bus });
+  fx2.setLocalTips(defaultExhaust(car.params));
+  const buf = [fx2.flame.data, fx2.dust.data, fx2.leaves.data, fx2.motes.data];
+  for (let i = 0; i < 240; i++) fx2.step(DT, car, 0.9);          // warm the pools
+  const h0 = process.memoryUsage().heapUsed;
+  const made = countAllocations(() => { for (let i = 0; i < 1200; i++) fx2.step(DT, car, 0.9); });
+  const grew = process.memoryUsage().heapUsed - h0;
+  const sameBuf = buf[0] === fx2.flame.data && buf[1] === fx2.dust.data
+    && buf[2] === fx2.leaves.data && buf[3] === fx2.motes.data;
+
+  const ok = over === 0 && shifts > 0 && flameMax > 0 && overLive === 0 && sameBuf && made.n === 0;
+  check('T21 fx pools stay inside capacity, a gearbox upshift lights a flame burst and the fx step allocates nothing in steady state',
+    ok, `caps=${caps.map((P) => P.capacity).join('/')} liveMax=${liveMax}/${fx.maxLive} shifts=${shifts} flameMax=${flameMax} overCap=${over} allocsPer1200Steps=${made.n} heapDrift=${(grew / 1024).toFixed(1)} kB`);
+}
+
+/** Count every construction of the container types the hot path could reach. */
+function countAllocations(fn) {
+  const ct = { n: 0 };
+  const names = ['Float32Array', 'Uint8Array', 'Int32Array', 'Array', 'Map', 'Set'];
+  const saved = [];
+  for (const k of names) {
+    const Native = globalThis[k];
+    saved.push([k, Native]);
+    globalThis[k] = class extends Native { constructor(...a) { super(...a); ct.n++; } };
+  }
+  try { fn(); } finally { for (const [k, v] of saved) globalThis[k] = v; }
+  return ct;
+}
+
 const only = process.argv[2] ? Number(process.argv[2]) : 0;
-const all = [test1, test2, test3, test4, test5, test6, test7, testCarAsset, testPaceNoteDisplay];
+const all = [test1, test2, test3, test4, test5, test6, test7, testCarAsset, testPaceNoteDisplay, testFx];
 if (!only) {
   for (const t of all) t();
   testSurfaces();
@@ -1058,6 +1125,74 @@ function testHudBoardsUnderModalAndSectorLabelRow() {
   delete globalThis.window;
 }
 testHudBoardsUnderModalAndSectorLabelRow();
+
+// ---------------------------------------------------------------- test 19
+// No prop may stand inside the road corridor (carriageway + shoulder + margin).
+// The corridor is measured against the 1 m spline samples as a polyline, not against
+// the normal of one nearest sample - that is exactly what let a bush land in the middle
+// of the track at the start line. Props are re-scattered out of the corridor, so the
+// prop count of a chunk must stay in the same range as before, not shrink.
+function testPropsStayOffRoad() {
+  const SEED = 12345, LEN = 4200;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const carveIndex = buildCarveIndex(road);
+  const stage = { road, carveIndex, terrain, biome: 'FOREST', density: 1, seed: SEED, world: null };
+  const keys = [];
+  const seen = new Set();
+  for (let i = 0; i < road.n; i += 8) {
+    const k = `${Math.floor(road.x[i] / CHUNK)},${Math.floor(road.z[i] / CHUNK)}`;
+    if (!seen.has(k)) { seen.add(k); keys.push(k); }
+  }
+  const sample = keys.slice(0, 6).concat(keys.filter((_, k) => k % 3 === 0)).slice(0, 90);
+  let total = 0, inside = 0, minGap = Infinity, startInside = 0, startCount = 0;
+  for (const k of sample) {
+    const [cx, cz] = k.split(',').map(Number);
+    for (const p of generateChunkProps(cx, cz, stage)) {
+      total++;
+      const gap = roadCorridorGap(road, p.x, p.z);
+      if (gap < minGap) minGap = gap;
+      if (gap < PROP_CORRIDOR_MARGIN) inside++;
+      if (p.prop === PROP.BUSH || p.prop === PROP.FERN) {
+        startCount++;
+        if (gap < PROP_CORRIDOR_MARGIN) startInside++;
+      }
+    }
+  }
+  const ok = total > 300 && inside === 0 && startInside === 0 && startCount > 40
+    && minGap >= PROP_CORRIDOR_MARGIN;
+  check('T19 no prop placement falls inside the road corridor (carriageway + shoulder + 1.2 m), re-scattered not deleted',
+    ok, `chunks=${sample.length} props=${total} vergeSprites=${startCount} inside=${inside} `
+    + `insideVerge=${startInside} minGap=${minGap.toFixed(2)}m need=${PROP_CORRIDOR_MARGIN}m`);
+}
+testPropsStayOffRoad();
+
+// ---------------------------------------------------------------- test 20
+// Straight-line performance of the reference car on gravel. Every performance
+// number used to be tuned under the old runaway accumulator, so once the frame
+// loop was fixed the car came back detuned (6.5 s to 100 kph, 124 kph terminal).
+// These are the numbers the retune has to hold.
+function testStraightLinePerformance() {
+  const w = new FlatWorld(SURF.GRAVEL);
+  const car = makeCar(w, {});
+  car.placeAt(0, 0, 0);
+  let t = 0, t100 = null, vtop = 0, launchKappa = 0;
+  for (let i = 0; i < Math.round(110 / DT); i++) {
+    car.setInput({ throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+    car.step(DT);
+    t += DT;
+    const v = car.body.groundSpeed;
+    if (t100 === null && v >= 100 / 3.6) t100 = t;
+    vtop = Math.max(vtop, v);
+    if (t < 3) launchKappa = Math.max(launchKappa, ...car.wheels.map((wh) => Math.abs(wh.kappa)));
+  }
+  const top = vtop * 3.6;
+  const ok = t100 !== null && t100 >= 4.0 && t100 <= 5.0 && top >= 180 && top <= 200 && launchKappa < 0.9;
+  check('T20 gravel straight line: 0-100 in 4.0-5.0 s, terminal 180-200 kph, no launch wheelspin over kappa 0.9',
+    ok, `0-100=${t100 === null ? '>110' : t100.toFixed(2)}s top=${top.toFixed(1)} kph launchKappa=${launchKappa.toFixed(2)}`);
+  return { t100, top };
+}
+testStraightLinePerformance();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -39,7 +39,10 @@ export const SURFACES = [
   {
     id: SURF.GRAVEL, key: 'gravel', name: 'SZUTER',
     mu: 0.80, muWet: 0.62, muIce: 0.28,
-    crr: 0.052, plough: 1.9, sink: 0.020,
+    // crr / sink re-fitted against a modern rally car's terminal speed on loose
+    // surface (~190 kph); the bulldozing term (plough) and mu are untouched, so
+    // cornering, drift and handbrake behaviour are unchanged.
+    crr: 0.034, plough: 1.9, sink: 0.008,
     curveFactor: 0.92, stiffFactor: 0.86,
     stick: 0.42, dirtColor: 0x8d7a5f,
     loose: true, roughness: 0.95, color: 0x9c8a6d,

@@ -55,10 +55,14 @@ export const CARS = {
     diffFront: DIFF_TYPES.VISCOUS, diffRear: DIFF_TYPES.OPEN,
     diffClutch: 900,          // N m internal clutch torque (open diff)
     kv: 900,                  // viscous coupling N m per (rad/s)
-    splitFront: 0.42,
-    engine: { maxTorque: 380, idle: 900, redline: 6800, peakRpm: 4200, powerBog: 0.9 },
-    gears: [3.50, 2.20, 1.55, 1.12, 0.86, 0.68],
-    finalDrive: 3.90,
+    splitFront: 0.54,   // front-biased AWD split: puts the extra torque down without a rear break-away
+    // Detuned under the old runaway accumulator: with the frame loop fixed the
+    // car was ~4.5 s short of a modern rally car's 0-100 on gravel. Retrained to
+    // ~4.7 s 0-100 / ~190 kph terminal on szuter, with closer ratios so an
+    // upshift lands the revs just above the torque plateau (no dead spot).
+    engine: { maxTorque: 440, idle: 900, redline: 7000, peakRpm: 5000, powerBog: 0.9 },
+    gears: [3.30, 2.35, 1.75, 1.34, 1.06, 0.84],
+    finalDrive: 4.10,
     efficiency: 0.90,
     aero: { cdA: 0.62, downforce: 0.55 },
     steerMax: 32 * Math.PI / 180,

@@ -183,6 +183,17 @@ def build_hardware():
             put("rear", "tail", cx(1), z, y0=sgn * 0.44, sy=0.30)
     put("rear", "trim", cx(1), 0.45, sy=1.80)
 
+    # ---- exhaust tips: two small bores through the lower rear bumper, one per
+    #      side. Metal, and part of the exported hardware so the existing rear
+    #      damage / dirt ranges cover them (car-asset.js PART_PANEL -> rear).
+    #      The driver's side (left, +y: the snorkel is on that flank too) gets the
+    #      slightly larger bore, since that is the tip the camera actually reads.
+    for sgn, part, bore in ((1, "exhaust_l", 0.20), (-1, "exhaust_r", 0.17)):
+        x = cx(0.9)                              # just ahead of the rear face
+        z = 0.30                                 # low, clear of the diffuser fins
+        put(part, "metal", x, z, y0=sgn * 0.52, sx=0.16, sy=bore, sz=0.15)
+        put(part, "trim", x + 0.03, z, y0=sgn * 0.52, sx=0.10, sy=bore * 0.62, sz=0.10)
+
     # diffuser fins and mudflaps
     for c in range(4, 11, 2):
         put("diffuser", "carbon", cx(c), 0.24, sy=0.10, sz=0.20)
@@ -274,7 +285,7 @@ MATERIALS = {
 PANEL_OF = {"body": "flank", "fender": "flank", "panel": "flank", "lamps": "front",
             "fascia": "front", "grille": "front", "splitter": "under", "rear": "rear",
             "snorkel": "hood", "spoiler": "rear", "diffuser": "under",
-            "flap": "rear", "wheel_fl": "wheel", "wheel_fr": "wheel",
+            "flap": "rear", "exhaust_l": "rear", "exhaust_r": "rear", "wheel_fl": "wheel", "wheel_fr": "wheel",
             "wheel_rl": "wheel", "wheel_rr": "wheel"}
 
 

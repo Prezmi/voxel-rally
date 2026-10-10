@@ -22,6 +22,8 @@ import { Voice } from './game/voice.js';
 import { bus } from './core/events.js';
 import { DirtSystem } from './dirt/dirt.js';
 import { attachDirtLens } from './render/dirt-lens.js';
+import { FxSystem } from './fx/fx.js';
+import { buildFxView, syncFxView } from './render/fx-view.js';
 import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
 import { startPerfHarness } from './debug/perf-harness.js';
@@ -204,6 +206,18 @@ async function main() {
   dirt.rain(cfg.rain);
   const view = buildCarMesh(car, dirt);
   renderer.scene.add(view.group);
+  // ---- particle FX (src/fx): backfire plumes off the two exhaust nodes, wheel
+  //      dust, treeline leaves, dust motes. One switch for weak devices: OFF with
+  //      `fx`, and `fxScale` cuts the pool capacity. Desktop runs the full field,
+  //      a coarse-pointer device starts on at half capacity.
+  if (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches && settings.fxScale > 0.5) settings.fxScale = 0.5;
+  const fx = new FxSystem({ scale: settings.fxScale, bus, enabled: settings.fx !== false });
+  fx.setLocalTips(view.exhaustLocal);
+  fx.env.trees = (BIOME_INFO[cfg.biome] && BIOME_INFO[cfg.biome].trees) || 0;
+  fx.env.rain = cfg.rain || 0;
+  fx.env.sun = Math.max(0.15, 1 - Math.abs((cfg.hasTod ? cfg.tod : climate.tod) - 0.5) * 1.9);
+  const fxView = buildFxView(fx);
+  renderer.scene.add(fxView.group);
   const view3d = new ChaseCamera(renderer);
   const lensView = attachDirtLens(renderer);
   dirt.lens.setAmount(settings.lensDirt);
@@ -399,6 +413,14 @@ async function main() {
     // Brud: X = mycie auta, V = wycieraczka (docs/04 §4.2 "czyszczenie").
     else if (code === 'KeyX') { dirt.washFull(1); hud.boot('auto umyte — guma na oponach zostaje'); setTimeout(() => hud.boot(null), 2000); }
     else if (code === 'KeyV') dirt.wipeLens();
+    // P = particle FX on/off (src/fx): the weak-device switch.
+    else if (code === 'KeyP') {
+      settings.fx = !settings.fx;
+      fx.enabled = settings.fx;
+      hud.boot(`efekty: ${settings.fx ? 'on' : 'off'}`);
+      setTimeout(() => hud.boot(null), 1800);
+      saveSettings();
+    }
     // L = siła brudu na obiektywie: 0.45 domyślnie, 0 = wyłączone (PLAN.md §8 #5).
     else if (code === 'KeyL') {
       settings.lensDirt = settings.lensDirt === 0.45 ? 0 : (settings.lensDirt === 0 ? 1 : 0.45);
@@ -452,6 +474,11 @@ async function main() {
         }
       }
       dirt.step(car, dt);
+      // FX run on the fixed sim clock, so the plume and the dust field come out
+      // identical at 30 and at 144 fps (docs/06 §3). Allocation-free in steady state.
+      fx.env.wind = dirt.env.wind || 3;
+      fx.env.rain = dirt.env.rain || 0;
+      fx.step(dt, car, smp.throttle);
       // Stage clock + gates advance on the same fixed step as the physics, so the
       // stage times a replay produces are identical (PLAN.md §8 #7).
       if (driving || cfg.perftest) stageRun.step(dt, car);
@@ -463,6 +490,8 @@ async function main() {
     },
     render(alpha, frameDt) {
       syncCarMesh(view, car, alpha, dirt);
+      fx.enabled = settings.fx !== false;
+      syncFxView(fxView, fx, fx.env);
       stream.update(car.body.pos, 6);
       // Camera smoothing runs on the frame's (already clamped) dt, not on a fixed
       // DT per rendered frame: at 120 Hz a per-frame DT advanced the springs twice
@@ -572,7 +601,7 @@ async function main() {
     requestAnimationFrame(() => requestAnimationFrame(flush));
   }
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
-  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice };
+  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice, fx, fxView };
 }
 
 main().catch((err) => {

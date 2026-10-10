@@ -24,6 +24,12 @@ export const BODY_PARTS = [
 /** Wheel pivot nodes, normative order FL FR RL RR (same order as car.wheels). */
 export const WHEEL_NODES = ['car_wheel_fl', 'car_wheel_fr', 'car_wheel_rl', 'car_wheel_rr'];
 
+/** Exhaust tip nodes. Merged into the same body geometry as the rest (so the
+ *  rear damage range and the rear dirt panel cover them) but TOLERANT: a glb
+ *  without them still loads the asset car, the car just gets the default tips. */
+export const EXHAUST_PARTS = ['car_exhaust_l', 'car_exhaust_r'];
+const EXHAUST_SLOT = { car_exhaust_l: 0, car_exhaust_r: 1 };
+
 /**
  * Mesh name -> default dirt panel key (src/dirt/panel-dirt.js PANELS order).
  * Sided bases (flank / sill / arch) are resolved per triangle with
@@ -42,6 +48,8 @@ export const PART_PANEL = {
   car_rear: 'rear',
   car_diffuser: 'under',
   car_flap: 'flank',
+  car_exhaust_l: 'rear',
+  car_exhaust_r: 'rear',
 };
 
 /** Damage regions emitted, in merge order (each one a contiguous range). */
@@ -65,6 +73,7 @@ export function assetShape(p) {
 /** Damage region of one triangle centroid (disjoint; contiguous ranges). */
 export function regionOf(name, cx, cy, cz, ny, s, matName) {
   const mn = matName || '';
+  if (EXHAUST_SLOT[name] !== undefined) return 'rear';
   if (name === 'car_lamps' || /lamp|tail/.test(mn)) return cz < 0 ? 'lampFL' : 'lampFR';
   if (/glass/.test(mn)) return 'glass';
   if (name === 'car_fascia') return 'bumperF';
@@ -107,9 +116,11 @@ function tintOf(mat) {
  * Merge the body nodes of `nodes` (Map name -> {geometry, material, node}, see
  * render/assets.js loadModelNodes) into one vertex set.
  * Returns { position, normal, color, aPanel, aLivUv, aLiv, aLamp, ranges, tris,
- *           scale, tris, missing }.
+ *           scale, tris, missing, exhaust }.
  * A missing part is skipped and reported; the caller keeps the procedural car
- * when too much is absent.
+ * when too much is absent. `exhaust` is the two tip positions in the CAR-GROUP
+ * local frame (x fwd, y up, z lateral, ground at y = -comY) as
+ * Float32Array(6) = [lx,ly,lz, rx,ry,rz], or null when the glb has no tips.
  */
 export function buildAssetBody(nodes, params) {
   const s = assetShape(params);
@@ -119,12 +130,17 @@ export function buildAssetBody(nodes, params) {
   const missing = [];
   let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity, minz = Infinity, maxz = -Infinity;
   let tris = 0;
+  const exSum = new Float64Array(6);
+  const exN = new Int32Array(2);
 
   const get = (n) => (nodes && typeof nodes.get === 'function' ? nodes.get(n) : (nodes ? nodes[n] : null));
 
-  for (const name of BODY_PARTS) {
+  for (const name of BODY_PARTS.concat(EXHAUST_PARTS)) {
     const rec = get(name);
-    if (!rec || !rec.geometry || !rec.geometry.getAttribute('position')) { missing.push(name); continue; }
+    if (!rec || !rec.geometry || !rec.geometry.getAttribute('position')) {
+      if (BODY_PARTS.indexOf(name) >= 0) missing.push(name);
+      continue;
+    }
     const geo = rec.geometry;
     const pos = geo.getAttribute('position');
     const nor = geo.getAttribute('normal');
@@ -165,6 +181,11 @@ export function buildAssetBody(nodes, params) {
         const nAvg = an > 1e-12 ? Math.sqrt(an / 3) : 1;
         const ny = anY / 3 / (nAvg || 1);
         const region = regionOf(name, cx, cy, cz, ny, s, matName);
+        const slot = EXHAUST_SLOT[name];
+        if (slot !== undefined) {
+          exSum[slot * 3] += cx; exSum[slot * 3 + 1] += cy; exSum[slot * 3 + 2] += cz;
+          exN[slot]++;
+        }
         const panel = panelOf(name, cx, cy, cz, boxes);
         const lamp = (name === 'car_lamps' || /lamp|tail/.test(matName)) ? (cx > s.hx * 0.55 ? 1 : 2) : 0;
         const liv = (LIV_PARTS.has(name) && region !== 'glass' && region !== 'lampFL' && region !== 'lampFR' && region !== 'under') ? 1 : 0;
@@ -203,8 +224,7 @@ export function buildAssetBody(nodes, params) {
   const halfX = sizeX * 0.5 * scale, halfZ = sizeZ * 0.5 * scale, yb = miny * scale + oy, yt = maxy * scale + oy;
 
   let vi = 0;
-  for (const r of REGIONS) {
-    const list = bucket.get(r);
+  for (const r of REGIONS) {    const list = bucket.get(r);
     if (!list.length) continue;
     const from = vi;
     for (let o = 0; o < list.length; o += 12) {
@@ -225,7 +245,29 @@ export function buildAssetBody(nodes, params) {
     }
     if (vi > from) ranges[r] = [from, vi];
   }
-  return { position, normal, color, aPanel, aLivUv, aLiv, aLamp, ranges, tris, scale, count, missing };
+
+  // Exhaust tip points, in the same fitted frame the vertices were written in:
+  // src/fx/fx.js emits the backfire plume from exactly where the tips are.
+  let exhaust = null;
+  if (exN[0] > 0 && exN[1] > 0) {
+    exhaust = new Float32Array(6);
+    for (let i = 0; i < 2; i++) {
+      exhaust[i * 3] = (exSum[i * 3] / exN[i]) * scale + ox;
+      exhaust[i * 3 + 1] = (exSum[i * 3 + 1] / exN[i]) * scale + oy;
+      exhaust[i * 3 + 2] = (exSum[i * 3 + 2] / exN[i]) * scale + oz;
+    }
+  }
+  return { position, normal, color, aPanel, aLivUv, aLiv, aLamp, ranges, tris, scale, count, missing, exhaust };
+}
+
+/** Fallback tips when the glb has none: rear bumper, one per side, in the same
+ *  car-group local frame as `exhaust` above. */
+export function defaultExhaust(p) {
+  const out = new Float32Array(6);
+  const x = -p.hull.x * 0.92, y = -p.comY + 0.30, z = p.trackRear * 0.34;
+  out[0] = x; out[1] = y; out[2] = -z;          // car_exhaust_l side
+  out[3] = x; out[4] = y; out[5] = z;           // car_exhaust_r side
+  return out;
 }
 
 /** Uniform tyre fit: the asset tyre radius -> TYRE_BASE.r (never per-axis).

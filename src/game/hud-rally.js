@@ -879,21 +879,32 @@ export class RallyHud {
     // frame: the start shot stopped reading as a muddy dithered frame.
     const fullScrim = this.top() !== 'countdown';
     if (fullScrim) this.g.clearRect(0, 0, W, H);
-    // Dithered scrim instead of an alpha panel (PLAN.md §10.1: no translucent boxes):
-    // a hard 2x2 checker of near-black pixels, one pattern fill, dims the world behind
-    // the menu without a single gradient.
+    // Modal scrim. The old 2x2 near-black checker was 50 % coverage in 1-px blocks, and
+    // once the HUD canvas was upscaled it aliased into a coarse black-and-white field
+    // over the top half of the screen. Two softer layers now: a 6x6 ordered dither at 1-px
+    // granularity covering 6/36 = 17 %, plus a flat, structure-free darkening. The total
+    // dimming is in the same range as before, so the banner text and the row labels keep
+    // their contrast against the oak frame - they sit on the opaque panel either way.
     if (!this._dither) {
       const pc = this.doc.createElement('canvas');
-      pc.width = 2; pc.height = 2;
+      pc.width = 6; pc.height = 6;
       const pg = pc.getContext ? pc.getContext('2d') : null;
       if (pg) {
-        pg.fillStyle = C.OUT; pg.fillRect(0, 0, 1, 1); pg.fillRect(1, 1, 1, 1);
+        pg.fillStyle = C.OUT;
+        for (const d of '0,0 3,0 1,2 4,2 2,4 5,4'.split(' ')) {
+          const [dx, dy] = d.split(',').map(Number);
+          pg.fillRect(dx, dy, 1, 1);
+        }
         this._dither = this.g.createPattern ? this.g.createPattern(pc, 'repeat') : null;
       }
     }
     if (this._dither) {
       this.g.fillStyle = this._dither;
       if (fullScrim) this.g.fillRect(0, 0, W, H);
+    }
+    if (fullScrim) {
+      this.g.fillStyle = 'rgba(0,0,0,0.22)';
+      this.g.fillRect(0, 0, W, H);
     }
     const lines = body ? body.split('\n') : [];
     const F = MODAL_FRAME;

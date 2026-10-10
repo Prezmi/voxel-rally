@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { buildBodyGeometry, buildWheelGeometry, carShape } from './car-body.js';
 import { loadModelNodes } from './assets.js';
-import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, tyreScale } from './car-asset.js';
+import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, defaultExhaust, tyreScale } from './car-asset.js';
 import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
 import { PANELS, PANEL_COUNT, PANEL_INDEX } from '../dirt/panel-dirt.js';
@@ -130,6 +130,9 @@ export function buildCarMesh(car, dirt) {
     group, body, wheels, spin: [0, 0, 0, 0], dtex, mat: bodyMat, livery,
     shape, regions, beams, night, dmgKey: -1, brakeOn: -1,
     tris: { body: built.tris, wheel: wheel.tris }, asset: false, carParams: p,
+    // Exhaust tip points in the car-group frame, for src/fx/fx.js. The asset car
+    // overwrites these with the real car_exhaust_l / car_exhaust_r nodes.
+    exhaustLocal: defaultExhaust(p),
   };
   // Asset-backed car (assets/models/rally_v2.glb): the procedural car above is
   // the fallback and stays in place if the glb or any node is missing.
@@ -206,6 +209,7 @@ function adoptAssetCar(view, proceduralWheels) {
       };
     }
     view.regions = regions;
+    if (built.exhaust) view.exhaustLocal.set(built.exhaust);
 
     // Wheels: the exported pivots, uniformly scaled so the tyre radius lands on
     // TYRE_BASE.r; positions come from the physics state every frame anyway.

@@ -760,13 +760,25 @@ export class Streaming {
     // (Measured at MEDIUM: the old 45 m near band put 230 k of the 309 k frame
     // triangles into trees that were too far away to read anything.)
     const nearR = low ? 18 : (high ? 34 : 24);
-    const midR = low ? 62 : (high ? 120 : 90);
-    const farR = low ? 92 : (high ? 175 : 135);
+    const midR = low ? 62 : (high ? 140 : 104);
+    // Far band: ONE camera-facing billboard quad = 2 triangles per tree, so the radius
+    // is the cheap axis and the INSTANCE CAP is what bounds the cost (the old 135 m far
+    // ring faded the forest out inside a short radius: the drive read as a clearing).
+    // `settings.vegFarDistance` is the knob; drawDistance clamps it, because a prop only
+    // exists in a chunk that was actually streamed in.
+    const vegFar = Math.max(240, Math.min(420, settings.vegFarDistance || 320));
+    const farR = Math.min(low ? vegFar : (high ? vegFar + 40 : vegFar), settings.drawDistance);
     // Posts and spectators have no sprite/billboard variant (they are too small to
     // billboard) but they are ~100 tris each, so they keep a longer single band: corner
     // markers have to be readable early or the corner reads as empty air.
     // Absolute per-species instance budgets (the CAPACITY arrays are allocated once).
     const nearCapMul = low ? 0.22 : (high ? 0.45 : 0.3);
+    // The two alpha-quad bands are capped instead of open-ended: widening midR/farR adds
+    // instances, the caps decide how many of them survive, and the cap spend is already
+    // distance-prioritised, so a cut always drops the far edge of a species, not a
+    // random hole in the middle of the stand.
+    const midCapMul = low ? 0.45 : (high ? 0.9 : 0.7);
+    const farCapMul = low ? 0.5 : (high ? 0.95 : 0.8);
     const nearRHard = low ? 70 : (high ? 110 : 90);
     const cam = this.renderer.camera;
     this._projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
@@ -797,7 +809,7 @@ export class Streaming {
     // Distance priority: the buckets are sorted nearest-first so a budget cut drops the
     // far end of the species band and never the trees the driver is actually aiming at.
     const prio = (list) => { if (list.length > 1) list.sort((a, b) => a._d - b._d); return list; };
-    const put = (im, list, n, camFacing, fade0, fade1, farRef) => {
+    const put = (im, list, n, camFacing, fade0, fade1, farRef, fadeMin) => {
       for (let i = 0; i < n; i++) {
         const p = list[i];
         this._pos.set(p.x, p.y, p.z);
@@ -809,10 +821,12 @@ export class Streaming {
         this._mat4.compose(this._pos, this._quat, this._scale);
         im.setMatrixAt(i, this._mat4);
         if (im.instanceColor) {
-          // Distance fade, not a pop: 1.0 at the inner edge of the band down to 0.78 at
-          // farR, multiplied into the Lambert diffuse and then pushed into the scene fog.
+          // Distance fade, not a pop: 1.0 at the inner edge of the band down to fadeMin
+          // at its outer edge, multiplied into the Lambert diffuse and then pushed into
+          // the scene fog. The billboard band fades hardest, which is what lets a 2-tri
+          // quad at 320 m read as haze instead of as a cut edge.
           const t = Math.max(0, Math.min(1, (p._d - fade0) / Math.max(1, fade1 - fade0)));
-          const f = 1 - (1 - 0.78) * t * farRef;
+          const f = 1 - (1 - fadeMin) * t * farRef;
           this._col.setRGB(f, f, f);
           im.setColorAt(i, this._col);
         }
@@ -830,11 +844,18 @@ export class Streaming {
       const near = prio(nl || this._empty);
       const mid = prio(ml || this._empty);
       const bill = prio(bl || this._empty);
-      put(im, near, this._budget(near, Math.floor(cap * nearCapMul)), false, 0, 0, 0);
+      // Whole-batch distance cull: the buckets are sorted nearest-first, so once the
+      // CLOSEST member of a band sits past that band's radius the entire batch switches
+      // off - no instance written, no buffer uploaded, no draw call.
+      const nearLim = SPRITE_SET.has(type) ? nearR : nearRHard;
+      const nN = (near.length && near[0]._d > nearLim) ? 0 : this._budget(near, Math.floor(cap * nearCapMul));
+      const mN = (mid.length && mid[0]._d > midR) ? 0 : this._budget(mid, Math.floor(cap * midCapMul));
+      const bN = (bill.length && bill[0]._d > farR) ? 0 : this._budget(bill, Math.floor(cap * farCapMul));
+      put(im, near, nN, false, 0, 0, 0, 0.78);
       const mim = this.midMeshes.get(type);
-      if (mim) put(mim, mid, this._budget(mid, cap), false, midR, farR, 1);
+      if (mim) put(mim, mid, mN, false, midR * 0.55, midR, 1, 0.72);
       const bim = this.billMeshes.get(type);
-      if (bim) put(bim, bill, this._budget(bill, cap), true, farR * 0.62, farR, 1);
+      if (bim) put(bim, bill, bN, true, farR * 0.5, farR, 1, 0.4);
     }
     this.stats.props = total;
     for (const a of nearB.values()) a.length = 0;      // keep the arrays, drop the items

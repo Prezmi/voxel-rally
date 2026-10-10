@@ -49,6 +49,69 @@ const CLUSTER_SALT = 0x5d17ae29;      // grove field: trees come in patches, not
 const CROWD_SALT = 0x3b5e1177;
 const POST_SALT = 0x99ab4d01;
 
+// ---- road corridor veto ---------------------------------------------------
+// A prop must never stand inside carriageway + shoulder. The old rule trusted
+// `road.lateral()` of the ONE nearest spline sample, and on a tight corner that
+// sample belongs to the other branch of the road: a column in the middle of the
+// start-line carriageway came out with a large lateral offset and was accepted,
+// which is the bush that sat in the middle of the track.
+// The samples are 1 m apart, so the centreline is walked as a polyline at that
+// spacing and the real point-to-segment distance decides.
+export const PROP_CORRIDOR_MARGIN = 1.2;     // m of shoulder past carriageway edge
+const CORRIDOR_SCAN = 20;                    // +/- samples (m) walked around the nearest one
+
+/** Shortest distance from a world point to the road CENTRELINE polyline. */
+function roadAxisDistance(road, x, z) {
+  const i = road.nearest(x, z, 1);
+  if (i < 0) return Infinity;
+  let best = Infinity, bestI = i;
+  for (let j = Math.max(0, i - CORRIDOR_SCAN); j <= Math.min(road.n - 1, i + CORRIDOR_SCAN); j++) {
+    const ax = road.x[j], az = road.z[j];
+    const bx = road.x[j + 1] !== undefined ? road.x[j + 1] : ax;
+    const bz = road.z[j + 1] !== undefined ? road.z[j + 1] : az;
+    const ex = bx - ax, ez = bz - az;
+    const len2 = ex * ex + ez * ez;
+    let t = 0;
+    if (len2 > 1e-9) t = Math.max(0, Math.min(1, ((x - ax) * ex + (z - az) * ez) / len2));
+    const cx = ax + ex * t, cz = az + ez * t;
+    const d = Math.hypot(x - cx, z - cz);
+    if (d < best) { best = d; bestI = j; }
+  }
+  road._cAxisI = bestI;
+  return best;
+}
+
+/** Signed clearance of the corridor at a world point (m past the carriageway edge). */
+export function roadCorridorGap(road, x, z) {
+  const d = roadAxisDistance(road, x, z);
+  return d - road.width[road._cAxisI || 0] / 2;
+}
+
+/** True when a prop of this footprint clears carriageway + shoulder + margin. */
+export function roadCorridorClear(road, x, z, margin = PROP_CORRIDOR_MARGIN, footprint = 0) {
+  return roadCorridorGap(road, x, z) >= margin + footprint;
+}
+
+/** Push a point radially out of the corridor; null if it cannot be freed. */
+export function resolveOffRoad(road, x, z, need, maxSteps = 40) {
+  if (roadCorridorGap(road, x, z) >= need) return { x, z, moved: false };
+  for (let k = 0; k < maxSteps; k++) {
+    const i = road._cAxisI || road.nearest(x, z, 1);
+    let dx = x - road.x[i], dz = z - road.z[i];
+    let l = Math.hypot(dx, dz);
+    if (l < 0.25) { dx = road.nx[i]; dz = road.nz[i]; l = 1; }   // dead centre: use the normal
+    x += (dx / l) * 1.4; z += (dz / l) * 1.4;
+    if (roadCorridorGap(road, x, z) >= need) return { x, z, moved: true };
+  }
+  return null;
+}
+
+/** Ground footprint radius of one prop (crown spread, not the trunk). */
+export function propFootprint(prop, scale = 1) {
+  const sp = SPRITE_SPEC[prop];
+  return (sp ? sp.w * 0.27 : 0.35) * scale;
+}
+
 /**
  * Deterministic props for one chunk.
  * `stage` = { road, carveIndex, terrain, biome, density }
@@ -92,14 +155,6 @@ export function generateChunkProps(cx, cz, stage) {
       const taper = Math.max(0.16, 1 - Math.max(0, absLat - (edge + 24))
         / Math.max(1, reach - edge - 24));
       if (h > density * near * taper * (0.06 + 0.34 * grove * grove)) continue;
-      const surf = worldSurface(stage, wx, wz);
-      if (surf === SURF.ASPHALT || surf === SURF.ICE) continue;
-      const slope = terrain.slopeAt(wx + 0.5, wz + 0.5);
-      if (slope > 0.75) continue;
-      // Stand on the *carved* ground where the corridor bank exists: an analytic height
-      // leaves the trunk floating a block above a banked verge (the old shot's trees).
-      const carved = stage.world ? stage.world.columnTopAt(wx, wz) : -1;
-      const y = carved >= 0 ? carved : terrain.heightAt(wx + 0.5, wz + 0.5);
       const species = pickSpecies(grove * 0.6 + h * 0.4, stage.biome);
       // Height/species variation from the seed: same species in a grove, different trees.
       // Sub-cell jitter: on an exact 1 m grid every trunk sits on the same spacing, and
@@ -110,8 +165,22 @@ export function generateChunkProps(cx, cz, stage) {
       // 0.72..1.80 and broadleaves 0.60..1.68 instead of one narrow band.
       const scale = (species === PROP.PINE ? 0.72 : 0.60)
         + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 1.00 : 1.08);
+      // Corridor veto + RE-SCATTER: an offender is moved out past carriageway +
+      // shoulder + margin, never dropped, so the stand keeps its density.
+      const fit = resolveOffRoad(road, wx + 0.5 + jx, wz + 0.5 + jz,
+        propFootprint(species, scale) + PROP_CORRIDOR_MARGIN);
+      if (!fit) continue;
+      const px = fit.x, pz = fit.z;
+      const pcx = Math.floor(px), pcz = Math.floor(pz);
+      const surf = worldSurface(stage, pcx, pcz);
+      if (surf === SURF.ASPHALT || surf === SURF.ICE) continue;
+      if (terrain.slopeAt(px, pz) > 0.75) continue;
+      // Stand on the *carved* ground where the corridor bank exists: an analytic height
+      // leaves the trunk floating a block above a banked verge (the old shot's trees).
+      const carved = stage.world ? stage.world.columnTopAt(pcx, pcz) : -1;
+      const y = carved >= 0 ? carved : terrain.heightAt(px, pz);
       cands.push({
-        prop: species, x: wx + 0.5 + jx, y, z: wz + 0.5 + jz,
+        prop: species, x: px, y, z: pz,
         yaw: hash01(wx, wz, TREE_SALT ^ (seed + 13)) * Math.PI * 2,
         scale, variant: Math.floor(hash01(wx, wz, TREE_SALT ^ (seed + 29)) * 3),
       });
@@ -178,15 +247,21 @@ export function generateChunkProps(cx, cz, stage) {
       const side = hash01(i, 10, BUSH_SALT ^ seed) < 0.5 ? 1 : -1;
       const along = hash01(i, 11, BUSH_SALT ^ seed) * 2.2 - 1.1;
       const off = road.width[i] / 2 + SHOULDER + 1.2 + hash01(i, 12, BUSH_SALT ^ seed) * 3.4;
-      const px = road.x[i] + road.nx[i] * off * side + road.tx[i] * along;
-      const pz = road.z[i] + road.nz[i] * off * side + road.tz[i] * along;
+      let px = road.x[i] + road.nx[i] * off * side + road.tx[i] * along;
+      let pz = road.z[i] + road.nz[i] * off * side + road.tz[i] * along;
+      const kind = hash01(i, 13, FERN_SALT ^ seed) < 0.55 ? PROP.FERN : PROP.BUSH;
+      const bScale = 0.8 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.5;
+      // Same veto as the trees: the sample normal is exact on a straight but folds on a
+      // hairpin, and these are the props that ended up on the carriageway at the start.
+      const bfit = resolveOffRoad(road, px, pz, propFootprint(kind, bScale) + PROP_CORRIDOR_MARGIN);
+      if (!bfit) continue;
+      px = bfit.x; pz = bfit.z;
       if (Math.floor(px / CHUNK) !== cx || Math.floor(pz / CHUNK) !== cz) continue;
       const gy = stage.world ? stage.world.columnTopAt(Math.floor(px), Math.floor(pz)) : -1;
-      const kind = hash01(i, 13, FERN_SALT ^ seed) < 0.55 ? PROP.FERN : PROP.BUSH;
       out.push({
         prop: kind, x: px, y: gy >= 0 ? gy : terrain.heightAt(px, pz), z: pz,
         yaw: hash01(i, 14, BUSH_SALT ^ (seed + 5)) * Math.PI,
-        scale: 0.8 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.5,
+        scale: bScale,
         variant: Math.floor(hash01(i, 16, BUSH_SALT ^ (seed + 17)) * 3),
       });
     }
