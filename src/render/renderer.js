@@ -13,7 +13,7 @@ const SHADOW_PRESET = [
   // centred on the car: smaller span -> bigger texels of detail -> the contact
   // shadow and the corner posts read instead of dissolving (PLAN §10 criterion 4).
   { span: 58, map: 1024, dist: 150, bias: -0.0009, normalBias: 0.055, type: THREE.PCFShadowMap },
-  { span: 46, map: 1536, dist: 150, bias: -0.00055, normalBias: 0.042, type: THREE.PCFSoftShadowMap },
+  { span: 36, map: 2048, dist: 150, bias: -0.00045, normalBias: 0.028, type: THREE.PCFSoftShadowMap },
   { span: 38, map: 2048, dist: 140, bias: -0.00035, normalBias: 0.030, type: THREE.PCFSoftShadowMap },
 ];
 
@@ -36,10 +36,11 @@ export class Renderer {
     this.tod = 0.68;                      // golden hour is the reference look (PLAN §10)
     this.biome = 'FOREST';
 
-    this.hemi = new THREE.HemisphereLight(0xbcd4e6, 0x40473a, 1.05);
+    this.hemi = new THREE.HemisphereLight(0xb4cde2, 0x3f4636, 0.92);
     this.scene.add(this.hemi);
 
-    this.sun = new THREE.DirectionalLight(0xfff2dc, 2.1);
+    this.sun = new THREE.DirectionalLight(0xffe3bd, 2.4);
+    this._warmKey = new THREE.Color(0xffb35c);            // warm key tint, see applyRig
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(1536, 1536);
     this.sun.shadow.camera.near = 1;
@@ -293,13 +294,13 @@ float fbm1(vec2 p) { return vnoise(p); }
     lightingFor(this.biome, this.tod, rig);
 
     const oc = this.overcast || 0;
-    this.sun.color.copy(rig.sunColor);
-    this.sun.intensity = rig.keyIntensity * 1.34 * (1 - 0.52 * oc);
+    this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.20);
+    this.sun.intensity = rig.keyIntensity * 1.18 * (1 - 0.52 * oc);
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
-    this.hemi.intensity = rig.ambIntensity * 1.42 * (1 + 0.22 * oc);
+    this.hemi.intensity = rig.ambIntensity * 1.16 * (1 + 0.22 * oc);
     this.fill.color.copy(rig.fillColor);
-    this.fill.intensity = rig.fillIntensity * 1.38 * (1 + 0.30 * oc);
+    this.fill.intensity = rig.fillIntensity * 1.10 * (1 + 0.30 * oc);
 
     // Biome-matched haze, but *directional*: the sky keeps a warm key-lit cast and the
     // fog stays a tint rather than a grey sheet, so mid-distance terrain still reads as
@@ -361,7 +362,7 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.post.enabled = settings.post && q !== QUALITY.LOW;
     this.post.shafts = q !== QUALITY.LOW;
     this.post.gatherMat.uniforms.uShaftTaps.value = q === QUALITY.HIGH ? 7 : 5;
-    this.post.compositeMat.uniforms.uGrain.value = q === QUALITY.HIGH ? 0.040 : 0.030;
+    this.post.compositeMat.uniforms.uGrain.value = q === QUALITY.HIGH ? 0.020 : 0.016;
     this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     this.onResize();
     this.applyRig();

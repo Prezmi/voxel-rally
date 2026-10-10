@@ -25,6 +25,11 @@ const ASSET_NODES = {
   [PROP.GATE]: 'prop_gate_checkpoint',
 };
 
+// Start-line furniture (tools/blender/build_stage_props.py): glb node -> instance cap.
+const START_NODES = {
+  prop_start_gantry: 1, prop_banner_arch: 1, prop_marshal_tent: 2, prop_spectator_fence: 30,
+};
+
 const CAPACITY = {
   [PROP.OAK]: 1400, [PROP.PINE]: 1400, [PROP.DEAD]: 700,
   [PROP.SPECTATOR]: 1000, [PROP.POST]: 900, [PROP.MARSHAL]: 40, [PROP.GATE]: 24,
@@ -111,6 +116,9 @@ export class Streaming {
     this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
     this._lastRingKey = '';
     this._gatesPlaced = false;
+    // Start-line furniture: one InstancedMesh per extra props.glb node, allocated once.
+    this.startMeshes = new Map();
+    this._startPlaced = false;
   }
 
   /** Swap a species container's procedural geo for the baked glb node geo. */
@@ -128,6 +136,7 @@ export class Streaming {
       im.geometry = rec.geometry;
       if (mat) im.material = mat;
     }
+    this._buildStartProps(nodes);
     this.assetsApplied = true;
     return true;
   }
@@ -340,6 +349,7 @@ export class Streaming {
 
     // 4) gates (few, but instanced so they cost one draw call)
     if (!this._gatesPlaced) { this._placeGates(); this._gatesPlaced = true; }
+    if (!this._startPlaced) this._placeStartProps();
 
     // 5) rebuild prop instances when the visible chunk set changed
     const ringKey = `${cxFocus},${czFocus},${this.records.size}`;
@@ -372,6 +382,94 @@ export class Streaming {
     for (let i = 0; i < list.length && i < CAPACITY[PROP.GATE]; i++) im.setMatrixAt(i, list[i]);
     im.count = Math.min(list.length, CAPACITY[PROP.GATE]);
     im.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Start-line furniture: one InstancedMesh per glb node, allocated once. */
+  _buildStartProps(nodes) {
+    if (!nodes || !nodes.size) return false;
+    let built = 0;
+    for (const [name, cap] of Object.entries(START_NODES)) {
+      const rec = nodes.get(name);
+      if (!rec || !rec.geometry) continue;                 // node absent -> nothing placed
+      const geo = rec.geometry;
+      // A baked node can carry one material or one per primitive: clone whichever shape
+      // the loader handed over, otherwise the whole start layer dies on .clone of an array.
+      let mat;
+      if (Array.isArray(rec.material)) {
+        mat = rec.material.map((m) => (m && m.clone ? m.clone() : this.renderer.propMaterial));
+      } else if (rec.material && rec.material.clone) {
+        mat = rec.material.clone();
+        if (mat.vertexColors && !geo.getAttribute('color')) mat.vertexColors = false;
+      } else {
+        mat = this.renderer.propMaterial;
+      }
+      const im = new THREE.InstancedMesh(geo, mat, cap);
+      im.castShadow = true;
+      im.receiveShadow = true;
+      im.count = 0;
+      im.visible = false;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.renderer.scene.add(im);
+      this.startMeshes.set(name, im);
+      built++;
+    }
+    if (built) this._startPlaced = false;      // the road may not be ready yet
+    return built > 0;
+  }
+
+  /**
+   * Put the start furniture where the opening frame reads as a rally start: gantry on
+   * the line, banner arch 26 m down the lane, a marshal tent on each verge and a fence
+   * line running along both sides. Runs once - the stage road never moves.
+   */
+  _placeStartProps() {
+    if (!this.startMeshes.size) return false;
+    const gates = this.stage.gates || [];
+    const start = gates.find((g) => g.kind === 'start') || gates[0];
+    if (!start) return false;
+    this._startPlaced = true;
+    const r = this.road, i = start.index;
+    const nx = r.nx[i], nz = r.nz[i];
+    const gx = r.x[i], gz = r.z[i], gy = r.h[i];
+    // Down-lane direction straight off the spline: the tangent at the first node can
+    // point either way, and an arch placed "26 m ahead" landed behind the camera.
+    const j = Math.min(r.x.length - 1, i + 40);
+    let tx = r.x[j] - gx, tz = r.z[j] - gz;
+    const tl = Math.hypot(tx, tz) || 1;
+    tx /= tl; tz /= tl;
+    const half = r.width[i] / 2 + SHOULDER;
+    const across = Math.atan2(-nz, nx);        // model +X -> road normal (as _gate)
+    const along = Math.atan2(-tz, tx);         // model +X -> road tangent
+    const put = (name, px, pz, yaw, s = 1) => {
+      const im = this.startMeshes.get(name);
+      if (!im || im.count >= im.instanceMatrix.count) return;
+      const slot = im.count;
+      this._pos.set(px, gy, pz);
+      this._euler.set(0, yaw, 0);
+      this._quat.setFromEuler(this._euler);
+      this._scale.set(s, s, s);
+      this._mat4.compose(this._pos, this._quat, this._scale);
+      im.setMatrixAt(slot, this._mat4);
+      im.count = slot + 1;
+    };
+    put('prop_start_gantry', gx, gz, across);
+    put('prop_banner_arch', gx + tx * 34, gz + tz * 34, across);
+    for (const s of [-1, 1]) {
+      put('prop_marshal_tent', gx + nx * (half + 5.5) * s + tx * 12,
+        gz + nz * (half + 5.5) * s + tz * 12, Math.atan2(-nx * s, -nz * s));
+      for (let k = 0; k < 14; k++) {
+        const d = -14 + k * 4.1;
+        put('prop_spectator_fence', gx + tx * d + nx * (half + 1.4) * s,
+          gz + tz * d + nz * (half + 1.4) * s, along);
+      }
+    }
+    for (const im of this.startMeshes.values()) {
+      im.instanceMatrix.needsUpdate = true;
+      im.visible = im.count > 0;
+      if (!im.geometry.boundingSphere) im.geometry.computeBoundingSphere();
+    }
+    console.log(`[start] ${[...this.startMeshes.entries()].map(([n, im]) => `${n}=${im.count}`).join(' ')} at ${gx.toFixed(0)},${gz.toFixed(0)} yaw ${across.toFixed(2)}`);
+    return true;
   }
 
   _rebuildProps() {

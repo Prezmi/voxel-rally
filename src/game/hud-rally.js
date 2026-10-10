@@ -193,7 +193,7 @@ export class RallyHud {
       meta: { x: M.x, y: M.y, w: Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 10), h: 13 },
       signs: { x: M.x + Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 14), y: M.y, w: 0, h: 34 },
       time: { x: M.x, y: M.y + 40, w: 96, h: 33 },
-      prog: { x: M.x, y: M.y + 77, w: Math.min(210, Math.max(120, Math.round(W * 0.32))), h: 26 },
+      prog: { x: M.x, y: M.y + 92, w: Math.min(210, Math.max(120, Math.round(W * 0.32))), h: 26 },
       dial: { x: M.r - 72, y: M.b - 4 - 22 - 4 - 72, w: 72, h: 72 },
       speed: { x: M.r - 72 - 6 - 62, y: M.b - 4 - 22 - 4 - 40, w: 62, h: 40 },
       states: { x: M.r - 114, y: M.b - 26, w: 114, h: 22 },
@@ -460,6 +460,22 @@ export class RallyHud {
       this._drawModal(ctx);
       return;
     }
+    // A modal owns the frame it sits on. The countdown panel spans the middle of the
+    // screen and used to be painted straight over the meta strip, the pace-note boards
+    // and the locator bar, leaving half-erased labels ("SEKTOR" -> "OSTRZF"). While any
+    // modal is up those boards are cleared once and skipped; closing the modal forces a
+    // full redraw so they come back whole.
+    if (this._modalOpen && this.L) {
+      if (this._keys.boards !== 'hidden') {
+        this._keys.boards = 'hidden';
+        const mx = this.L.meta.x, my = this.L.meta.y;
+        this._clear({ x: mx, y: my, w: this.W - mx - 2, h: this.L.prog.y + this.L.prog.h - my });
+        this._keys.meta = ''; this._keys.signs = ''; this._keys.prog = ''; this._keys.time = '';
+      }
+    } else if (this._keys.boards === 'hidden') {
+      this._keys.boards = '';
+      this._dirtyAll = true;
+    }
     if (this._dirtyAll && this.g) {
       this.g.clearRect(0, 0, this.W, this.H);
       this._dirtyAll = false;
@@ -510,7 +526,7 @@ export class RallyHud {
 
   // ---------- 1. meta strip (stage / sector) ----------
   _drawMeta(ctx) {
-    if (!this.g) return;
+    if (!this.g || this._keys.boards === 'hidden') return;
     const t = ctx.stage.timing, sec = t.activeSector;
     const line = `${this._stageName}  ·  SEKTOR ${sec ? sec.index : t.sectors.length}/${t.sectors.length}`;
     const r = this.L.meta;
@@ -530,6 +546,7 @@ export class RallyHud {
   // count and the seconds countdown come from the real distance to that apex at the
   // car's current speed (src/game/pace-notes.js selectNotes), not from the ghost lead.
   _drawSigns(ctx) {
+    if (this._keys.boards === 'hidden') return;
     const st = ctx.stage;
     const list = ctx.notes || [];
     const v = ctx.car && ctx.car.body ? ctx.car.body.groundSpeed : 0;
@@ -690,6 +707,7 @@ export class RallyHud {
 
   // ---------- 4. time cluster: stone panel, pixel digits ----------
   _drawTime(ctx) {
+    if (this._keys.boards === 'hidden') return;
     const t = ctx.stage.timing;
     const rem = t.limitRemaining;
     const warn = t.limit > 0 && rem < 15;
@@ -710,7 +728,7 @@ export class RallyHud {
 
   // ---------- 5. stage progress as a locator bar ----------
   _drawProg(ctx) {
-    if (!this.g) return;
+    if (!this.g || this._keys.boards === 'hidden') return;
     const st = ctx.stage, t = st.timing;
     const gates = st.gates || [];
     const total = gates.length ? (gates[gates.length - 1].arc || 1) : 1;
@@ -722,7 +740,7 @@ export class RallyHud {
     for (const g2 of gates) key += '|' + g2.arc.toFixed(0);
     if (!this._key('prog', key)) return;
     const R = this.L.prog;
-    this._clear(R);
+    this._clear({ x: R.x, y: R.y, w: R.w, h: R.h + 4 });
     drawText(this.g, sec ? `SEKTOR ${sec.index}/${t.sectors.length}  ${Math.round(st.furthest)} M`
       : `POSTĘP ${Math.round(pos * 100)}%`, R.x, R.y, 1, C.TEXT);
     const bx = R.x, by = R.y + 11, bw = R.w, bh = 8;
@@ -832,7 +850,11 @@ export class RallyHud {
     const pitch = Math.max(rowH + 4, Math.ceil(72 / ui));   // hit box >= 72 CSS px
     let key = `${title}\n${body}\n${this._rowsKey()}\n${this.focus}\n${this.mode}\n${W}x${H}`;
     if (!this._key('modal', key)) return;
-    this.g.clearRect(0, 0, W, H);
+    // Only a menu may dim the whole world. The countdown sits over a live start line, so
+    // the half-black full-screen checker is replaced by a scrim pad behind its own
+    // frame: the start shot stopped reading as a muddy dithered frame.
+    const fullScrim = this.top() !== 'countdown';
+    if (fullScrim) this.g.clearRect(0, 0, W, H);
     // Dithered scrim instead of an alpha panel (PLAN.md §10.1: no translucent boxes):
     // a hard 2x2 checker of near-black pixels, one pattern fill, dims the world behind
     // the menu without a single gradient.
@@ -845,7 +867,10 @@ export class RallyHud {
         this._dither = this.g.createPattern ? this.g.createPattern(pc, 'repeat') : null;
       }
     }
-    if (this._dither) { this.g.fillStyle = this._dither; this.g.fillRect(0, 0, W, H); }
+    if (this._dither) {
+      this.g.fillStyle = this._dither;
+      if (fullScrim) this.g.fillRect(0, 0, W, H);
+    }
     const lines = body ? body.split('\n') : [];
     const F = MODAL_FRAME;
     const limit = W - 2 * (F + 5);             // widest inner panel that fits the screen
@@ -873,7 +898,17 @@ export class RallyHud {
     const rowsInfo = info.length ? (twoCol ? nCol : info.length) : 0;
     const infoH = info.length ? rowsInfo * (9 * TS + 6) + 4 : 0;
     const h = 2 * (F + 5) + bigH + banH + lines.length * (9 * TS) + infoH + items.length * pitch + 6;
-    const x = Math.round((W - w) / 2), y = Math.round((H - h) / 2);
+    const x = Math.round((W - w) / 2);
+    // The countdown sits high (the boards above it are hidden while it is up) so the
+    // car at the start line stays visible below the panel instead of behind it.
+    const y = this.top() === 'countdown'
+      ? Math.round(H * 0.12)
+      : Math.round((H - h) / 2);
+    if (this._dither && !fullScrim) {
+      this.g.clearRect(x - 12, y - 12, w + 24, h + 24);
+      this.g.fillStyle = this._dither;
+      this.g.fillRect(x - 12, y - 12, w + 24, h + 24);
+    }
     this._woodFrame(this.g, x, y, w, h);
     // One content column: the banner, every row and the sterowanie table share its left
     // edge and the same gap, so nothing sits "off" under the banner.

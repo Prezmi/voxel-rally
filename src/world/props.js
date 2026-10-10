@@ -43,6 +43,7 @@ export function generateChunkProps(cx, cz, stage) {
   // Hard per-chunk cap: keeps the prop budget (and therefore the instance budget the
   // streaming layer can actually spend in front of the camera) predictable.
   const TREE_CAP = 44;
+  const cands = [];
 
   // ---- trees / bushes: grove-field scatter per column ----
   // A 7 m cell hash sets how wooded a patch is, so the stand clumps into groves with
@@ -51,7 +52,6 @@ export function generateChunkProps(cx, cz, stage) {
   // jitter, so a patch reads as one species rather than a chessboard.
   for (let lz = 0; lz < CHUNK; lz++) {
     for (let lx = 0; lx < CHUNK; lx++) {
-      if (out.length >= TREE_CAP) break;
       const wx = x0 + lx, wz = z0 + lz;
       const grove = hash01(Math.floor(wx / 7), Math.floor(wz / 7), CLUSTER_SALT ^ seed);
       const h = hash01(wx, wz, TREE_SALT ^ seed);
@@ -68,7 +68,12 @@ export function generateChunkProps(cx, cz, stage) {
       const reach = 64 + 60 * grove * grove;
       if (absLat > reach) continue;
       const near = absLat < edge + 26 ? 1.15 : 1.0;       // denser right at the verge
-      if (h > density * near * (0.06 + 0.34 * grove * grove)) continue;
+      // Forest EDGE, not a wall: past the first stand the acceptance odds fall off, so
+      // the deep field thins to singles instead of closing into one even horizon band
+      // (that band is what read as a distant city skyline in the driving frames).
+      const taper = Math.max(0.16, 1 - Math.max(0, absLat - (edge + 24))
+        / Math.max(1, reach - edge - 24));
+      if (h > density * near * taper * (0.06 + 0.34 * grove * grove)) continue;
       const surf = worldSurface(stage, wx, wz);
       if (surf === SURF.ASPHALT || surf === SURF.ICE) continue;
       const slope = terrain.slopeAt(wx + 0.5, wz + 0.5);
@@ -79,14 +84,28 @@ export function generateChunkProps(cx, cz, stage) {
       const y = carved >= 0 ? carved : terrain.heightAt(wx + 0.5, wz + 0.5);
       const species = pickSpecies(grove * 0.6 + h * 0.4, stage.biome);
       // Height/species variation from the seed: same species in a grove, different trees.
-      const scale = (species === PROP.PINE ? 0.82 : 0.66)
-        + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 0.6 : 0.85);
-      out.push({
-        prop: species, x: wx + 0.5, y, z: wz + 0.5,
+      // Sub-cell jitter: on an exact 1 m grid every trunk sits on the same spacing, and
+      // at distance that picket regularity is half of the skyline read.
+      const jx = (hash01(wx, wz, TREE_SALT ^ (seed + 41)) - 0.5) * 0.86;
+      const jz = (hash01(wx, wz, TREE_SALT ^ (seed + 53)) - 0.5) * 0.86;
+      // Crown spread: a row of identical heights is the other half of it, so pines run
+      // 0.72..1.80 and broadleaves 0.60..1.68 instead of one narrow band.
+      const scale = (species === PROP.PINE ? 0.72 : 0.60)
+        + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 1.00 : 1.08);
+      cands.push({
+        prop: species, x: wx + 0.5 + jx, y, z: wz + 0.5 + jz,
         yaw: hash01(wx, wz, TREE_SALT ^ (seed + 13)) * Math.PI * 2,
         scale, variant: Math.floor(hash01(wx, wz, TREE_SALT ^ (seed + 29)) * 3),
       });
     }
+  }
+  // Spend the cap on a stride over the whole chunk, not on the first cells the scan
+  // reached: the old `break` parked a full stand in the low-lz half of every chunk, so
+  // the props arrived in blocks that lined up across chunk borders.
+  if (cands.length <= TREE_CAP) out.push(...cands);
+  else {
+    const step = cands.length / TREE_CAP;
+    for (let k = 0; k < TREE_CAP; k++) out.push(cands[Math.floor(k * step)]);
   }
 
   // ---- spectators: groups beside the road ----
@@ -206,8 +225,11 @@ function paintFoliage(kind, data) {
     // Three tones per sprite: lit tips, mid mass, shaded underside, plus a hard
     // silhouette jitter so the edge is ragged rather than a cut-out ellipse.
     const n = ph(x, y, s);
-    const t = n < 0.22 ? 1.18 : n < 0.72 ? 1.0 : 0.78;
-    const warm = n < 0.12 ? 10 : 0;
+    // Wider tone band than the old 1.18/1.0/0.78 split, and the crown is lighter toward
+    // the top (y grows downward in the sprite): flat, evenly lit crowns read as one
+    // stacked slab instead of a forest.
+    const t = (n < 0.22 ? 1.28 : n < 0.70 ? 1.03 : 0.66) + 0.14 * (1 - y / TEX_PX);
+    const warm = n < 0.12 ? 12 : 0;
     px(data, x, y, Math.min(255, base[0] * t + warm), Math.min(255, base[1] * t), Math.min(255, base[2] * t * 0.96), 255);
     if (spread && n > 0.86) px(data, x + 1, y, base[0] * 0.7, base[1] * 0.7, base[2] * 0.7, 255);
   };
@@ -304,12 +326,20 @@ export function buildSpriteGeometries(THREE) {
     const sp = SPRITE_SPEC[prop];
     const pos = [], uv = [], nrm = [], idx = [];
     for (let p = 0; p < sp.planes; p++) {
-      const a = (p * Math.PI) / sp.planes;
-      const dx = Math.cos(a) * sp.w * 0.5, dz = Math.sin(a) * sp.w * 0.5;
+      // The planes used to all pass through the trunk axis, so a stand collapsed into a
+      // wall of flat slabs from a low view. Each plane is pushed along its own normal
+      // and runs a little shorter and narrower than the last, which gives the crown real
+      // depth and keeps the silhouette changing as you drive past.
+      const a = (p * Math.PI) / sp.planes + p * 0.19;
+      const wd = sp.w * (1 - 0.07 * p), ht = sp.h * (1 - 0.10 * p);
+      const dx = Math.cos(a) * wd * 0.5, dz = Math.sin(a) * wd * 0.5;
       const nx = Math.sin(a), nz = -Math.cos(a);
+      const ox = nx * (p - (sp.planes - 1) / 2) * sp.w * 0.17;
+      const oz = nz * (p - (sp.planes - 1) / 2) * sp.w * 0.17;
       const base = pos.length / 4;
       // bottom-left, bottom-right, top-right, top-left
-      pos.push(-dx, 0, -dz, dx, 0, dz, dx, sp.h, dz, -dx, sp.h, -dz);
+      pos.push(-dx + ox, 0, -dz + oz, dx + ox, 0, dz + oz,
+        dx + ox, ht, dz + oz, -dx + ox, ht, -dz + oz);
       uv.push(0, 0, 1, 0, 1, 1, 0, 1);
       for (let k = 0; k < 4; k++) nrm.push(nx, 0, nz);
       idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -448,16 +478,21 @@ export function buildGateGeometry(GeoBuilder, THREE) {
     // Pennant on top of the post (moves in the wind of a passing car visually).
     g.boxRot(s * 5.4, 6.55, 0.34, 0.55, 0.30, 0.03, 0.25, s < 0 ? red : post);
   }
-  // Beam + banner across the carriageway.
+  // Beam + banner across the carriageway. The old build stacked three near-coplanar
+  // slabs (pale plate z 0, red plate z 0.16, 1.1 m chequered tabs z 0.18) over the same
+  // 10.7 m span: the depth pass could not separate them and the whole banner came back
+  // as a white/red checkerboard. One solid plate per face now, every face at least 4 cm
+  // clear of the next, plus dark lettering blocks so it reads as a named start board.
   g.box(0, 5.62, 0, 5.7, 0.24, 0.30, dark);
-  g.box(0, 5.10, 0, 5.35, 0.55, 0.14, post);
-  g.box(0, 5.10, 0.16, 5.35, 0.55, 0.03, red);
-  // Chequered corner tabs: the shape the eye reads as "checkpoint".
-  for (const s of [-1, 1]) {
-    g.box(s * 5.0, 5.10, 0.18, 0.55, 0.55, 0.02, red);
-    g.box(s * 4.4, 5.10, 0.18, 0.55, 0.55, 0.02, post);
+  g.box(0, 5.10, 0, 5.35, 0.55, 0.12, post);            // solid banner plate (opaque)
+  // Lettering and end tabs are carried on BOTH faces: the gantry is placed with a
+  // road-tangent normal, so a single-sided board came back blank from the start line.
+  for (const sz of [-1, 1]) {
+    g.box(0, 5.10, sz * 0.17, 5.35, 0.55, 0.05, post);
+    for (const s of [-1, 1]) g.box(s * 4.95, 5.10, sz * 0.24, 0.40, 0.55, 0.06, red);
+    // Five dark name blocks across the plate, wide enough to read as text at 100 m.
+    for (let k = 0; k < 5; k++) g.box(-3.1 + k * 1.55, 5.10, sz * 0.24, 0.34, 0.24, 0.06, dark);
   }
-  // Start/finish-style name board, dark on light, readable at ~150 m.
   g.box(0, 4.28, 0.10, 2.6, 0.42, 0.06, dark);
   return g.toGeometry(THREE);
 }

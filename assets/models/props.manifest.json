@@ -1,9 +1,17 @@
 {
   "generated_by": "tools/blender/build_stage_props.py",
   "source_glb": "props.glb",
-  "total_triangles": 2916,
-  "file_bytes": 179588,
+  "total_triangles": 4080,
+  "file_bytes": 248700,
   "props": [
+    {
+      "name": "prop_banner_arch",
+      "width_m": 12.72,
+      "height_m": 6.11,
+      "depth_m": 0.92,
+      "triangles": 180,
+      "instance": false
+    },
     {
       "name": "prop_bush",
       "width_m": 2.0,
@@ -69,6 +77,14 @@
       "instance": true
     },
     {
+      "name": "prop_marshal_tent",
+      "width_m": 5.98,
+      "height_m": 4.32,
+      "depth_m": 5.2,
+      "triangles": 264,
+      "instance": false
+    },
+    {
       "name": "prop_rock",
       "width_m": 1.81,
       "height_m": 1.26,
@@ -91,6 +107,22 @@
       "depth_m": 0.36,
       "triangles": 84,
       "instance": true
+    },
+    {
+      "name": "prop_spectator_fence",
+      "width_m": 4.24,
+      "height_m": 1.24,
+      "depth_m": 0.44,
+      "triangles": 156,
+      "instance": true
+    },
+    {
+      "name": "prop_start_gantry",
+      "width_m": 14.32,
+      "height_m": 7.49,
+      "depth_m": 2.12,
+      "triangles": 564,
+      "instance": false
     },
     {
       "name": "prop_stone_wall",

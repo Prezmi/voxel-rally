@@ -139,8 +139,8 @@ void main() {
 
   // Film grain (docs/04 §6): hashed per pixel, animated at frame rate, luminance
   // weighted so it does not dirty the mid greys of the road.
-  float gi = fract(sin(dot(floor(vUv * uRes) + floor(uTime * 60.0), vec2(12.9898, 78.233))) * 43758.5453);
-  c += (gi - 0.5) * uGrain * (0.35 + 0.85 * (1.0 - l));
+  float gi = fract(sin(dot(floor(vUv * uRes * 0.5) + floor(uTime * 20.0), vec2(12.9898, 78.233))) * 43758.5453);
+  c += (gi - 0.5) * uGrain * (0.30 + 0.55 * (1.0 - l));
 
   // Manual linear -> sRGB: this ShaderMaterial bypasses three's colorspace pass.
   c = max(c, vec3(0.0));

@@ -53,7 +53,7 @@ function params() {
   const ref = Number(q.get('ref') || 0);
   // ?tod=<0..1> time of day for the art-direction shots (PLAN §10 criterion 1/4):
   // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour.
-  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.70;
+  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.62;
   // ?post=0|1 turns the composite off/on (A/B shots for the pass-cost numbers).
   // Read *after* the quality preset below so the flag always wins.
   const postFlag = q.get('post');

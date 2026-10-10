@@ -67,8 +67,13 @@ export class ChaseCamera {
     // CHASE / BUMPER: the pivot trails further out and rises with speed, which
     // is what makes a slide readable.
     const bumper = mode === 'BUMPER';
-    const back = bumper ? 1.1 : 6.2 + Math.min(4.5, speed * 0.20);
-    const high = bumper ? 0.75 : 2.05 + Math.min(1.4, speed * 0.045);
+    // Pre-start framing: at rest the pivot sat 6.2 m back / 2.05 m up, which filled the
+    // lower frame with the rear panel and left the car as a dark lump with no roof line
+    // and no lamp bar. Below ~6 m/s the rig eases back and up; by 6 m/s it is identical
+    // to the driving rig again, so the in-stage feel is untouched.
+    const crawl = Math.max(0, 1 - speed / 6);
+    const back = bumper ? 1.1 : 6.2 + Math.min(4.5, speed * 0.20) + crawl * 1.9;
+    const high = bumper ? 0.75 : 2.05 + Math.min(1.4, speed * 0.045) + crawl * 0.85;
 
     // Look-ahead along the *velocity*, not the nose: during a slide the camera
     // swings to face where the car is actually going.

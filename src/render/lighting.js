@@ -16,14 +16,14 @@ import * as THREE from 'three';
 const STOPS = [
   { t: 0.00, elev: -6, key: 0.14, keyCol: 0x2b3d5c, amb: 0.60, ambSky: 0x1d2839, ambGround: 0x14171c, fog: 0.55, exposure: 1.55, warm: 0.05 },
   { t: 0.22, elev: 4, key: 2.35, keyCol: 0xffa866, amb: 1.22, ambSky: 0x86a6c8, ambGround: 0x3f3527, fog: 0.72, exposure: 1.34, warm: 0.95 },
-  { t: 0.38, elev: 22, key: 3.05, keyCol: 0xffe0ae, amb: 1.42, ambSky: 0xb4d1ea, ambGround: 0x464836, fog: 0.50, exposure: 1.18, warm: 0.62 },
-  { t: 0.50, elev: 52, key: 3.20, keyCol: 0xfff7ea, amb: 1.52, ambSky: 0xd2e6f4, ambGround: 0x454d3c, fog: 0.36, exposure: 1.10, warm: 0.28 },
+  { t: 0.38, elev: 22, key: 3.42, keyCol: 0xffe0ae, amb: 1.62, ambSky: 0xb4d1ea, ambGround: 0x464836, fog: 0.44, exposure: 1.31, warm: 0.62 },
+  { t: 0.50, elev: 52, key: 3.58, keyCol: 0xfff7ea, amb: 1.72, ambSky: 0xd2e6f4, ambGround: 0x454d3c, fog: 0.32, exposure: 1.22, warm: 0.28 },
   // Golden hour (t 0.68-0.80) is the reference look: the key is *low* so shadows
   // stretch across the carriageway (PLAN §10 criterion 1/4) rather than falling
   // straight down under the car the way noon does. Bright, high-key (PLAN §10.2:
   // CMR 2.0 was praised for a brighter palette) - the old values washed the frame
   // to flat grey once the fog was added on top.
-  { t: 0.68, elev: 18, key: 3.55, keyCol: 0xffca92, amb: 1.52, ambSky: 0xbdd4ec, ambGround: 0x4c452f, fog: 0.46, exposure: 1.32, warm: 0.86 },
+  { t: 0.68, elev: 18, key: 3.95, keyCol: 0xffca92, amb: 1.74, ambSky: 0xbdd4ec, ambGround: 0x4c452f, fog: 0.40, exposure: 1.44, warm: 0.86 },
   { t: 0.80, elev: 7, key: 2.85, keyCol: 0xff9048, amb: 1.42, ambSky: 0x93a6cc, ambGround: 0x3d3424, fog: 0.72, exposure: 1.40, warm: 1.00 },
   { t: 0.92, elev: -4, key: 0.30, keyCol: 0x38506f, amb: 0.72, ambSky: 0x27324a, ambGround: 0x181b21, fog: 0.80, exposure: 1.48, warm: 0.30 },
   { t: 1.00, elev: -6, key: 0.14, keyCol: 0x2b3d5c, amb: 0.60, ambSky: 0x1d2839, ambGround: 0x14171c, fog: 0.55, exposure: 1.55, warm: 0.05 },
@@ -95,7 +95,7 @@ export function lightingFor(biome, tod, out) {
   out.fillColor.copy(_w);
   // Higher base than before: with a low key most of the frame is in shadow, and the
   // fill is what keeps those faces cool instead of black (PLAN §10 "cien nie jest czarny").
-  out.fillIntensity = 0.92 + 0.95 * Math.max(0, Math.min(1, se));
+  out.fillIntensity = 1.08 + 1.05 * Math.max(0, Math.min(1, se));
   return out;
 }
 

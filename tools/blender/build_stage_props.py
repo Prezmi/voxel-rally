@@ -73,6 +73,11 @@ C = {
     "hivis_yel":  (0xC8A62F, 0.75),   # props.js:421 marshal tab
     "trouser":    (0x22292F, 0.90),   # props.js:397
     "skin":       (0xA8846A, 0.85),   # props.js:398
+    "pole_steel":  (0x6A6E74, 0.70),  # start gantry / banner arch steelwork
+    "canvas":      (0xD9CFB4, 0.85),  # marshal tent canvas, sunlit side
+    "canvas_shade":(0x8E8672, 0.85),  # tent canvas in shade / back wall
+    "chequer":     (0x1A1C1F, 0.60),  # start-line chequer tabs
+    "fence_mesh":  (0xA6A49A, 0.55),  # spectator fence mesh battens
 }
 
 # ------------------------------------------------------------------ helpers
@@ -332,6 +337,93 @@ PROPS["sign_board"] = dict(instance=True, blocks=(
      (0, 0.10, 1.50, 0.58, 0.02, 0.05, "gate_dark"),
      (0, 0.10, 0.94, 0.58, 0.02, 0.05, "gate_dark")]
 ))
+
+# ------------------------------------------------- start-line furniture
+# The opening frame has to read as a rally start, not as an empty lane: a truss
+# gantry on the line, a banner arch down the road, a marshal tent on each verge and
+# a fence panel that instances into a spectator line along both sides. Placed by
+# Streaming._placeStartProps, which uses the same across-road = model X convention
+# as _gate above, so every span below is in metres across the carriageway.
+def _start_gantry():
+    g = []
+    for s in (-1, 1):
+        x = s * 6.8
+        for d in (-0.7, 0.7):
+            g.append((x, d, 3.50, 0.20, 0.20, 3.50, "pole_steel"))      # legs
+            g.append((x, d, 0.11, 0.36, 0.36, 0.11, "stone_dark"))      # foot pads
+        for k in range(1, 5):                                           # struts
+            g.append((x, 0, k * 1.55, 0.18, 0.80, 0.10, "pole_steel"))
+        for k in range(3):                                              # stepped bracing
+            g.append((x, -0.55 + k * 0.55, 0.75 + k * 1.55, 0.09, 0.40, 0.78, "pole_steel"))
+            g.append((x, 0.55 - k * 0.55, 0.75 + k * 1.55, 0.09, 0.40, 0.78, "pole_steel"))
+    g.append((0, 0, 7.30, 7.10, 0.34, 0.16, "pole_steel"))              # upper chord
+    g.append((0, 0, 6.70, 7.10, 0.34, 0.10, "pole_steel"))              # lower chord
+    for k in range(-3, 4):
+        g.append((k * 2.0, 0, 7.00, 0.09, 0.30, 0.30, "pole_steel"))    # hangers
+    g.append((0, 0.30, 5.55, 4.80, 0.06, 0.78, "gate_dark"))            # start board
+    g.append((0, 0.36, 5.55, 4.60, 0.03, 0.66, "canvas"))
+    for k in range(8):                                                  # chequer tabs
+        g.append((-4.20 + k * 1.20, 0.40, 6.05, 0.60, 0.02, 0.20,
+                  "chequer" if k % 2 else "canvas"))
+    return g
+
+
+def _banner_arch():
+    g = []
+    for s in (-1, 1):
+        g.append((s * 5.9, 0, 2.30, 0.28, 0.28, 2.30, "pole_steel"))    # posts
+        g.append((s * 5.9, 0, 0.12, 0.46, 0.46, 0.12, "stone_dark"))    # pads
+    rib = (4.55, 5.15, 5.60, 5.85, 5.60, 5.15, 4.55)                    # stepped rib
+    for k, z in enumerate(rib):
+        g.append((-5.20 + k * 1.73, 0, z, 0.95, 0.32, 0.26, "pole_steel"))
+    g.append((0, 0.34, 4.30, 4.40, 0.05, 0.80, "canvas"))               # banner cloth
+    g.append((0, 0.38, 3.42, 4.40, 0.03, 0.16, "gate_red"))             # lower trim
+    for s in (-1, 1):
+        g.append((s * 4.55, 0.34, 4.30, 0.35, 0.05, 0.80, "chequer"))   # end tabs
+    return g
+
+
+def _marshal_tent():
+    g = []
+    for s in (-1, 1):
+        g.append((s * 2.9, -2.4, 1.05, 0.09, 0.09, 1.05, "timber"))     # end posts
+        g.append((s * 2.9, 2.4, 1.05, 0.09, 0.09, 1.05, "timber"))
+        g.append((s * 2.85, 0, 1.55, 0.07, 2.40, 0.07, "timber"))       # side rails
+    g.append((0, 2.45, 1.35, 2.90, 0.06, 1.35, "canvas_shade"))         # back wall
+    for s in (-1, 1):                                                   # side walls
+        g.append((s * 2.85, 0, 1.30, 0.05, 2.40, 1.30, "canvas_shade"))
+    # Roof: three filled steps plus a ridge cap, widest lowest, so nothing shows through
+    for w, z in ((2.95, 1.75), (2.25, 2.15), (1.50, 2.55)):
+        g.append((0, 0, z, w, 2.55, 0.30, "canvas"))
+    g.append((0, 0, 2.88, 0.75, 2.60, 0.10, "canvas_shade"))            # ridge cap
+    g.append((0, -2.45, 1.00, 2.90, 0.05, 1.00, "canvas"))              # front wall
+    for s in (-1, 1):                                                   # door halves
+        g.append((s * 2.05, -2.45, 1.50, 0.85, 0.05, 0.50, "canvas"))
+    g.append((0, -2.45, 2.05, 0.95, 0.05, 0.16, "timber"))              # lintel
+    g.append((0, -1.60, 0.44, 0.90, 0.55, 0.44, "wood_board"))          # table
+    for s in (-1, 1):
+        g.append((s * 1.75, -1.55, 0.26, 0.38, 0.38, 0.26, "timber"))   # crates
+    g.append((0, 2.10, 3.60, 0.05, 0.05, 0.72, "timber"))               # ridge flagpole
+    g.append((0.55, 2.10, 3.95, 0.55, 0.02, 0.34, "gate_red"))
+    return g
+
+
+def _fence_panel():
+    g = []
+    for s in (-1, 1):
+        g.append((s * 1.90, 0, 0.62, 0.09, 0.09, 0.62, "timber"))       # posts
+        g.append((s * 1.90, 0, 0.06, 0.22, 0.22, 0.06, "stone_dark"))   # feet
+    g.append((0, 0, 1.12, 1.95, 0.05, 0.07, "wood_board"))              # top rail
+    g.append((0, 0, 0.72, 1.95, 0.05, 0.06, "wood_board"))              # mid rail
+    for k in range(7):                                                  # mesh battens
+        g.append((-1.62 + k * 0.54, 0, 0.55, 0.05, 0.03, 0.55, "fence_mesh"))
+    return g
+
+
+PROPS["start_gantry"] = dict(instance=False, blocks=_start_gantry())
+PROPS["banner_arch"] = dict(instance=False, blocks=_banner_arch())
+PROPS["marshal_tent"] = dict(instance=False, blocks=_marshal_tent())
+PROPS["spectator_fence"] = dict(instance=True, blocks=_fence_panel())
 
 EXPECTED = ["prop_" + k for k in PROPS]
 
