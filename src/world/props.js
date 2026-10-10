@@ -246,10 +246,10 @@ function paintFoliage(kind, data) {
     // Three tones per sprite: lit tips, mid mass, shaded underside, plus a hard
     // silhouette jitter so the edge is ragged rather than a cut-out ellipse.
     const n = ph(x, y, s);
-    // Wider tone band than the old 1.18/1.0/0.78 split, and the crown is lighter toward
-    // the top (y grows downward in the sprite): flat, evenly lit crowns read as one
-    // stacked slab instead of a forest.
-    const t = (n < 0.22 ? 1.28 : n < 0.70 ? 1.03 : 0.66) + 0.14 * (1 - y / TEX_PX);
+    // Three tones, darkest at the BOTTOM of the sprite (the shaded underside of the
+    // crown), lit only on the top shell. The old 1.28 lit term plus the +0.14 top lift
+    // blew the whole card out to a pale mint flat sheet (FAULT 3, review frame).
+    const t = (n < 0.22 ? 1.06 : n < 0.70 ? 0.90 : 0.56) - 0.20 * (y / TEX_PX);
     const warm = n < 0.12 ? 12 : 0;
     px(data, x, y, Math.min(255, base[0] * t + warm), Math.min(255, base[1] * t), Math.min(255, base[2] * t * 0.96), 255);
     if (spread && n > 0.86) px(data, x + 1, y, base[0] * 0.7, base[1] * 0.7, base[2] * 0.7, 255);
@@ -303,7 +303,7 @@ function paintFoliage(kind, data) {
         const dy = (y - cy0) / r;
         const half = r * Math.sqrt(Math.max(0, 1 - dy * dy));
         for (let x = cx0 - half; x <= cx0 + half; x++) {
-          if (ph(x, y, 3) > 0.12) leaf(x, y, base, true, 11);
+          if (ph(x, y, 3) > 0.08) leaf(x, y, base, true, 11);
         }
       }
     }
@@ -316,7 +316,7 @@ function paintFoliage(kind, data) {
     for (let y = 12; y < TEX_PX; y++) {
       const dy = (y - 25) / 13;
       const half = 14 * Math.sqrt(Math.max(0, 1 - dy * dy * 1.9));
-      for (let x = 16 - half; x <= 16 + half; x++) if (ph(x, y, 7) > 0.16) leaf(x, y, base, true, 15);
+      for (let x = 16 - half; x <= 16 + half; x++) if (ph(x, y, 7) > 0.11) leaf(x, y, base, true, 15);
     }
     for (let y = 26; y < TEX_PX; y++) trunk(16, y, 1, [70, 56, 36], 21);
     return;
@@ -350,14 +350,16 @@ function paintFoliage(kind, data) {
 // the same envelope (width/height straight from the manifest, matching SPRITE_SPEC so
 // the near -> sprite handover keeps the same silhouette). Mid and far bands untouched.
 export const NEAR_LOD_TRIS = {
-  [PROP.PINE]: 264, [PROP.OAK]: 228, [PROP.BIRCH]: 270, [PROP.BUSH]: 132, [PROP.DEAD]: 90,
+  [PROP.PINE]: 320, [PROP.OAK]: 240, [PROP.BIRCH]: 270, [PROP.BUSH]: 150, [PROP.DEAD]: 90,
 };
 const NEAR_LOD_SPEC = {
   // tiers x perTier boxes of foliage on one trunk box, sized to the baked envelope.
-  [PROP.PINE]: { w: 4.58, h: 9.44, bark: 0x3d2c19, leaf: 0x2f4a2c, tiers: 5, perTier: 4, cone: 1 },
-  [PROP.OAK]: { w: 4.84, h: 7.37, bark: 0x5c4127, leaf: 0x3f6b30, tiers: 3, perTier: 5, base: 0.46 },
-  [PROP.BIRCH]: { w: 3.74, h: 7.96, bark: 0x8d8577, leaf: 0x4a7a3a, tiers: 3, perTier: 5, base: 0.50 },
-  [PROP.BUSH]: { w: 2.00, h: 1.57, bark: 0x35602c, leaf: 0x35602c, tiers: 2, perTier: 5, base: 0.05, trunk: 0 },
+  // leafT is the three-tone foliage ramp (lit crown / mid mass / shaded underside):
+  // a single flat leaf colour made the near canopies read as pale, flat cards.
+  [PROP.PINE]: { w: 4.58, h: 9.44, bark: 0x3d2c19, leaf: 0x2f4a2c, leafT: [0x38562f, 0x2f4a2c, 0x1e3120], tiers: 5, perTier: 5, cone: 1 },
+  [PROP.OAK]: { w: 4.84, h: 7.37, bark: 0x5c4127, leaf: 0x3f6b30, leafT: [0x4e7a33, 0x3f6b30, 0x2a4a20], tiers: 3, perTier: 6, base: 0.46 },
+  [PROP.BIRCH]: { w: 3.74, h: 7.96, bark: 0x8d8577, leaf: 0x4a7a3a, leafT: [0x568343, 0x4a7a3a, 0x30522a], tiers: 3, perTier: 6, base: 0.50 },
+  [PROP.BUSH]: { w: 2.00, h: 1.57, bark: 0x35602c, leaf: 0x35602c, leafT: [0x3e6b33, 0x35602c, 0x21401c], tiers: 2, perTier: 6, base: 0.05, trunk: 0 },
   [PROP.DEAD]: { w: 2.02, h: 5.94, bark: 0x6a5843, leaf: 0x5b4c39, snag: 1 },
 };
 
@@ -384,6 +386,17 @@ export function buildNearLodGeometries(GeoBuilder, THREE) {
     } else {
       if (sp.trunk !== 0) b.box(0, sp.h * 0.17, 0, 0.16, sp.h * 0.17, 0.16, sp.bark);
       const base = sp.base !== undefined ? sp.base : 0.30;
+      // Three foliage tones, darkest at the lowest tier (the shaded underside of the
+      // crown) and on the interior core box, lit on the outer shell of the top tier.
+      // One flat tone was what made a near canopy read as a pale card.
+      const T = sp.leafT;
+      const tone = (k, j) => {
+        if (!T) return sp.leaf;
+        if (k === 0) return T[2];                       // underside
+        if (j === 0) return T[2];                       // interior core, never visible lit
+        if (k === sp.tiers - 1) return T[0];            // lit crown
+        return T[1];                                    // mid mass
+      };
       for (let k = 0; k < sp.tiers; k++) {
         const t = sp.tiers > 1 ? k / (sp.tiers - 1) : 0;
         const rad = sp.w * 0.5 * (1 - (sp.cone ? 0.74 : 0.30) * t);
@@ -391,10 +404,10 @@ export function buildNearLodGeometries(GeoBuilder, THREE) {
         const hy = sp.h * (sp.cone ? 0.075 : 0.11) * (1 - 0.25 * t);
         for (let j = 0; j < sp.perTier; j++) {
           const a = (j / sp.perTier) * Math.PI * 2 + k * 0.7;
-          const off = j === 0 ? 0 : rad * 0.42;
-          const hx = j % 2 ? rad * 0.40 : rad * 0.56;
-          const hz = j % 2 ? rad * 0.56 : rad * 0.40;
-          b.box(Math.cos(a) * off, y, Math.sin(a) * off, hx, hy, hz, sp.leaf);
+          const off = j === 0 ? 0 : rad * 0.40;
+          const hx = j % 2 ? rad * 0.40 : rad * 0.54;
+          const hz = j % 2 ? rad * 0.54 : rad * 0.40;
+          b.box(Math.cos(a) * off, y, Math.sin(a) * off, hx, hy, hz, tone(k, j));
         }
       }
     }

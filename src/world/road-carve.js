@@ -181,15 +181,21 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
       const wl = Math.exp(-Math.pow((absD - hw * 0.55) / (hw * 0.20), 2))
         + Math.exp(-Math.pow((absD + hw * 0.55) / (hw * 0.20), 2));
       const mid = Math.exp(-Math.pow(absD / (hw * 0.45), 2));
-      wear = 150 - 120 * wl + 22 * mid;
+      // Controlled spread, not a ramp across the whole range: base ~140, wheel ruts
+      // down to ~96 (the darkest worked band), crown up to ~168. The old 30..172
+      // swing put a near-black panel next to a lit one across 1 m of road.
+      // Now 108 (rut) .. 146 (crown): a ~15 % of range spread, i.e. well under the
+      // 12 % lightness step between neighbouring blocks once the shader band is applied.
+      wear = 134 - 26 * wl + 12 * mid;
     } else if (absD <= hw + SHOULDER) {
-      // Shoulder: paler loose material + a crisp edge line right at hw.
+      // Shoulder: loose material a shade paler than the carriageway + a crisp edge
+      // line right at hw (kept inside the same tone band, no step to near-white).
       const e = (absD - hw) / SHOULDER;
-      wear = 205 - 48 * e;
+      wear = 152 - 12 * e;
     } else {
       // Verge/bank: only a trace, gone within a third of the blend so grass keeps
       // its own tone (this tail used to brighten grass for several metres).
-      wear = Math.max(0, 26 * (1 - (absD - hw - SHOULDER) / (BANK * 0.34)));
+      wear = Math.max(0, 10 * (1 - (absD - hw - SHOULDER) / (BANK * 0.34)));
     }
     wear = wear < 0 ? 0 : wear > 255 ? 255 : wear | 0;
     if (chunk.wear[c] < wear) chunk.wear[c] = wear;

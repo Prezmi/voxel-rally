@@ -6,6 +6,7 @@ import { CHUNK, COLS, chunkKey, keyToCx, keyToCz } from './chunk.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
 import { carveChunk, SHOULDER } from './road-carve.js';
 import { SURF } from './surfaces.js';
+import { PALETTE } from './palette.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries } from './props.js';
 import { settings, QUALITY } from '../core/settings.js';
@@ -262,10 +263,25 @@ export class Streaming {
         d: Math.min(1.4, Math.max(0.6, bb.max.z - bb.min.z)),
         h: useBox ? h : 1,
       });
-      const mat = rec.material ? rec.material.clone() : this.renderer.propMaterial;
+      const srcMat = rec.material || this.renderer.propMaterial;
+      const mat = srcMat.clone();
+      mat.vertexColors = false;
+      // The baked slabs carry their own vertex colours from an older, wider palette.
+      // Repaint every surface with its palette base tone so the tile layer and the
+      // terrain it stands on are one continuous surface tone (FAULT 1): where a tile is
+      // culled or capped out, the block underneath is the same colour, not a dark one.
+      const pal = PALETTE.find((p) => p.surface === sid);
+      // setHex, not setRGB: the loader keeps materials in working (linear) space, and
+      // the flat palette value read as cream against the darker terrain next to it.
+      if (pal) mat.color.setHex(pal.color);
       if (mat.vertexColors && !geo.getAttribute('color')) mat.vertexColors = false;
       const im = new THREE.InstancedMesh(drawGeo, mat, TILE_CAPACITY);
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // Per-tile tint channel: the tile must carry the *same* rut/crown band as the
+      // terrain it stands on, otherwise a slab of one flat colour sits over the banded
+      // carriageway and the road reads as a patchwork again.
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(TILE_CAPACITY * 3), 3);
+      im.instanceColor.setUsage(THREE.DynamicDrawUsage);
       im.castShadow = false;                                // a 0.18 m slab: no own shadow
       im.receiveShadow = true;
       im.count = 0;
@@ -378,6 +394,13 @@ export class Streaming {
           this._scale.set(off.w, off.h, off.d);
           this._mat4.compose(this._pos, this._quat, this._scale);
           im.setMatrixAt(used, this._mat4);
+          // Tone agreement with the ground under the tile: chunk.wear is the very band
+          // the mesher packs into aSurface, so a tile over a wheel rut is as dark as the
+          // rut and one over the crown / outer edge as light as that band.
+          const tc = this._tileCol || (this._tileCol = new THREE.Color());
+          const w01 = (chunk.wear ? chunk.wear[c] : 0) / 255;
+          const tint = 0.94 + 0.12 * w01;
+          im.setColorAt(used, tc.setRGB(tint, tint, tint));
           this._tileCount.set(sid, used + 1);
         }
       }
@@ -388,6 +411,7 @@ export class Streaming {
       im.count = n;
       im.visible = n > 0;
       upload(im, n);
+      if (im.instanceColor) upload(im.instanceColor, n, 3);
       total += n;
     }
     this._tilesOn = on;

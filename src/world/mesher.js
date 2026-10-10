@@ -224,7 +224,9 @@ export function meshChunk(world, chunk, lod = 0) {
       // differ by the coarse field (>= 12 % value spread), not by per-cell noise.
       const pn = hash01(ax >> 3, az >> 3, TONE_SALT);
       const pn2 = hash01(ax >> 1, az >> 1, TONE_SALT ^ 0x2f1b3d77);
-      const pv = 1 + (pn - 0.5) * 0.18 + (pn2 - 0.5) * 0.05;  // value spread ~ +/-12 %
+      // +/-6 % panel variation: enough that a field of one surface is not a dead slab,
+      // small enough that neighbouring 1 m panels never read as a checkerboard.
+      const pv = 1 + (pn - 0.5) * 0.06 + (pn2 - 0.5) * 0.02;  // value spread ~ +/-3.5 %
       const pf = hash01(az + 7, ax - 3, TONE_SALT ^ 0x5bd1e995);
       const ph = (pf - 0.5) * 0.12;                           // warm/cool hue drift
       const pw = wPanel[c0] / 255;                            // 0 natural .. 1 worn bed
@@ -256,7 +258,14 @@ export function meshChunk(world, chunk, lod = 0) {
         // pw dominates on the corridor: the carve wear band *is* the tone of the
         // carriageway (rut dark, shoulder pale), the geometry terms only add the
         // worn lip on top of it.
-        const wear = lod >= 2 ? 0.5 : wearOf(0.10 + drop * 0.22 + (nb !== b ? 0.12 : 0) + pw * 0.60);
+        // On the corridor the carve wear band alone decides the tone; letting the
+        // per-corner height drop and the material-change term feed it too made every
+        // step and every block boundary its own light/dark cell (the checkerboard).
+        const roadCell = pw > 0.45;
+        const wear = lod >= 2 ? 0.5 : wearOf(0.10
+          + drop * (roadCell ? 0.07 : 0.22)
+          + (nb !== b ? (roadCell ? 0.04 : 0.12) : 0)
+          + pw * 0.60);
 
         // Surface-to-surface transition: a road panel sharing a corner with grass
         // pulls 1/3 of the grass colour, so the edge is a gradient, not a step.
@@ -274,11 +283,11 @@ export function meshChunk(world, chunk, lod = 0) {
         // the terrain shader adds its own world-space fbm tone on top.
         // Grit stays *under* the panel tone: a per-cell flicker on top of a per-cell
         // tone is exactly the camo the brief wants gone.
-        const grit = pv * (1 + (h1 - 0.5) * 0.10);
+        const grit = pv * (1 + (h1 - 0.5) * 0.06);
         // Worked-vs-natural separation: a carved wheel line is scoured to its pale
         // aggregate and pressed dark, the natural verge next to it is pushed greener,
         // so the racing line reads instantly against the grass (PLAN §10 criterion 1).
-        const sep = 1 + (pw - 0.5) * 0.14;
+        const sep = 1 + (pw - 0.5) * 0.10;
         cr = cr * grit * sep * (1 + ph + (h2 - 0.5) * 0.05);
         cg = cg * grit * (1 + (pw - 0.5) * 0.10);
         cb = cb * grit * sep * (1 - ph - (h2 - 0.5) * 0.05);

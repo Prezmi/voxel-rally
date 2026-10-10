@@ -55,8 +55,11 @@ export function makeTerrain(seed, biome = 'FOREST') {
 
   function blockAt(x, z, h, slope) {
     const m = moistureAt(x, z);
-    const rocky = noise3(x * 0.07, 3.3, z * 0.07, S + 555) > 0.52;
-    if (rocky) return BLOCK.STONE;
+    // Rock only breaks out where the ground is actually steep. The old field was a
+    // ~14 m value-noise with no slope term, so grey stone slabs littered the flat
+    // forest floor as pale near-white plates (review frame shots/pregen-check.png,
+    // FAULT 2). Under a forest canopy the floor is leaf litter and earth, not rock.
+    const rocky = slope > 0.45 && noise3(x * 0.07, 3.3, z * 0.07, S + 555) > 0.62;
     switch (biome) {
       case 'MOUNTAIN':
         if (h > 58) return BLOCK.SNOW;
@@ -79,7 +82,10 @@ export function makeTerrain(seed, biome = 'FOREST') {
       default:
         if (h < 18) return m > 0.6 ? BLOCK.MUD : BLOCK.DIRT;
         if (slope > 0.58) return BLOCK.DIRT;
-        return voronoi2(x * 0.07, z * 0.07, S + 307, 1) < 0.12 ? BLOCK.GRAVEL : BLOCK.GRASS;
+        // Forest floor: one grass base tone with small patches of dark disturbed earth
+        // (fallen branches / leaf litter reads). The old 12 % pale GRAVEL scatter is
+        // what read as snow/litter between the trees.
+        return voronoi2(x * 0.07, z * 0.07, S + 307, 1) < 0.06 ? BLOCK.DIRT : BLOCK.GRASS;
     }
   }
 
