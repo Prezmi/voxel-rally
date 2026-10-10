@@ -87,13 +87,19 @@ export class Input {
       : clamp((held('steerLeft') ? 1 : 0) - (held('steerRight') ? 1 : 0), -1, 1);
     if (settings.keyboardAsPad) {
       // First-order ramp: the same response a wheel with a real rate limit gives.
+      // The ramp keeps its own un-inverted state (`_steerRaw`): ramping on the *inverted*
+      // output made `want - s.steer` flip sign every sample, so an inverted steering wheel
+      // oscillated instead of turning. Only the value handed to the car is inverted.
       const rate = 1000 / Math.max(20, settings.steerRampMs);
-      const d = want - s.steer;
+      const cur = this._steerRaw === undefined ? s.steer : this._steerRaw;
+      const d = want - cur;
       const step = Math.sign(d) * Math.min(Math.abs(d), rate * dt);
-      s.steer += step;
-      if (Math.abs(s.steer) < settings.deadzone && want === 0) s.steer = 0;
+      this._steerRaw = cur + step;
+      if (Math.abs(this._steerRaw) < settings.deadzone && want === 0) this._steerRaw = 0;
+      s.steer = this._steerRaw;
     } else {
       s.steer = want;
+      this._steerRaw = want;
     }
     if (settings.invertSteer) s.steer = -s.steer;
     t.steerVisual = s.steer;   // the pad knob shows the value the car got
@@ -107,5 +113,5 @@ export class Input {
     if (dir > 0) this._shiftUp++; else this._shiftDown++;
   }
 
-  releaseAll() { this.down.clear(); this.touch.releaseAll(); this.state.steer = 0; }
+  releaseAll() { this.down.clear(); this.touch.releaseAll(); this.state.steer = 0; this._steerRaw = 0; }
 }

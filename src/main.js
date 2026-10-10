@@ -26,7 +26,7 @@ import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
 import { startPerfHarness } from './debug/perf-harness.js';
 import { DT } from './core/time.js';
-import { settings, applyDifficulty, qualityPreset, QUALITY } from './core/settings.js';
+import { settings, applyDifficulty, qualityPreset, QUALITY, loadSettings, saveSettings } from './core/settings.js';
 
 // Boot-time yield: the loading steps hand the frame back to the browser so the
 // boot text updates. In shot mode (--frames) a headless browser barely ticks
@@ -59,6 +59,10 @@ function params() {
   // Read *after* the quality preset below so the flag always wins.
   const postFlag = q.get('post');
   // ?hud=FULL|MIN|OFF: HUD density (CMR "Game Displays"), for shots and for testing.
+  // Returning player first: restore the persisted payload, migrated + tagged, so an
+  // old implicit steer invert can never land on top of the corrected mapping. Every
+  // URL flag below wins over a stored value.
+  loadSettings();
   const hudMode = (q.get('hud') || '').toUpperCase();
   if (hudMode === 'MIN' || hudMode === 'MINIMAL') settings.hudMode = 'MINIMAL';
   else if (hudMode === 'OFF') settings.hudMode = 'OFF';
@@ -68,6 +72,11 @@ function params() {
   // ?perftest=1: the in-game perf harness (src/debug/perf-harness.js). Off unless the
   // flag is present, so nothing here ever runs in a normal game.
   const perftest = q.get('perftest') === '1';
+  // ?steer=<-1..1> shot hook: pin an analog steer for the whole drive and hand the
+  // lateral loop over to it, so a headless frame proves which way a sign turns the car.
+  const steerRaw = q.get('steer');
+  const steerForce = steerRaw !== null && steerRaw !== '' && Number.isFinite(Number(steerRaw))
+    ? Math.max(-1, Math.min(1, Number(steerRaw))) : null;
   // ?q=LOW|MED|HIGH picks the quality preset before the renderer is built, so the
   // quality tiers are testable from a headless shot (docs/07 §Budżety).
   const qName = (q.get('q') || '').toUpperCase();
@@ -87,7 +96,7 @@ function params() {
     autoStart, shotBoot, menuScreen,
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
-    surfaceKey, frames, rain, cam, ref, tod, stats, perftest,
+    surfaceKey, frames, rain, cam, ref, tod, stats, perftest, steerForce,
   };
 }
 
@@ -195,12 +204,20 @@ async function main() {
     } else if (it.act === 'cycle:touchHandedness') {
       settings.touchHandedness = settings.touchHandedness === 'left' ? 'right' : 'left';
       input.touch.setHandedness(settings.touchHandedness);
+    } else if (it.act === 'cycle:invertSteer') {
+      // KIEROWNICA NORMALNA <-> ODWROTNA. input.sample() re-reads this every frame, so
+      // it is live; saveSettings() writes it explicitly so no stored payload can ever
+      // hold it implicitly again.
+      settings.invertSteer = !settings.invertSteer;
+      hud.boot(`kierownica: ${settings.invertSteer ? 'odwrotna' : 'normalna'}`);
+      setTimeout(() => hud.boot(null), 1800);
     } else if (it.act === 'quality') {
       const q = (settings.quality + 1) % 3;
       qualityPreset(q);
       renderer.setQuality(q);
     }
     rally.refreshMenu();          // a toggle row re-labels itself (wł./wył.)
+    if (/^(toggle:|cycle:|quality$)/.test(it.act)) saveSettings();   // persist immediately
   }
   // START: a different etap means a different stage, so reload with ?biome=... and
   // land straight in the countdown; otherwise the frozen clock just starts running.
@@ -288,6 +305,16 @@ async function main() {
     return driveIn;
   }
 
+  // ?steer= shot hook: the pure-pursuit driver writes driveIn.steer (line 285) and so
+  // overwrites anything else a shot tried to force. Pinning it here, with the driver's
+  // own throttle/brake/handbrake kept, is the only way to get "steer = -0.8 all the way
+  // down the straight" into a reproducible frame.
+  function pilot(i) {
+    const p = autoDrive(i);
+    if (cfg.steerForce !== null) { p.steer = cfg.steerForce; p.handbrake = 0; }
+    return p;
+  }
+
   // ---- controls (docs/06 §5) ----
   input.on((code) => {
     if (code === 'KeyC') {
@@ -359,6 +386,10 @@ async function main() {
       const driving = rally.driving();
       const smp = input.sample(dt);
       if (!driving && !cfg.perftest) { smp.throttle = 0; smp.brake = 0; smp.steer = 0; smp.handbrake = 1; }
+      if (cfg.steerForce !== null && driving) {   // ?steer= live hook
+        smp.steer = cfg.steerForce;
+        if (!smp.throttle && !smp.brake) smp.throttle = 0.85;
+      }
       if (cfg.perftest) {                          // harness pilot, flag-gated
         simTick++;
         const p = autoDrive(simTick);
@@ -384,10 +415,13 @@ async function main() {
       // drive hears is the note the first drive heard (PLAN.md §8 #7).
       if (driving) voice.advance(ctx.arc, dt);
     },
-    render(alpha) {
+    render(alpha, frameDt) {
       syncCarMesh(view, car, alpha, dirt);
       stream.update(car.body.pos, 6);
-      view3d.update(car, alpha * DT + DT, settings.cameraMode);
+      // Camera smoothing runs on the frame's (already clamped) dt, not on a fixed
+      // DT per rendered frame: at 120 Hz a per-frame DT advanced the springs twice
+      // as much wall-clock time as at 60 Hz.
+      view3d.update(car, frameDt || DT, settings.cameraMode);
       renderer.fitShadow(car.body.pos);
       renderer.render();
       dirt.lens.setAmount(settings.lensDirt);
@@ -398,9 +432,12 @@ async function main() {
       // A throwing debug overlay must not stop the game: an exception here escapes
       // into the rAF callback and kills the loop (black viewport, HUD only).
       try {
-        hud.tick(1 / 60, { ...ctx, loop: l });
+        // HUD/menu timers run on accumulated SIM time, never on a per-frame 1/60:
+        // a 120 Hz display used to fade menus and tick the stage clock twice as fast.
+        const simDt = l.time.frameSimDt;
+        hud.tick(simDt, { ...ctx, loop: l });
         framePads();
-        rally.update(1 / 60, { car, stage: stageRun, notes: notes.notes, voice, stageName });
+        rally.update(simDt, { car, stage: stageRun, notes: notes.notes, voice, stageName });
         if (rally.pendingActivate) { rally.pendingActivate = false; activateMenu(); }
       } catch (e) {
         hud.boot(`HUD: ${e.message}`);
@@ -425,7 +462,7 @@ async function main() {
     hud.boot(`tryb zrzutu: ${cfg.frames} kroków symulacji (1/120 s)\nnawierzchnia ${cfg.surfaceKey || cfg.biome}`);
     const idle = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
     for (let i = 0; i < cfg.frames; i++) {
-      car.setInput(autoDrive(i));
+      car.setInput(pilot(i));
       car.step(DT);
       dirt.step(car, DT);
       stageRun.step(DT, car);                 // the rally loop runs in shot mode too

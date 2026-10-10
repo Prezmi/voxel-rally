@@ -16,6 +16,10 @@
      impossible outright, so the browser chrome cannot slide back in mid-run. */
   html {
     height: 100%; overflow: hidden; background: #0b0d10;
+    /* the long-press selection popup is offered by the ROOT element: the callout /
+       user-select rules have to be on html itself, not only on body and the children. */
+    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+    -webkit-user-drag: none;
     touch-action: none; overscroll-behavior: none;
   }
   body {
@@ -92,6 +96,7 @@
   #rally .menu-item {
     position: absolute; padding: 0; border: 0; background: none;
     min-width: 72px; min-height: 72px;
+    -webkit-user-select: none; user-select: none; -webkit-user-drag: none;
     font-size: 1px; line-height: 1px; color: transparent; cursor: pointer;
     touch-action: manipulation; -webkit-tap-highlight-color: transparent;
   }

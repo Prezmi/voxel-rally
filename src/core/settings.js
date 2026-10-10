@@ -71,6 +71,71 @@ export function applyDifficulty(name) {
   settings.assists = { ...DIFFICULTY_ASSISTS[name] };
 }
 
+// ---------------------------------------------------------------- persistence
+// docs/06 §2 planned a `core/save.js`; there is none, so the settings payload lives
+// here. The storage key is TAGGED with a schema number, because an untagged / older
+// payload may carry assumptions the current mapping does not share, and `invertSteer`
+// is the case that matters. Pre-v2 builds never stored `invertSteer` explicitly, so a
+// legacy payload has no opinion about the sign; letting an old payload land on top of
+// the corrected mapping would invert steering for exactly the returning players who
+// now report it inverted. A legacy payload restores invertSteer ONLY when it states
+// it explicitly as a boolean, otherwise the explicit default (false) wins, and every
+// save writes the field explicitly so it can never again be implicit.
+export const SETTINGS_SCHEMA = 2;
+export const SETTINGS_KEY = 'mc-rally.settings.v2';
+export const LEGACY_SETTINGS_KEY = 'mc-rally.v1';   // the untagged docs/06 §2 key
+
+const PERSISTED_KEYS = ['quality', 'shadows', 'drawDistance', 'blockTiles', 'difficulty',
+  'assists', 'keyboardAsPad', 'deadzone', 'invertSteer', 'cameraMode', 'hudMode',
+  'showCoDriverArrows', 'touchOverlay', 'touchHandedness', 'lensDirt', 'audioEnabled', 'masterGain'];
+const DEFAULTS = (() => {
+  const d = {};
+  for (const k of PERSISTED_KEYS) d[k] = settings[k];
+  return d;
+})();
+
+/** Any stored payload (untagged v1 or v2) -> an explicit, current one. */
+export function migrateSettings(raw) {
+  const out = { ...DEFAULTS };
+  if (!raw || typeof raw !== 'object') return out;
+  for (const k of PERSISTED_KEYS) {
+    if (k === 'invertSteer') {
+      if (typeof raw.invertSteer === 'boolean') out.invertSteer = raw.invertSteer;
+      else if (typeof raw.steerInvert === 'boolean') out.invertSteer = raw.steerInvert;
+      else out.invertSteer = false;            // legacy implicit invert: dropped
+    } else if (raw[k] !== undefined && raw[k] !== null) out[k] = raw[k];
+  }
+  return out;
+}
+
+/** Restore a persisted payload onto `settings`. It can never introduce an invert. */
+export function loadSettings(storage = (typeof globalThis !== 'undefined' ? globalThis.localStorage : null)) {
+  if (!storage) return null;
+  let raw = null;
+  try {
+    const s = storage.getItem(SETTINGS_KEY);
+    raw = s ? JSON.parse(s) : null;
+    if (!raw) {                                  // first run under the tagged key
+      const legacy = storage.getItem(LEGACY_SETTINGS_KEY);
+      raw = legacy ? JSON.parse(legacy) : null;
+    }
+  } catch { raw = null; }
+  if (!raw) return null;                           // nothing stored: current defaults stand
+  const m = migrateSettings(raw);
+  for (const k of PERSISTED_KEYS) settings[k] = m[k];
+  if (raw) saveSettings(settings, storage);      // re-tag the migrated payload once
+  return m;
+}
+
+export function saveSettings(s = settings, storage = (typeof globalThis !== 'undefined' ? globalThis.localStorage : null)) {
+  if (!storage) return null;
+  const payload = { schema: SETTINGS_SCHEMA };
+  for (const k of PERSISTED_KEYS) payload[k] = s[k];
+  payload.invertSteer = !!s.invertSteer;         // always explicit, never implicit
+  try { storage.setItem(SETTINGS_KEY, JSON.stringify(payload)); } catch { /* quota / private mode */ }
+  return payload;
+}
+
 export function qualityPreset(q) {
   settings.quality = q;
   if (q === QUALITY.LOW) {

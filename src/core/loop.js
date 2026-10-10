@@ -25,11 +25,18 @@ export class FrameLoop {
     const n = this.time.begin(nowMs);
     const s0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     for (let i = 0; i < n; i++) this.stepSim(DT);
+    // The accumulator has to be paid back here. Without it `acc` grows every
+    // frame, floor(acc/DT) saturates at MAX_STEPS_PER_FRAME and the sim advance
+    // becomes MAX_STEPS_PER_FRAME * DT * fps, i.e. frame-rate dependent (a 120 Hz
+    // phone ran the whole stage twice as fast as a 60 Hz one).
+    this.time.consume(n);
     const s1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     this.simMs = this.simMs * 0.9 + (s1 - s0) * 0.1;
 
     const r0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    this.render(this.time.alpha);
+    // Render-side smoothing (camera springs) gets the clamped frame dt, so it is
+    // identical at 60 and 120 Hz; nothing outside stepSim sees a raw dt.
+    this.render(this.time.alpha, this.time.rawDt);
     const r1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     this.renderMs = this.renderMs * 0.9 + (r1 - r0) * 0.1;
 

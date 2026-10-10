@@ -5,6 +5,8 @@
 // One console line every 2 s with: fps, frame ms mean/p95, draw calls,
 // triangles, resident terrain chunks, prop instances, tile instances.
 // A final line starting PERF_SUMMARY carries the fps at 10 s / 30 s / 60 s.
+import { DT } from '../core/time.js';
+
 const MARKS = [10000, 30000, 60000];
 
 // The same lines go to the console (the ask) and, under the flag only, into a
@@ -35,6 +37,11 @@ export function startPerfHarness({ loop, renderer, stream, dirt, durationMs = 70
   let ended = false;
   let lastLog = 0;
   let lastFps = 0;                   // fps of the most recent completed window
+  // Sim advance, counted where it actually happens (a stepSim wrapper), so the
+  // number is honest even if the loop forgets to pay back its accumulator.
+  let simSteps = 0, simStepsAt = 0;
+  const stepFn = loop.stepSim;
+  loop.stepSim = (dt) => { simSteps++; stepFn(dt); };
 
   const p95 = () => {
     if (!winD.length) return 0;
@@ -57,13 +64,18 @@ export function startPerfHarness({ loop, renderer, stream, dirt, durationMs = 70
     if (t - lastLog >= 2000 && winFrames >= 3) {   // one line / 2 s
       lastLog = t;
       const mean = winSum / winFrames;
+      const ss = (simSteps - simStepsAt) * DT / Math.max(1e-3, winSum / 1000);
       const st = stream.stats;
+      // The rate-independence check: sim seconds advanced per real second. Must sit
+      // at ~1.00 whatever the display (60 Hz, 120 Hz, a hitching software renderer).
       emit(`PERF t=${(t / 1000).toFixed(1)}s fps=${(1000 / mean).toFixed(1)} ` +
+        `sim=${ss.toFixed(3)} s/s ` +
         `frame=${mean.toFixed(2)}/${p95().toFixed(2)}ms calls=${renderer.info.calls} ` +
         `tris=${renderer.info.tris} stris=${st.tris} chunks=${st.chunks} props=${st.props} tiles=${st.tiles} ` +
         `remesh=${st.remeshes} gen=${st.generated} dirtMs=${dirt.stats.msMean.toFixed(2)}`);
       winFrames = 0; winSum = 0; winD.length = 0;
       lastFps = 1000 / mean;
+      simStepsAt = simSteps;
     }
 
     if (!ended && t >= durationMs) {

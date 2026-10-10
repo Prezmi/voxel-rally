@@ -8,7 +8,8 @@ import { Vehicle } from '../car/vehicle.js';
 import { VoxelWorld } from '../world/chunk.js';
 import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE } from '../car/car-params.js';
-import { DT } from '../core/time.js';
+import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
+import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES } from '../render/car-asset.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
@@ -19,7 +20,7 @@ import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
-import { settings } from '../core/settings.js';
+import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 
 const G = 9.81;
@@ -526,6 +527,37 @@ function testTouch() {
   input.touch.enabled = true;              // DOM overlay off, state machine on
   const settle = () => { for (let k = 0; k < 60; k++) input.sample(DT); };
 
+  // ---- one ground truth for the steer sign, measured in the SIM ----------------
+  // src/debug/steer-truth.js: steer = +1 for 2 s -> yawDelta +1.236 rad, body-right
+  // displacement -15.6 m => POSITIVE steer is a LEFT turn. Every input path has to
+  // land on that sign; settings.invertSteer (default false) is the ONLY place a sign
+  // may be flipped, so no mapping may pre-compensate.
+  const latOf = (press) => {
+    const inp = new Input();
+    inp.touch.enabled = true;
+    const car = makeCar(new FlatWorld(SURF.ASPHALT), {});
+    car.placeAt(0, 0, 0);
+    car.body.vel.x = 60 / 3.6;
+    car.wheels.forEach((w) => { w.omega = (60 / 3.6) / w.rEff; });
+    const r0 = { x: car.body.right.x, z: car.body.right.z }, p0 = { x: car.body.pos.x, z: car.body.pos.z };
+    press(inp);
+    for (let k = 0; k < 120; k++) { car.setInput(inp.sample(DT)); car.step(DT); }
+    const lat = (car.body.pos.x - p0.x) * r0.x + (car.body.pos.z - p0.z) * r0.z;  // + = RIGHT
+    inp.touch.steerVisual = inp.state.steer;
+    return { lat, knob: knobOffset(inp.touch.steerVisual, 40), steer: inp.state.steer };
+  };
+  const kLeft = latOf((i) => i.down.add('steerLeft'));                       // keyboard A / ArrowLeft
+  const gLeft = latOf((i) => { i.down.add('steerLeft'); i.down.delete('steerRight'); }); // pad left -> same action state
+  const tLeft = latOf((i) => i.touch.setAction('steerLeft', true));           // touch pad button
+  const aLeft = latOf((i) => i.touch.setSteerRaw(dragToSteer(-80, 80)));      // thumb dragged left
+  check('steer sign: keyboard, pad and touch left all turn the car the same way',
+    kLeft.lat < 0 && gLeft.lat < 0 && tLeft.lat < 0 && aLeft.lat < 0 &&
+    Math.sign(kLeft.lat) === Math.sign(tLeft.lat) && Math.sign(kLeft.lat) === Math.sign(aLeft.lat),
+    `lat kb=${kLeft.lat.toFixed(1)} pad=${gLeft.lat.toFixed(1)} touch=${tLeft.lat.toFixed(1)} analog=${aLeft.lat.toFixed(1)}`);
+  check('steer sign: the pad knob moves the way the car turns',
+    kLeft.steer > 0 && aLeft.steer > 0 && Math.sign(kLeft.knob) === Math.sign(kLeft.lat),
+    `steer=${kLeft.steer} knobPx=${kLeft.knob.toFixed(1)} lat=${kLeft.lat.toFixed(1)} (knob<0 = knob left = car left)`);
+
   input.touch.setAction('steerLeft', true);
   input.touch.setAction('throttle', true);
   settle();
@@ -813,6 +845,145 @@ function testSteerSignChain() {
     `carL.z=${carLeft.z.toFixed(2)} carL.yaw=${carLeft.yaw.toFixed(3)} carR.z=${carRight.z.toFixed(2)}`);
 }
 testSteerSignChain();
+
+// ------------------------------------------------- persisted steer sign / KIEROWNICA
+// The player-facing symptom was "steering is inverted on desktop" while the sim ground
+// truth (T15) says positive steer is LEFT and no mapping pre-compensates. The only
+// place a sign may flip is settings.invertSteer, so the suspect is a stored payload:
+// an untagged pre-v2 payload carries no explicit invertSteer, and restoring such an
+// implicit invert on top of the corrected mapping inverts it for returning players only.
+// Last test in the file: it mutates the shared `settings`, so nothing may run after it.
+function testSteerSettingPersistence() {
+  const mem = () => { const m = new Map(); return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k), store: m }; };
+
+  // ---- 1. legacy payload, no explicit invertSteer -> must restore false ----------
+  const legacy = mem();
+  legacy.setItem(LEGACY_SETTINGS_KEY, JSON.stringify({
+    quality: 2, hudMode: 'FULL', touchOverlay: 'on', assists: { abs: true, tc: true },
+  }));
+  settings.invertSteer = true;                     // dirty in-memory state, must not survive
+  const migrated = loadSettings(legacy);
+  const legacyRestoresFalse = settings.invertSteer === false && migrated.invertSteer === false;
+  const retagged = JSON.parse(legacy.store.get(SETTINGS_KEY) || 'null');
+  const retaggedExplicit = !!retagged && retagged.schema === 2 && retagged.invertSteer === false;
+
+  // an *explicit* old value is still honoured - the fix drops implicit inverts only
+  const explicit = mem();
+  explicit.setItem(LEGACY_SETTINGS_KEY, JSON.stringify({ invertSteer: true }));
+  const honoured = loadSettings(explicit).invertSteer === true && settings.invertSteer === true;
+
+  // ---- 2. save always writes the field explicitly ------------------------------
+  const store = mem();
+  settings.invertSteer = false;
+  saveSettings(settings, store);
+  const saved = JSON.parse(store.store.get(SETTINGS_KEY));
+  const savedExplicit = saved.schema === 2 && typeof saved.invertSteer === 'boolean' && saved.invertSteer === false;
+  settings.invertSteer = true;
+  saveSettings(settings, store);
+  const roundTrip = loadSettings(store).invertSteer === true && settings.invertSteer === true;
+  settings.invertSteer = false;
+  const clean = mem();
+  const freshDefaults = loadSettings(clean) === null && settings.invertSteer === false
+    && migrateSettings(null).invertSteer === false;
+
+  // ---- 3. the KIEROWNICA row toggles it, live and visibly ---------------------
+  const SEED = 99, LEN = 700;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const run = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 60 });
+  const carStub = { body: { pos: { x: road.x[12], z: road.z[12] }, groundSpeed: 0 }, wheels: [] };
+  const rally = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  rally.openMenu();
+  rally.focus = rally.rowIndex('screen:settings'); rally.activate();
+  const rowIdx = rally.rowIndex('cycle:invertSteer');
+  const labelOf = () => (rally._rows[rowIdx] ? rally._rows[rowIdx].label : '—');
+  const labelledNormal = rowIdx >= 0 && labelOf().includes('KIEROWNICA') && labelOf().includes('NORMALNA');
+  // Exactly what main.js activateMenu() does with the row the HUD hands back.
+  const tapRow = (idx) => {
+    rally.focus = idx;
+    const it = rally.activate();
+    if (it && it.act === 'cycle:invertSteer') { settings.invertSteer = !settings.invertSteer; saveSettings(settings, store); }
+    rally.refreshMenu();
+    return it;
+  };
+  settings.invertSteer = false;
+  tapRow(rowIdx);
+  const toggledInvert = settings.invertSteer === true && labelOf().includes('ODWROTNA');
+  const persisted = JSON.parse(store.store.get(SETTINGS_KEY)).invertSteer === true;
+  tapRow(rowIdx);
+  const toggledBack = settings.invertSteer === false && labelOf().includes('NORMALNA');
+
+  // ---- 4. it reaches the car immediately (input.sample re-reads it) -----------
+  const input = new Input();
+  input.down.add('steerLeft');
+  for (let k = 0; k < 40; k++) input.sample(DT);
+  const normalSign = Math.sign(input.state.steer);
+  settings.invertSteer = true;
+  for (let k = 0; k < 40; k++) input.sample(DT);
+  const invertedSign = Math.sign(input.state.steer);
+  settings.invertSteer = false;
+  const rowIsLive = normalSign > 0 && invertedSign < 0;
+
+  const ok = legacyRestoresFalse && retaggedExplicit && honoured && savedExplicit && roundTrip
+    && freshDefaults && labelledNormal && toggledInvert && persisted && toggledBack && rowIsLive;
+  check('T16 a legacy settings payload with no explicit invertSteer restores false, and the KIEROWNICA row toggles it + persists',
+    ok, `legacyFalse=${legacyRestoresFalse} retagged=${retaggedExplicit} explicitHonoured=${honoured} `
+      + `savedExplicit=${savedExplicit} roundTrip=${roundTrip} fresh=${freshDefaults} row=${labelledNormal} `
+      + `toggle=${toggledInvert} persisted=${persisted} back=${toggledBack} live=${rowIsLive} (${labelOf()})`);
+}
+testSteerSettingPersistence();
+
+// ---------------------------------------------------------------------------
+// Frame-rate independence (docs/06 §3). The fixed-step accumulator has to be paid
+// back every frame: while `consume()` was never called, acc grew without bound,
+// floor(acc/DT) saturated at MAX_STEPS_PER_FRAME and the sim advance became
+// MAX_STEPS_PER_FRAME * DT * fps — a 120 Hz phone ran the stage twice as fast as
+// a 60 Hz one and the car left the line far harder.
+function testFrameRateIndependence() {
+  const SEED = 71, LEN = 700, WALL = 14;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const runRate = (hz) => {
+    const world = new FlatWorld(SURF.ASPHALT);
+    const car = makeCar(world, {});
+    car.placeAt(0, 0, 0);
+    const stage = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 60 });
+    const inp = { throttle: 0.85, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+    const loop = new FrameLoop({
+      stepSim(dt) { car.setInput(inp); car.step(dt); stage.step(dt, car); },
+      render() {},
+    });
+    const step = 1000 / hz;
+    let last = 0;
+    for (let i = 1; i <= Math.round(WALL * hz); i++) { last = i * step; loop.frame(last); }
+    // A pathological 0.25 s hitch must not advance more than the substep cap.
+    loop.frame(last + 250);
+    const capStep = loop.time.frameSimDt;
+    return {
+      dist: Math.abs(car.body.pos.x),
+      elapsed: stage.timing.elapsed,
+      countdown: stage.countdown,
+      state: stage.state,
+      steps: loop.time.stepCount,
+      capStep,
+      capOk: capStep <= MAX_STEPS_PER_FRAME * DT + 1e-9,
+    };
+  };
+  const a = runRate(60), b = runRate(120);
+  const rel = Math.abs(a.dist - b.dist) / Math.max(a.dist, b.dist);
+  const distOk = rel <= 0.01 && a.dist > 30;
+  const clockOk = Math.abs(a.elapsed - b.elapsed) <= 0.02 && a.elapsed > 5 && a.state === b.state;
+  const cdOk = Math.abs(a.countdown - b.countdown) <= 1e-6;
+  check('T17 the fixed-step loop advances the same distance and stage clock at 60 Hz and 120 Hz, and a 0.25 s hitch stays under the substep cap',
+    distOk && clockOk && cdOk && a.capOk && b.capOk,
+    `dist60=${a.dist.toFixed(2)}m dist120=${b.dist.toFixed(2)}m rel=${(rel * 100).toFixed(2)}% `
+    + `clock60=${a.elapsed.toFixed(3)}s clock120=${b.elapsed.toFixed(3)}s countdown=${a.countdown.toFixed(3)}/${b.countdown.toFixed(3)} `
+    + `steps60=${a.steps} steps120=${b.steps} hitchAdvance=${a.capStep.toFixed(4)}s cap=${(MAX_STEPS_PER_FRAME * DT).toFixed(4)}s`);
+}
+testFrameRateIndependence();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

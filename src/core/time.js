@@ -11,6 +11,8 @@ export class TimeState {
     this.last = 0;
     this.alpha = 0;          // 0..1 position between prevSim and lastSim
     this.simTime = 0;        // deterministic sim clock (drives stage timing)
+    this.rawDt = 0;          // this frame's wall dt, already clamped to MAX_FRAME_DT
+    this.frameSimDt = 0;     // sim seconds this frame actually advanced (n * DT)
     this.stepCount = 0;
     this.timeScale = 1;      // slow-mo for debug / replay
     this.paused = false;
@@ -26,7 +28,8 @@ export class TimeState {
     this.last = nowMs;
     if (dt < 0) dt = 0;
     if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;   // load hitch / breakpoint guard
-    if (this.paused) { this.alpha = 0; return 0; }
+    this.rawDt = dt;                             // never hand an unclamped dt to logic
+    if (this.paused) { this.alpha = 0; this.frameSimDt = 0; return 0; }
     this.acc += dt * this.timeScale;
     let n = Math.floor(this.acc / DT);
     if (n > MAX_STEPS_PER_FRAME) n = MAX_STEPS_PER_FRAME;  // never spiral
@@ -34,6 +37,7 @@ export class TimeState {
   }
 
   consume(n) {
+    this.frameSimDt = n * DT;
     this.acc -= n * DT;
     if (this.acc < 0) this.acc = 0;
     this.alpha = this.acc / DT;

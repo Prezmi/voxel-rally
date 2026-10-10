@@ -234,16 +234,33 @@ export function createTouchInput() {
       }
       if (!document.querySelector('.safety')) {
         const s = document.createElement('div'); s.className = 'safety';
+        s.draggable = false; s.setAttribute('unselectable', 'on');
         s.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:env(safe-area-inset-bottom,0px);z-index:11;pointer-events:none';
         document.body.appendChild(s);
       }
+      // Long-press selection / the copy popup / the context menu: a thumb parked on a
+      // pad for two seconds used to raise them. Killed on the canvas, on the overlay
+      // and on the body, plus selectstart at the document (the root element is what
+      // offers the selection, so the CSS on the children alone does not help).
+      const swallowMenu = (e) => { e.preventDefault(); return false; };
+      for (const t of [document.body, document.getElementById('c')]) t?.addEventListener('contextmenu', swallowMenu, { passive: false });
+      document.addEventListener('selectstart', (e) => {
+        if (e.target?.closest?.('input,textarea')) return;
+        e.preventDefault(); return false;
+      }, { passive: false });
+      document.body.addEventListener('selectstart', swallowMenu, { passive: false });
       const root = document.createElement('div');
       root.id = 'touch-ui'; root.className = 'on';
       root.innerHTML = TEMPLATE;
       document.body.appendChild(root);
       this.root = root;
       // Labels are painted, not typeset: no system/mono font anywhere in the overlay.
+      root.draggable = false; root.setAttribute('unselectable', 'on');
+      root.addEventListener('contextmenu', swallowMenu, { passive: false });
+      root.addEventListener('selectstart', swallowMenu, { passive: false });
       for (const btn of root.querySelectorAll('button')) {
+        btn.draggable = false; btn.setAttribute('unselectable', 'on');
+        btn.addEventListener('contextmenu', (e) => e.preventDefault());
         const spec = LABELS[btn.dataset.action];
         if (spec) pixelLabel(btn, spec, spec.icon ? '#1E1E1E' : '#1E1E1E');
       }

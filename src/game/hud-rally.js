@@ -329,6 +329,9 @@ export class RallyHud {
       rows.push({ label: `Sterowanie dotykiem: ${TOUCH_LABEL[settings.touchOverlay] || 'auto'}`, act: 'cycle:touchOverlay' });
       rows.push({ label: `Kciuk sterujący: ${settings.touchHandedness === 'left' ? 'lewy' : 'prawy'}`, act: 'cycle:touchHandedness' });
       rows.push({ label: `Strzałki pilota: ${on(settings.showCoDriverArrows)}`, act: 'toggle:showCoDriverArrows' });
+      // KIEROWNICA: the only place a steer sign may flip (src/game/input.js). Explicit
+      // in the UI and in the save, so a stale stored payload can never invert it silently.
+      rows.push({ label: `KIEROWNICA: ${settings.invertSteer ? 'ODWROTNA' : 'NORMALNA'}`, act: 'cycle:invertSteer' });
       rows.push({ label: `HUD: ${MODE_LABEL[this.mode]}`, act: 'hudmode' });
       rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });
       rows.push({ label: 'Wróć  (esc)', act: 'back' });
@@ -356,6 +359,9 @@ export class RallyHud {
       if (i < rows.length) {
         el.textContent = rows[i].label;
         el.className = 'menu-item';
+        // A held thumb on a menu row must never raise the text-selection popup.
+        el.draggable = false; el.setAttribute('unselectable', 'on');
+        el.addEventListener('contextmenu', (e) => e.preventDefault());
         this.menu.push({ el, label: rows[i].label, act: rows[i].act });
       } else { el.textContent = ''; el.className = 'menu-item off'; }
     }
