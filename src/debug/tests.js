@@ -24,8 +24,9 @@ import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
-import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP } from '../world/props.js';
+import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, buildGateGeometry, GATE_PLANES } from '../world/props.js';
 import { buildCarveIndex } from '../world/road-carve.js';
+import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
 
 const G = 9.81;
@@ -1193,6 +1194,69 @@ function testStraightLinePerformance() {
   return { t100, top };
 }
 testStraightLinePerformance();
+
+// ---------------------------------------------------------------- test 21
+// The checkpoint / start board must be solid geometry, not a sandwich of plates. Every
+// past version of it (and the gantry that got fixed first) stacked thin coloured plates
+// over the same span with their faces on the same plane, and the depth pass dithered the
+// whole board into a white/red checkerboard. This checks the geometry the way the depth
+// buffer sees it: no two differently-coloured faces may sit on the same plane (or within
+// 10 cm of it) while their footprints overlap.
+function testGateBoardIsSolid() {
+  // Geometry without a WebGL context: the fake BufferGeometry keeps the attribute arrays
+  // that GeoBuilder.toGeometry hands over, which is all this needs.
+  class FakeGeo {
+    setAttribute(n, a) { this[n] = a.array; }
+    setIndex(i) { this.idx = i; }
+    computeBoundingSphere() {}
+  }
+  const THREE_STUB = { BufferGeometry: FakeGeo, Float32BufferAttribute: class { constructor(a) { this.array = a; } } };
+  const geo = buildGateGeometry(GeoBuilder, THREE_STUB);
+  const pos = geo.position, nrm = geo.normal, col = geo.color, idx = geo.idx;
+  const faces = [];
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+    const n = [nrm[a], nrm[a + 1], nrm[a + 2]];
+    const d = n[0] * pos[a] + n[1] * pos[a + 1] + n[2] * pos[a + 2];
+    const rgb = [(col[a] + col[b] + col[c]) / 3, (col[a + 1] + col[b + 1] + col[c + 1]) / 3, (col[a + 2] + col[b + 2] + col[c + 2]) / 3];
+    let min = [pos[a], pos[a + 1], pos[a + 2]], max = [pos[a], pos[a + 1], pos[a + 2]];
+    for (const k of [b, c]) for (let ax = 0; ax < 3; ax++) {
+      min[ax] = Math.min(min[ax], pos[k + ax]); max[ax] = Math.max(max[ax], pos[k + ax]);
+    }
+    faces.push({ n, d, rgb, min, max });
+  }
+  const EPS = 0.10;                       // m: depth resolution at the 150 m this reads from
+  let clashes = 0, minGap = Infinity;
+  for (let i = 0; i < faces.length; i++) {
+    for (let j = i + 1; j < faces.length; j++) {
+      const A = faces[i], B = faces[j];
+      if (A.n[0] * B.n[0] + A.n[1] * B.n[1] + A.n[2] * B.n[2] < 0.999) continue;
+      const gap = Math.abs(A.d - B.d);    // same-facing planes: this IS their separation
+      // Footprint overlap must be measured IN the plane, on the two axes across it:
+      // comparing the plane-normal axis calls every pair of separated boxes disjoint.
+      const axisOf = (n) => (Math.abs(n[0]) > 0.5 ? 0 : (Math.abs(n[1]) > 0.5 ? 1 : 2));
+      const na = axisOf(A.n), nb = axisOf(B.n);
+      let overlap = true;
+      for (let ax = 0; ax < 3; ax++) {
+        if (ax === na || ax === nb) continue;
+        if (A.max[ax] < B.min[ax] || B.max[ax] < A.min[ax]) overlap = false;
+      }
+      if (!overlap) continue;
+      const dc = Math.hypot(A.rgb[0] - B.rgb[0], A.rgb[1] - B.rgb[1], A.rgb[2] - B.rgb[2]);
+      if (dc < 0.06) continue;            // same colour: a coincident seam is invisible
+      minGap = Math.min(minGap, gap);
+      if (gap < EPS) clashes++;
+    }
+  }
+  const tris = idx.length / 3;
+  const xs = pos.filter((_, k) => k % 3 === 0);
+  const span = Math.max(...xs) - Math.min(...xs);
+  const ok = clashes === 0 && tris <= 420 && tris >= 240 && minGap >= EPS && span >= 11.3;
+  check('T21 checkpoint/start board is one solid core with bands through it: no two differently-coloured faces share a plane, no sheet sandwich',
+    ok, `faces=${faces.length} tris=${tris} clashes=${clashes} minGap=${minGap.toFixed(2)}m eps=${EPS}m `
+    + `span=${span.toFixed(1)}m planes=${Object.values(GATE_PLANES).join('/')}`);
+}
+testGateBoardIsSolid();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

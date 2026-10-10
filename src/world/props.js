@@ -656,45 +656,71 @@ export function buildTreeGeometries(GeoBuilder, THREE) {
   return geos;
 }
 
-/** Checkpoint gate: two posts at the road edge + a banner over the lane + lamps
- *  (PLAN §10 "checkpointy stoją przy drodze": a gate, not a map dot). Built to be
- *  read from ~150 m: 11 m span, 6 m tall, high-contrast chequering, a warm lamp
- *  panel the bloom pass picks up, pennants on top so the silhouette is a gate and
- *  not a signpost. Half-span 5.4 m clears the carriageway + SHOULDER. */
+/** Depth planes for the gate, in metres from the road plane along the lane axis.
+ *  A colour lives on exactly one plane, and no plane is shared by two colours whose
+ *  footprints overlap - the depth pass (near 0.25 / far 900) cannot separate faces
+ *  closer than about 12 cm at the 150 m this board has to read from. */
+export const GATE_PLANES = {
+  core: 0.14,     // the banner core, and the banded posts
+  band: 0.32,     // name blocks and lamps - proud of the core on both faces
+  rib: 0.26,      // the sub-board rib under the banner
+  beam: 0.46,     // the top beam and the lamp housings it hangs from
+};
+
+/** Checkpoint / start gate: two posts at the road edge + a banner over the lane +
+ *  lamps (PLAN §10 "checkpointy stoją przy drodze": a gate, not a map dot). Built to
+ *  be read from ~150 m: 11 m span, 6 m tall, high-contrast banding, a warm lamp panel
+ *  the bloom pass picks up, pennants on top so the silhouette is a gate and not a
+ *  signpost. Half-span 5.4 m clears the carriageway + SHOULDER.
+ *
+ *  Solidness: this is ONE solid core per element with the coloured bands running clean
+ *  THROUGH it, never a plate glued onto a plate. The previous build was a 0.12 m pale
+ *  core with a 0.05 m pale face plate at z 0.17 (its inner face landing exactly on the
+ *  core face at z 0.12), 0.06 m red tabs and 0.06 m dark name blocks at z 0.24, and a
+ *  0.30 m beam / 0.30 m lamp housing sharing the same z faces - 32 pairs of same-facing,
+ *  differently coloured faces sat within 2 cm of one plane across the same 10.7 m span,
+ *  which is what came back as a white/red checkerboard. Every element here is a solid
+ *  box, the coloured bands are full-depth (they enclose the core instead of standing on
+ *  it), and the only coplanar pairs left are same-colour or footprint-disjoint.
+ *  T21 enforces that on this geometry. */
 export function buildGateGeometry(GeoBuilder, THREE) {
   const g = new GeoBuilder();
   // post colour anchored down from 0xf3f5f8: a near-white 10.7 x 1.1 m banner plus 6 m
   // banded poles read as pale plates against the dark forest at a distance.
   const post = 0xcbb691, red = 0xb8362c, dark = 0x1c242c, warm = 0xe8b45c;
+  const CORE = GATE_PLANES.core, BAND = GATE_PLANES.band, RIB = GATE_PLANES.rib, BEAM = GATE_PLANES.beam;
   for (const s of [-1, 1]) {
-    // Post: 0.42 m square, 6.2 m tall, banded so it reads at distance.
-    g.box(s * 5.4, 3.1, 0, 0.21, 3.1, 0.21, post);
-    g.box(s * 5.4, 1.15, 0, 0.24, 0.45, 0.24, red);
-    g.box(s * 5.4, 2.65, 0, 0.24, 0.45, 0.24, red);
-    g.box(s * 5.4, 4.15, 0, 0.24, 0.35, 0.24, red);
-    // Guy wire / brace so the post has a base, not a floating stick.
+    // Post: 0.36 m square, 6.5 m tall, starting inside its own base pad so the pad top
+    // and the post bottom never share the ground plane. 0.36 m (not 0.42) also keeps the
+    // pale post 12 cm clear of the red band plane it stands next to. It starts at the top
+    // of the base pad and runs up past the pennant, so nothing floats or shares a face.
+    g.box(s * 5.4, 3.46, 0, 0.18, 3.14, 0.18, post);
+    // Bands are fatter than the post and enclose it - colour through the core.
+    g.box(s * 5.4, 1.15, 0, 0.30, 0.45, 0.30, red);
+    g.box(s * 5.4, 2.65, 0, 0.30, 0.45, 0.30, red);
+    g.box(s * 5.4, 4.15, 0, 0.30, 0.35, 0.30, red);
+    // The board's red ends are the posts themselves: this band runs 13 cm past the
+    // banner core in every direction, so the core butts into it instead of having a red
+    // plate pasted over its end.
+    g.box(s * 5.4, 5.10, 0, 0.30, 0.68, 0.30, red);
+    // Base pad so the post has a footing, not a floating stick.
     g.box(s * 5.4, 0.16, 0, 0.52, 0.16, 0.52, dark);
-    // Lamp: warm panel facing down the road, plus its housing.
-    g.box(s * 4.7, 5.28, 0, 0.42, 0.20, 0.30, dark);
-    g.box(s * 4.7, 5.02, 0, 0.32, 0.10, 0.22, warm);
+    // Lamp bank: a warm column inboard of the post band, sitting on the band plane and
+    // tied into the beam. The old warm panel sat inside a dark housing (0.22 m panel in a
+    // 0.30 m box), so an 11 cm sliver of it was ever visible from the road.
+    g.box(s * 4.70, 5.10, 0, 0.34, 0.68, BAND, warm);
     // Pennant on top of the post (moves in the wind of a passing car visually).
     g.boxRot(s * 5.4, 6.55, 0.34, 0.55, 0.30, 0.03, 0.25, s < 0 ? red : post);
   }
-  // Beam + banner across the carriageway. The old build stacked three near-coplanar
-  // slabs (pale plate z 0, red plate z 0.16, 1.1 m chequered tabs z 0.18) over the same
-  // 10.7 m span: the depth pass could not separate them and the whole banner came back
-  // as a white/red checkerboard. One solid plate per face now, every face at least 4 cm
-  // clear of the next, plus dark lettering blocks so it reads as a named start board.
-  g.box(0, 5.62, 0, 5.7, 0.24, 0.30, dark);
-  g.box(0, 5.10, 0, 5.35, 0.55, 0.12, post);            // solid banner plate (opaque)
-  // Lettering and end tabs are carried on BOTH faces: the gantry is placed with a
-  // road-tangent normal, so a single-sided board came back blank from the start line.
-  for (const sz of [-1, 1]) {
-    g.box(0, 5.10, sz * 0.17, 5.35, 0.55, 0.05, post);
-    for (const s of [-1, 1]) g.box(s * 4.95, 5.10, sz * 0.24, 0.40, 0.55, 0.06, red);
-    // Five dark name blocks across the plate, wide enough to read as text at 100 m.
-    for (let k = 0; k < 5; k++) g.box(-3.1 + k * 1.55, 5.10, sz * 0.24, 0.34, 0.24, 0.06, dark);
-  }
-  g.box(0, 4.28, 0.10, 2.6, 0.42, 0.06, dark);
+  // Beam + banner across the carriageway: one deep beam above, one solid core, and
+  // full-depth name blocks running through it. Nothing is a plate on a plate any more.
+  g.box(0, 5.75, 0, 5.46, 0.20, BEAM, dark);               // top beam, ends buried in the posts
+  g.box(0, 5.10, 0, 5.20, 0.55, CORE, post);             // solid banner core, 0.28 m
+  // Five dark name blocks across the core, wide enough to read as text at 100 m, and
+  // full-depth so they read as relief from either direction along the lane (the gate is
+  // placed on a road tangent, so it is seen from both sides over a run).
+  for (let k = 0; k < 5; k++) g.box(-3.1 + k * 1.55, 5.10, 0, 0.34, 0.24, BAND, dark);
+  // Sub-board rib under the banner, also full-depth instead of a 0.12 m sheet.
+  g.box(0, 4.28, 0, 2.6, 0.40, RIB, dark);
   return g.toGeometry(THREE);
 }
