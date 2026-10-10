@@ -40,6 +40,17 @@ const C = {
   GREEN: '#2E8B2E', RED: '#B4382E', ORANGE: '#C77B2A', BLUE: '#4C6EA0',
 };
 const MODE_LABEL = { FULL: 'pełny', MINIMAL: 'minimalny', OFF: 'wyłączony' };
+const QUAL_LABEL = { 0: 'niska', 1: 'średnia', 2: 'wysoka' };
+const TOUCH_LABEL = { auto: 'auto', on: 'włączone', off: 'wyłączone' };
+// Ekrany menu (modalne). Górny ekran stosu decyduje, czy zegar odcinka w ogóle
+// idzie - patrz RallyHud.driving(), dzięki temu auto nie jedzie przed STARTem.
+const MENU_SCREENS = ['menu', 'settings', 'controls'];
+// Oak tones of the pace-note boards (sign-board.js), repeated here so the modal
+// framing and the sign language are the same material without a cross-import.
+const WOOD = '#9C7E4E', WOOD_LIGHT = '#B4915C', WOOD_DARK = '#7A6138';
+// Width of the oak band that frames every modal screen (menu, ustawienia, sterowanie,
+// countdown, wynik) - same plank language as the pace-note boards.
+const MODAL_FRAME = 6;
 
 /** 1 px near-black outline + 3 px raised bevel (light top/left, dark bottom/right). */
 function frameRect(g, x, y, w, h, body, raised) {
@@ -96,11 +107,25 @@ export class RallyHud {
     this.modal.className = 'rly-modal';
     this._root.appendChild(this.modal);
     this.menu = [];
+    this._rows = [];
+    this._bigTitle = '';
+    this.stages = opts.stages || [];
+    this.stageIdx = 0;
+    this.touchInset = 0;        // CSS px the touch overlay reserves along the bottom
     this.menuItems = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
       const el = doc.createElement('div');
-      el.className = 'menu-item';
+      el.className = 'menu-item off';
       if (el.setAttribute) el.setAttribute('role', 'button');
+      if (el.addEventListener) {
+        el.addEventListener('pointerdown', (e) => {
+          if (e && e.preventDefault) e.preventDefault();
+          if (i >= this._rows.length) return;
+          this.focus = i;
+          this._syncFocus();
+          this.pendingActivate = true;      // same path as ENTER / pad A
+        });
+      }
       this.modal.appendChild(el);
       this.menuItems.push(el);
     }
@@ -122,6 +147,7 @@ export class RallyHud {
     this._wheelLabel = ['', '', '', ''];
     this._signKey = ['', '', '', ''];
     this._modalText = ['', '', ''];
+    this._info = [];              // [klawisz, akcja] pairs drawn on the sterowanie screen
     this._menuRect = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
     this.pendingActivate = false;
     this._subscribe();
@@ -153,10 +179,13 @@ export class RallyHud {
     const s = this._safeInsets();
     this.W = W; this.H = H;
     const m = 4 + Math.round(s[3] / this.uiScale);
+    // The touch pads live in the two bottom corners; lift every bottom-anchored panel
+    // above them so the dial / revs / damage never sit under a thumb.
+    const lift = Math.round((this.touchInset || 0) / this.uiScale);
     const M = {
       x: m, y: 4 + Math.round(s[0] / this.uiScale),
       r: W - m - Math.round(s[1] / this.uiScale),
-      b: H - 4 - Math.round(s[2] / this.uiScale),
+      b: H - 4 - Math.round(s[2] / this.uiScale) - lift,
     };
     this.M = M;
     const wide = W >= 560;
@@ -252,22 +281,84 @@ export class RallyHud {
     for (const p of r.penalties) rows += `\nKARA +${p.seconds}s  ${p.label}`;
     if (why) rows += `\n${why.toUpperCase()}`;
     this._modalText[1] = rows;
-    this._buildMenu(['Restart odcinka [ENTER]', 'Wróć do gry [ESC]']);
+    this._bigTitle = '';
+    this._info = [];
+    this._buildMenu([
+      { label: 'Restart odcinka  (enter)', act: 'restart' },
+      { label: 'Wróć do gry  (esc)', act: 'back' },
+    ]);
     this._pushStack('result');
   }
 
+  // ---------- ekran głowny / ustawienia / sterowanie ----------
+  /** The stage clock may only run on these screens: a menu screen never drives. */
+  driving() { const t = this.top(); return t === 'hud' || t === 'countdown' || t === 'result'; }
+  openMenu() { this._rowsFor('menu'); this._pushStack('menu'); }
+  openScreen(name) { this._rowsFor(name); this._pushStack(name); }
+  /** START closes every menu screen; main.js then lets the countdown run. */
+  startStage() { while (this.stack.length > 1) this.stack.pop(); this._bigTitle = ''; this._syncStack(); }
+  back() {
+    const t = this.top();
+    if (t === 'hud' || t === 'countdown') return null;
+    this._pop(t);
+    const n = this.top();
+    if (MENU_SCREENS.indexOf(n) >= 0) this._rowsFor(n);
+    this._dirtyAll = true;
+    return n;
+  }
+  stageKey() { return this.stages.length ? this.stages[this.stageIdx].key : ''; }
+  rowIndex(act) { for (let i = 0; i < this._rows.length; i++) if (this._rows[i].act === act) return i; return -1; }
+  refreshMenu() { const t = this.top(); if (MENU_SCREENS.indexOf(t) >= 0) this._rowsFor(t); }
+  setTouchInset(px) { if (px === this.touchInset) return; this.touchInset = px; this._resize(); }
+  /** Rows of one screen. Every row carries an `act` the state machine resolves. */
+  _rowsFor(name) {
+    const on = (v) => (v ? 'wł.' : 'wył.');
+    const rows = [];
+    this._bigTitle = '';
+    this._info = [];
+    this._modalText[0] = name === 'menu' ? 'Menu główne' : (name === 'settings' ? 'Ustawienia' : 'Sterowanie');
+    this._modalText[1] = '';
+    if (name === 'menu') {
+      this._bigTitle = 'VOXEL RALLY';
+      rows.push({ label: 'Start  (enter)', act: 'start' });
+      rows.push({ label: `Etap: ${this.stages.length ? this.stages[this.stageIdx].label : '—'}`, act: 'stage' });
+      rows.push({ label: 'Ustawienia', act: 'screen:settings' });
+      rows.push({ label: 'Sterowanie', act: 'screen:controls' });
+    } else if (name === 'settings') {
+      rows.push({ label: `Bloki nawierzchni: ${on(settings.blockTiles)}`, act: 'toggle:blockTiles' });
+      rows.push({ label: `Sterowanie dotykiem: ${TOUCH_LABEL[settings.touchOverlay] || 'auto'}`, act: 'cycle:touchOverlay' });
+      rows.push({ label: `Strzałki pilota: ${on(settings.showCoDriverArrows)}`, act: 'toggle:showCoDriverArrows' });
+      rows.push({ label: `HUD: ${MODE_LABEL[this.mode]}`, act: 'hudmode' });
+      rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });
+      rows.push({ label: 'Wróć  (esc)', act: 'back' });
+    } else if (name === 'controls') {
+      // Two columns of KLAWISZ + AKCJA drawn at the same readable scale as the menu rows
+      // (the row list is only the one focusable WRÓĆ target: keyboard/gamepad focus,
+      // the table itself is information, not a control).
+      this._info = [
+        ['W', 'gaz'], ['S', 'hamulec'], ['A/D', 'skręt'], ['SPC', 'ręczny'],
+        ['Q/E', 'bieg'], ['R', 'reset'], ['ENTER', 'start'], ['ESC', 'wróć'],
+        ['C', 'kamera'], ['N', 'hud'], ['M', 'pilot'], ['P', 'pauza'],
+        ['H', 'DEV panel'], ['L2/R2', 'pad gaz'], ['LEWA', 'skręt'], ['PRAWA', 'gaz, ham'],
+      ];
+      rows.push({ label: 'Wróć  (esc)', act: 'back' });
+    }
+    this._buildMenu(rows);
+  }
+
   /** Focus navigation: something is always focused while a modal is open (skill #4). */
-  _buildMenu(labels) {
+  _buildMenu(rows) {
+    this._rows = rows;
     this.menu.length = 0;
     for (let i = 0; i < this.menuItems.length; i++) {
       const el = this.menuItems[i];
-      if (i < labels.length) {
-        el.textContent = labels[i];
+      if (i < rows.length) {
+        el.textContent = rows[i].label;
         el.className = 'menu-item';
-        this.menu.push({ el, label: labels[i] });
+        this.menu.push({ el, label: rows[i].label, act: rows[i].act });
       } else { el.textContent = ''; el.className = 'menu-item off'; }
     }
-    this.focus = 0;
+    if (this.focus >= rows.length) this.focus = 0;
     this._syncFocus();
   }
   _syncFocus() {
@@ -277,10 +368,14 @@ export class RallyHud {
       el.className = i === this.focus ? 'menu-item focus' : 'menu-item';
       const r = this._menuRect[i];
       if (el.style && r && r[2] > 0) {
-        el.style.left = (r[0] * sc) + 'px';
-        el.style.top = (r[1] * sc) + 'px';
-        el.style.width = (r[2] * sc) + 'px';
-        el.style.height = (r[3] * sc) + 'px';
+        // Hit area is never smaller than 72 CSS px on either axis (WCAG 2.5.5), the
+        // drawn button stays centred inside it.
+        const dw = r[2] * sc, dh = r[3] * sc;
+        const w = Math.max(72, dw), h = Math.max(72, dh);
+        el.style.left = Math.round(r[0] * sc + (dw - w) / 2) + 'px';
+        el.style.top = Math.round(r[1] * sc + (dh - h) / 2) + 'px';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
       }
     }
   }
@@ -291,7 +386,25 @@ export class RallyHud {
     this._keys.modal = '';
     return this.menu[this.focus];
   }
-  activate() { return this.menu.length ? this.menu[this.focus] : null; }
+  activate() {
+    if (!this._rows || !this._rows.length) return null;
+    const row = this._rows[this.focus];
+    if (!row) return null;
+    const act = row.act;
+    if (act === 'back') { this.back(); return null; }
+    if (act === 'hudmode') { this.cycleMode(); this.refreshMenu(); return null; }
+    if (act.indexOf('screen:') === 0) { this.openScreen(act.slice(7)); return null; }
+    if (act === 'stage') {
+      if (this.stages.length) this.stageIdx = (this.stageIdx + 1) % this.stages.length;
+      this.refreshMenu();
+      return null;
+    }
+    if (act === 'noop') return null;
+    if (act === 'start') { this.startStage(); return row; }
+    return row;                // main.js applies restart / toggle:* / cycle:* / quality
+  }
+  /** Rows the caller may still act on (result screen, settings toggles). */
+  pendingRow() { return this._rows[this.focus] || null; }
 
   _pollPad() {
     if (typeof navigator === 'undefined' || !navigator.getGamepads) return 0;
@@ -302,12 +415,15 @@ export class RallyHud {
       const up = gp.buttons[12] && gp.buttons[12].pressed;
       const down = gp.buttons[13] && gp.buttons[13].pressed;
       const a = gp.buttons[0] && gp.buttons[0].pressed;
+      const b = gp.buttons[1] && gp.buttons[1].pressed;
       let d = 0;
       if (down && !this._padPrev[1]) d = 1;
       else if (up && !this._padPrev[0]) d = -1;
       this._padPrev[0] = up; this._padPrev[1] = down;
       if (a && !this._padPrev[3]) return 100;      // A = ENTER
       this._padPrev[3] = a;
+      if (b && !this._padPrev[2]) return 101;      // B = WRÓĆ
+      this._padPrev[2] = b;
       if (d) return d;
     }
     return 0;
@@ -332,8 +448,17 @@ export class RallyHud {
     if (st.state === STATE.PRE_START && this.top() === 'hud') {
       this._modalText[0] = `START ZA ${Math.max(0, st.countdown).toFixed(1)} s`;
       this._modalText[1] = '';
+      this._info = [];
       this._buildMenu([]);
       this._pushStack('countdown');
+    }
+    // Ekran menu zajmuje caly viewport: zadnych paneli HUD pod nim, zeby modal nie
+    // fights the 8/12/20 Hz panel redraws for the same pixels.
+    if (MENU_SCREENS.indexOf(this.top()) >= 0) {
+      this._stageName = ctx.stageName || 'ODCINEK';
+      this._pollMenu();
+      this._drawModal(ctx);
+      return;
     }
     if (this._dirtyAll && this.g) {
       this.g.clearRect(0, 0, this.W, this.H);
@@ -376,6 +501,7 @@ export class RallyHud {
   _pollMenu() {
     const d = this._pollPad();
     if (d === 100) this.pendingActivate = true;
+    else if (d === 101) { this.back(); this._dirtyAll = true; }
     else if (d) this.moveFocus(d);
   }
 
@@ -657,39 +783,149 @@ export class RallyHud {
     }
   }
 
-  // ---------- modal screen stack (countdown / result) ----------
+  // ---------- modal screen stack (menu / ustawienia / countdown / result) ----------
+  _rowsKey() {
+    let k = '';
+    for (const r of this._rows) k += r.label + '|';
+    for (const p of this._info) k += p[0] + '=' + p[1] + '|';
+    return k;
+  }
+  /** Oak frame with a stone GUI panel inside: the modal's own banner material, used
+   *  for every modal screen so the countdown and the menu cannot read as strangers. */
+  _woodFrame(g, x, y, w, h) {
+    const F = MODAL_FRAME;
+    g.fillStyle = C.OUT; g.fillRect(x, y, w, h);
+    g.fillStyle = WOOD_DARK; g.fillRect(x + 1, y + 1, w - 2, h - 2);
+    g.fillStyle = WOOD; g.fillRect(x + 2, y + 2, w - 4, h - 4);
+    g.fillStyle = WOOD_LIGHT;
+    g.fillRect(x + 2, y + 2, w - 4, 2); g.fillRect(x + 2, y + 2, 2, h - 4);
+    g.fillStyle = WOOD_DARK;
+    g.fillRect(x + 2, y + h - 4, w - 4, 2); g.fillRect(x + w - 4, y + 2, 2, h - 4);
+    for (let sx = x + 11; sx < x + w - 5; sx += 15) g.fillRect(sx, y + 4, 1, h - 8);
+    for (let sy = y + 11; sy < y + h - 5; sy += 15) g.fillRect(x + 4, sy, w - 8, 1);
+    frameRect(g, x + F, y + F, w - 2 * F, h - 2 * F, C.PANEL, true);
+  }
+  /** One row of the sterowanie table: a recessed key cap + the action beside it. */
+  _infoRow(g, x, y, key, act, TS) {
+    const kw = textWidth(key, TS) + 6, h = 9 * TS + 2;
+    slotRect(g, x, y, kw, h);
+    drawText(g, key, x + 3, y + 3, TS, C.WHITE);
+    drawText(g, act, x + kw + 5, y + 3, TS, C.TEXT);
+  }
   _drawModal(ctx) {
     if (!this.g || !this._modalOpen) return;
-    const title = this._modalText[0], rows = this._modalText[1];
-    let key = title + '\n' + rows + '\n' + this.focus + '\n' + this.menu.length + '\n' + this.mode;
-    if (!this._key('modal', key)) return;
-    const W = this.W, H = this.H;
-    this.g.clearRect(0, 0, W, H);
-    let w = textWidth(title, 2);
-    const lines = rows ? rows.split('\n') : [];
-    for (const l of lines) w = Math.max(w, textWidth(l, 1));
-    for (const m of this.menu) w = Math.max(w, textWidth(m.label, 1) + 8);
-    w = Math.max(w, 90) + 10;
-    const h = 20 + lines.length * 9 + this.menu.length * 12 + 8;
-    const x = Math.round((W - w) / 2), y = Math.round((H - h) / 2);
-    frameRect(this.g, x, y, w, h, C.PANEL, true);
-    this.g.fillStyle = C.LIGHT; this.g.fillRect(x + 3, y + 3, w - 6, 2);   // title rail
-    drawText(this.g, title, x + 6, y + 8, 2, C.TEXT);
-    for (let i = 0; i < lines.length; i++) drawText(this.g, lines[i], x + 6, y + 22 + i * 9, 1, C.TEXT);
-    const my = y + 22 + lines.length * 9 + 2;
-    for (let i = 0; i < this.menu.length; i++) {
-      const ly = my + i * 12;
-      const lw = textWidth(this.menu[i].label, 1) + 8;
-      if (i === this.focus) {
-        frameRect(this.g, x + 5, ly - 2, lw, 12, C.DARK, true);
-        drawText(this.g, this.menu[i].label, x + 9, ly, 1, C.WHITE);
-      } else {
-        drawText(this.g, this.menu[i].label, x + 9, ly, 1, C.TEXT);
-      }
-      this._menuRect[i][0] = x + 5; this._menuRect[i][1] = ly - 2;
-      this._menuRect[i][2] = lw; this._menuRect[i][3] = 12;
+    const title = this._modalText[0], body = this._modalText[1];
+    const items = this._rows || [];
+    const info = this._info || [];
+    const W = this.W, H = this.H, ui = this.uiScale || 1;
+    const wide = W >= 480;
+    // Skala modala: na telefonie uiScale = 1, więc 7-px glif byłby nieczytelny -
+    // modal podnosi własną skalę tekstu, a rozmiar klawiszy i tak liczy 72 CSS px.
+    const TS = ui >= 2 ? 1 : 2;
+    const tScale = Math.max(TS + 1, wide ? 3 : 2);
+    let bScale = 4;
+    if (this._bigTitle) {                      // the title owns the panel: as big as fits
+      bScale = wide ? 8 : 6;
+      while (bScale > 3 && textWidth(this._bigTitle, bScale) > W * 0.72) bScale--;
     }
-    this._menuRect.length = Math.max(this.menu.length, 1);
+    const rowH = 9 * TS + 8;                   // drawn button box
+    const pitch = Math.max(rowH + 4, Math.ceil(72 / ui));   // hit box >= 72 CSS px
+    let key = `${title}\n${body}\n${this._rowsKey()}\n${this.focus}\n${this.mode}\n${W}x${H}`;
+    if (!this._key('modal', key)) return;
+    this.g.clearRect(0, 0, W, H);
+    // Dithered scrim instead of an alpha panel (PLAN.md §10.1: no translucent boxes):
+    // a hard 2x2 checker of near-black pixels, one pattern fill, dims the world behind
+    // the menu without a single gradient.
+    if (!this._dither) {
+      const pc = this.doc.createElement('canvas');
+      pc.width = 2; pc.height = 2;
+      const pg = pc.getContext ? pc.getContext('2d') : null;
+      if (pg) {
+        pg.fillStyle = C.OUT; pg.fillRect(0, 0, 1, 1); pg.fillRect(1, 1, 1, 1);
+        this._dither = this.g.createPattern ? this.g.createPattern(pc, 'repeat') : null;
+      }
+    }
+    if (this._dither) { this.g.fillStyle = this._dither; this.g.fillRect(0, 0, W, H); }
+    const lines = body ? body.split('\n') : [];
+    const F = MODAL_FRAME;
+    const limit = W - 2 * (F + 5);             // widest inner panel that fits the screen
+    // Two columns of key + action. Each column is measured on its own half of the
+    // table, so the phone's narrow width still gets two columns when the labels fit.
+    const nCol = Math.ceil(info.length / 2);
+    const colWid = [0, 1].map((c) => {
+      let k = 0, a = 0;
+      for (const p of info.slice(c * nCol, (c + 1) * nCol)) { k = Math.max(k, textWidth(p[0], TS)); a = Math.max(a, textWidth(p[1], TS)); }
+      return k + 6 + 5 + a;
+    });
+    const twoCol = info.length > 6 && (colWid[0] + colWid[1] + 10 <= limit);
+    let iw = 0;
+    if (this._bigTitle) iw = Math.max(iw, textWidth(this._bigTitle, bScale));
+    if (title) iw = Math.max(iw, textWidth(title, tScale) + 8);
+    for (const l of lines) iw = Math.max(iw, textWidth(l, TS));
+    for (const it of items) iw = Math.max(iw, textWidth(it.label, TS) + 16);
+    if (info.length) iw = Math.max(iw, twoCol ? colWid[0] + colWid[1] + 10 : colWid[0]);
+    // A menu is a piece of furniture, not a band: on a wide screen it takes a real
+    // share of the viewport even when the labels are short.
+    iw = Math.min(Math.max(iw, wide ? Math.min(limit, 330) : Math.min(limit, W - 2 * (F + 5))), limit);
+    const w = iw + 2 * (F + 5);
+    const bigH = this._bigTitle ? 8 * bScale + 4 : 0;
+    const banH = title ? 8 * tScale + 6 : 0;
+    const rowsInfo = info.length ? (twoCol ? nCol : info.length) : 0;
+    const infoH = info.length ? rowsInfo * (9 * TS + 6) + 4 : 0;
+    const h = 2 * (F + 5) + bigH + banH + lines.length * (9 * TS) + infoH + items.length * pitch + 6;
+    const x = Math.round((W - w) / 2), y = Math.round((H - h) / 2);
+    this._woodFrame(this.g, x, y, w, h);
+    // One content column: the banner, every row and the sterowanie table share its left
+    // edge and the same gap, so nothing sits "off" under the banner.
+    const cx = x + F + 5, cw = w - 2 * (F + 5);
+    let cy = y + F + 5;
+    if (this._bigTitle) {
+      const bw2 = textWidth(this._bigTitle, bScale);
+      drawText(this.g, this._bigTitle, Math.round(cx + (cw - bw2) / 2), cy, bScale, C.TEXT);
+      cy += bigH;
+    }
+    if (title) {                       // wood banner: the oak of the pace-note boards
+      const bx = cx, bw = cw, by = cy, bh = banH - 6;
+      this.g.fillStyle = C.OUT; this.g.fillRect(bx, by, bw, bh);
+      this.g.fillStyle = WOOD; this.g.fillRect(bx + 1, by + 1, bw - 2, bh - 2);
+      this.g.fillStyle = WOOD_LIGHT; this.g.fillRect(bx + 1, by + 1, bw - 2, 2);
+      this.g.fillStyle = WOOD_DARK; this.g.fillRect(bx + 1, by + bh - 3, bw - 2, 2);
+      for (let sx = bx + 11; sx < bx + bw - 4; sx += 16) this.g.fillRect(sx, by + 2, 1, bh - 4);
+      drawText(this.g, title, Math.round(bx + (bw - textWidth(title, tScale)) / 2), by + 3, tScale, '#2A2118');
+      cy += banH;
+    }
+    for (let i = 0; i < lines.length; i++) drawText(this.g, lines[i], cx, cy + i * (9 * TS), TS, C.TEXT);
+    cy += lines.length * (9 * TS);
+    if (info.length) {
+      const step = 9 * TS + 6;
+      for (let i = 0; i < info.length; i++) {
+        const col = twoCol ? (i < nCol ? 0 : 1) : 0;
+        const r = twoCol ? (i < nCol ? i : i - nCol) : i;
+        const x0 = cx + (col ? colWid[0] + 10 : 0);
+        this._infoRow(this.g, x0, cy + r * step, info[i][0], info[i][1], TS);
+      }
+      cy += rowsInfo * step + 4;
+    }
+    for (let i = 0; i < items.length; i++) {
+      const ry = cy + i * pitch, lw = cw, rh = rowH;
+      const ty = ry + Math.round((rh - 7 * TS) / 2);
+      const tx = Math.round(cx + (lw - textWidth(items[i].label, TS)) / 2);
+      if (i === this.focus) {
+        frameRect(this.g, cx, ry, lw, rh, C.DARK, true);
+        // Visible keyboard focus: a blue ring drawn INSIDE the row. The DOM hit box is
+        // >= 72 CSS px (it must be), so a DOM outline would spill onto the row above.
+        this.g.fillStyle = C.BLUE;
+        this.g.fillRect(cx + 3, ry + 3, lw - 6, 2); this.g.fillRect(cx + 3, ry + rh - 5, lw - 6, 2);
+        this.g.fillRect(cx + 3, ry + 3, 2, rh - 6); this.g.fillRect(cx + lw - 5, ry + 3, 2, rh - 6);
+        drawText(this.g, items[i].label, tx, ty, TS, C.WHITE);
+      } else {
+        frameRect(this.g, cx, ry, lw, rh, C.PANEL, false);
+        drawText(this.g, items[i].label, tx, ty, TS, C.TEXT);
+      }
+      if (!this._menuRect[i]) this._menuRect[i] = [0, 0, 0, 0];
+      this._menuRect[i][0] = cx; this._menuRect[i][1] = ry;
+      this._menuRect[i][2] = lw; this._menuRect[i][3] = rh;
+    }
     this._syncFocus();
   }
 }

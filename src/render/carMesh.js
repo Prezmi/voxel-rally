@@ -8,7 +8,7 @@ import { loadModelNodes } from './assets.js';
 import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, tyreScale } from './car-asset.js';
 import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
-import { PANELS, PANEL_COUNT } from '../dirt/panel-dirt.js';
+import { PANELS, PANEL_COUNT, PANEL_INDEX } from '../dirt/panel-dirt.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
 import { settings } from '../core/settings.js';
 
@@ -76,7 +76,7 @@ export function buildCarMesh(car, dirt) {
   const dtex = buildDirtTextures(dirt);
   const livery = buildLiveryTexture(p.id, THREE);
   const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.52, metalness: 0.18 });
-  attachCarShader(bodyMat, dtex, livery);
+  attachCarShader(bodyMat, dtex, livery, p, built.geo);
 
   const body = new THREE.Mesh(built.geo, bodyMat);
   body.castShadow = true;
@@ -147,14 +147,10 @@ function logAssetCar(active, detail) {
 /**
  * The four exported wheel pivot nodes driven by the existing per-wheel matrix
  * code: setMatrixAt writes the pivot's local matrix (already position + spin +
- * steer + loaded radius), instanceColor writes the tyre tint onto that wheel's
- * own material. No wheel geometry is rebuilt.
+ * steer + loaded radius). No colour of any kind is written here - each wheel
+ * keeps the material it was exported with.
  */
-function makeWheelPivots(pivots, mats) {
-  // The per-wheel tint is a MULTIPLIER on each part's own material colour (the
-  // procedural wheels multiplied their baked vertex colours by the same ratio),
-  // so a dark tyre stays dark and the alloy stays bright.
-  const base = mats.map((m) => (m && m.color ? { r: m.color.r, g: m.color.g, b: m.color.b } : null));
+function makeWheelPivots(pivots) {
   return {
     isAssetWheels: true,
     setMatrixAt(i, m) {
@@ -166,11 +162,7 @@ function makeWheelPivots(pivots, mats) {
     instanceMatrix: { needsUpdate: false },
     instanceColor: {
       needsUpdate: false,
-      setXYZ(i, r, g, b) {
-        const m = mats[i]; if (!m) return;
-        const b0 = base[i] || { r: 1, g: 1, b: 1 };
-        m.color.setRGB(b0.r * r, b0.g * g, b0.b * b);
-      },
+      setXYZ() {},                       // neutral: no tyre tint, no material override
     },
   };
 }
@@ -218,7 +210,7 @@ function adoptAssetCar(view, proceduralWheels) {
     // Wheels: the exported pivots, uniformly scaled so the tyre radius lands on
     // TYRE_BASE.r; positions come from the physics state every frame anyway.
     const ts = tyreScale(nodes, TYRE_BASE.r, WHEEL_NODES[0]);
-    const pivots = [], mats = [];
+    const pivots = [];
     for (let i = 0; i < 4; i++) {
       const node = wheelRecs[i].node;
       if (node.parent) node.parent.remove(node);
@@ -229,6 +221,9 @@ function adoptAssetCar(view, proceduralWheels) {
       const src = Array.isArray(wheelRecs[i].material) ? wheelRecs[i].material[0] : wheelRecs[i].material;
       const mat = src && src.clone ? src.clone() : new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.08 });
       mat.vertexColors = false;
+      // The corner's own arch panel feeds the tyre's dirt state.
+      const archKey = ['archFL', 'archFR', 'archRL', 'archRR'][i] || 'archRL';
+      attachTyreDirt(mat, view.dtex, PANEL_INDEX[archKey], wheelRecs[i].geometry);
       node.material = mat;
       node.traverse((c) => {                   // multi-primitive wheel: Group of meshes
         if (!c.isMesh) return;
@@ -236,7 +231,7 @@ function adoptAssetCar(view, proceduralWheels) {
         c.castShadow = true;
         c.receiveShadow = true;
       });
-      mats.push(mat);
+      (view.tyreMats || (view.tyreMats = []))[i] = mat;
       const pivot = new THREE.Object3D();
       pivot.matrixAutoUpdate = false;
       pivot.add(node);
@@ -244,7 +239,7 @@ function adoptAssetCar(view, proceduralWheels) {
       pivots.push(pivot);
     }
     view.group.remove(proceduralWheels);
-    view.wheels = makeWheelPivots(pivots, mats);
+    view.wheels = makeWheelPivots(pivots);
     view.asset = true;
     logAssetCar(true, `body tris=${built.tris} fit=${built.scale.toFixed(3)} tyre=${ts.toFixed(3)} regions=${Object.keys(regions).length}`);
     return true;
@@ -260,7 +255,9 @@ function adoptAssetCar(view, proceduralWheels) {
  * standard material, so the car stays one draw call and no material is ever
  * rebuilt at runtime.
  */
-function attachCarShader(mat, dtex, livery) {
+function attachCarShader(mat, dtex, livery, p, geo) {
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPanelTex = { value: dtex.panelTex };
     shader.uniforms.uPanelCol = { value: dtex.colTex };
@@ -271,6 +268,10 @@ function attachCarShader(mat, dtex, livery) {
     shader.uniforms.uHead = { value: 0.18 };
     shader.uniforms.uTail = { value: 0.25 };
     shader.uniforms.uDamage = { value: 0 };
+    shader.uniforms.uCar = { value: new THREE.Vector4(bb.min.y + 0.02, bb.max.y,
+      p.wheelbase / 2, (p.trackFront + p.trackRear) / 4) };
+    shader.uniforms.uHub = { value: new THREE.Vector4(bb.min.y + TYRE_BASE.r, TYRE_BASE.r,
+      p.hull.x, p.hull.z) };
 
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float aPanel;\nattribute vec3 aFlow;\nattribute vec2 aLivUv;\nattribute float aLiv;\nattribute float aLamp;\nvarying float vPanel;\nvarying vec3 vFlow;\nvarying vec2 vLivUv;\nvarying float vLiv;\nvarying float vLamp;\nvarying vec3 vLocal;\nvarying vec3 vWPos;\nvarying vec3 vObjNormal;')
@@ -287,6 +288,8 @@ uniform float uSpeed;
 uniform float uHead;
 uniform float uTail;
 uniform float uDamage;
+uniform vec4 uCar;   // rocker Y, roof Y, half wheelbase, half track
+uniform vec4 uHub;   // hub Y, tyre radius, hull X, hull Z
 varying float vPanel;
 varying vec3 vFlow;
 varying vec2 vLivUv;
@@ -299,7 +302,21 @@ varying vec3 vObjNormal;
 vec2 gPanelUv = vec2(0.0);
 float gThick = 0.0, gWet = 0.0, gDust = 0.0, gStreak = 0.0;
 vec3 gDirtCol = vec3(0.0);
+// Per-fragment dirt shape, computed once in the roughness hook and reused.
+float gCov = 0.0, gWind = 0.0, gSrcN = 0.0, gHeight = 0.0, gSpatter = 0.0;
 float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float dhash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+// Cheap value noise: the splatter has to be stationary in car space, never a
+// scrolling screen pattern.
+float vnoise(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = mix(mix(dhash3(i), dhash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                mix(dhash3(i + vec3(0.0, 1.0, 0.0)), dhash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y);
+  float b = mix(mix(dhash3(i + vec3(0.0, 0.0, 1.0)), dhash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                mix(dhash3(i + vec3(0.0, 1.0, 1.0)), dhash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y);
+  return mix(a, b, f.z);
+}
 `)
       .replace('#include <color_fragment>', `#include <color_fragment>
 {
@@ -326,30 +343,61 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
   float catchRear = clamp(-vObjNormal.x * 0.6 + (1.0 - clamp(vObjNormal.y, 0.0, 1.0)) * 0.8, 0.0, 1.4);
   gThick = clamp(gThick + spray * 0.9 * catchRear, 0.0, 1.0);
 
+  // --- WHERE dirt may sit on this fragment (docs/04 "render brudu") ---------
+  // Never a uniform film: height above the rocker, distance travelled from the
+  // throwing wheels, and two octaves of stationary noise that break the plate
+  // into droplets, runs and patches.
+  float span = max(0.05, uCar.y - uCar.x);
+  gHeight = clamp((vLocal.y - uCar.x) / span, 0.0, 1.0);
+  vec3 c0 = vLocal - vec3(uCar.z, uHub.x, uCar.w);
+  vec3 c1 = vLocal - vec3(uCar.z, uHub.x, -uCar.w);
+  vec3 c2 = vLocal - vec3(-uCar.z, uHub.x, uCar.w);
+  vec3 c3 = vLocal - vec3(-uCar.z, uHub.x, -uCar.w);
+  float near = min(min(length(c0), length(c1)), min(length(c2), length(c3)));
+  gSrcN = clamp(max(0.0, near - uHub.y) / max(0.05, uCar.z * 1.55), 0.0, 1.0);
+
+  float grime = mix(1.45, 0.10, smoothstep(0.06, 0.62, gHeight))   // low panels caked
+    * mix(1.30, 0.28, smoothstep(0.0, 0.92, gSrcN))                // thrown from the wheels
+    * (1.0 + 0.30 * smoothstep(0.25, -0.85, vLocal.x) * (1.0 - gHeight)); // rear flank
+  grime *= 1.0 - 0.62 * clamp(vObjNormal.y, 0.0, 1.0) * smoothstep(0.22, 0.72, gHeight);
+
+  float blobs = vnoise(vLocal * vec3(3.0, 4.4, 3.0));
+  float speck = vnoise(vLocal * vec3(11.5, 13.5, 11.5));
+  gSpatter = 0.22 + 1.10 * smoothstep(0.30, 0.88, blobs * 0.62 + speck * 0.48);
+  // Loose dry dust blows off as speed rises, so the car stops going chalky.
+  gWind = 1.0 - 0.55 * smoothstep(5.0, 26.0, uSpeed);
+  gCov = clamp((gThick * 0.95 + gDust * 0.50 * gWind) * grime * gSpatter, 0.0, 0.95);
+
   // docs/04: rough = mix(rough, mix(0.95, 0.35, wet), thick) - wet mud glints.
-  roughnessFactor = mix(roughnessFactor, mix(0.95, 0.35, gWet), clamp(gThick * 1.15 + gDust * 0.45, 0.0, 1.0));
+  roughnessFactor = mix(roughnessFactor, mix(0.95, 0.35, gWet), clamp(gCov * 1.10 + gDust * 0.30 * gWind, 0.0, 1.0));
 }
 `)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
 {
   vec3 dirtCol = gDirtCol * (1.0 - 0.25 * gWet);
-  float film = clamp(gThick * 1.35 + gDust * 0.55, 0.0, 0.92);
+  float film = gCov;
 
   // Streaks: bands across the panel's airflow, dragged rearwards, only while the
   // panel is wet enough and the car is moving (docs/04 "smugi").
   float along = dot(vLocal, vFlow);
   vec3 perp3 = vLocal - vFlow * along;
-  float band = floor((perp3.x * 1.4 + perp3.y * 4.0 + perp3.z * 6.0) * 5.0);
+  float bandF = (perp3.x * 1.4 + perp3.y * 4.0 + perp3.z * 6.0) * 5.0;
+  float band = floor(bandF);
   float h = dhash1(vec2(band, 7.13));
-  float tail = smoothstep(0.0, 1.0, fract(-along * 0.42 + h * 0.55));
-  float streakMask = step(0.60, h) * gStreak * tail * smoothstep(0.22, 0.60, gThick + gWet * 0.5)
-    * smoothstep(4.0, 16.0, uSpeed);
+  float wdt = 0.14 + 0.40 * h;                                       // runs differ in width
+  float across = 1.0 - smoothstep(wdt * 0.5, wdt * 0.5 + 0.16, abs(fract(bandF + h * 0.31) - 0.5));
+  float tail = pow(fract(-along * 0.26 + h * 0.55), 0.45);            // long, fading tails
+  float streakMask = step(0.45, h) * gStreak * across * tail
+    * (0.40 + 0.95 * (1.0 - gSrcN)) * (0.30 + 0.95 * (1.0 - gHeight))
+    * smoothstep(0.15, 0.50, gThick + gWet * 0.5) * smoothstep(3.0, 13.0, uSpeed);
 
   vec3 col = mix(diffuseColor.rgb, dirtCol, film);
-  col = mix(col, dirtCol * 0.88, clamp(streakMask, 0.0, 0.85));
+  col = mix(col, dirtCol * 0.85, clamp(streakMask, 0.0, 0.85));
   // Dry dust is a pale veil, not a dark plate - that is what keeps gravel dust
   // looking like dust rather than like mud (docs/04 risk R4).
-  col = mix(col, dirtCol * 1.35 + vec3(0.22), gDust * 0.35 * (1.0 - gWet));
+  float veil = clamp(gDust * 0.30 * gWind, 0.0, 0.40) * clamp(film * 2.2, 0.0, 1.0)
+    * (0.35 + 0.65 * gSpatter) * (1.0 - gWet);
+  col = mix(col, dirtCol * 1.22 + vec3(0.14), veil);
 
   // Damage as a surface state of the panel (docs/02 §8): pixel cracks, not a bar.
   if (uDamage > 0.10) {
@@ -364,7 +412,7 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
   float n1 = dhash1(vLocal.xy * 190.0 + vLocal.z * 61.0 + gWet * 3.0);
   float n2 = dhash1(vLocal.yz * 97.0 - vLocal.x * 43.0);
   float relief = (n1 * 0.65 + n2 * 0.35 - 0.5);
-  normal = normalize(normal + vec3(relief, relief * 0.6, -relief) * gThick * 0.35 * (1.0 - 0.5 * gWet));
+  normal = normalize(normal + vec3(relief, relief * 0.6, -relief) * gCov * 0.45 * (1.0 - 0.5 * gWet));
 }
 `)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
@@ -379,6 +427,93 @@ float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453
   mat.customProgramCacheKey = () => 'vr-car-dirt';
 }
 
+/**
+ * Tyre dirt response (docs/04 §4.2): the exported tyre material keeps its own
+ * maps, but the rubber reads the same per-panel dirt state the body reads - the
+ * arch of that corner - and lays it on the sidewall and the inner face only.
+ * Fresh rubber stays near-black; caked rubber takes the panel's brown-grey.
+ */
+function attachTyreDirt(mat, dtex, panelIdx, geo) {
+  geo.computeBoundingBox();
+  const s = geo.boundingBox.getSize(new THREE.Vector3());
+  // The narrowest extent of the exported wheel is the rolling axis; the widest
+  // two give the tyre radius.
+  const axis = new THREE.Vector3(0, 0, 0);
+  let ai = 0;
+  if (s.y < s.x && s.y < s.z) ai = 1; else if (s.z < s.x && s.z < s.y) ai = 2;
+  axis.setComponent(ai, 1);
+  const halfW = s.getComponent(ai) * 0.5;
+  const dims = [s.x, s.y, s.z];
+  dims.splice(ai, 1);
+  const rMax = Math.max(dims[0], dims[1]) * 0.5;
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uPanelTex = { value: dtex.panelTex };
+    shader.uniforms.uPanelCol = { value: dtex.colTex };
+    shader.uniforms.uTyreUv = { value: new THREE.Vector2((panelIdx + 0.5) / PANEL_COUNT, 0.5) };
+    shader.uniforms.uTyreAxis = { value: axis };
+    shader.uniforms.uTyreDims = { value: new THREE.Vector2(Math.max(1e-3, halfW), Math.max(1e-3, rMax)) };
+    shader.uniforms.uSpeed = { value: 0 };
+    shader.uniforms.uRubber = { value: 0 };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTyreP;\nvarying vec3 vTyreN;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTyreP = transformed;\nvTyreN = objectNormal;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform sampler2D uPanelTex;
+uniform sampler2D uPanelCol;
+uniform vec2 uTyreUv;
+uniform vec3 uTyreAxis;
+uniform vec2 uTyreDims;
+uniform float uSpeed;
+uniform float uRubber;
+varying vec3 vTyreP;
+varying vec3 vTyreN;
+float gTyreCaked = 0.0;
+float dhash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float vnoise(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = mix(mix(dhash3(i), dhash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                mix(dhash3(i + vec3(0.0, 1.0, 0.0)), dhash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y);
+  float b = mix(mix(dhash3(i + vec3(0.0, 0.0, 1.0)), dhash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                mix(dhash3(i + vec3(0.0, 1.0, 1.0)), dhash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y);
+  return mix(a, b, f.z);
+}
+`)
+      .replace('#include <map_fragment>', `#include <map_fragment>
+{
+  vec4 pd = texture2D(uPanelTex, uTyreUv);
+  float thick = clamp(pd.r, 0.0, 1.0);
+  float dust = clamp(pd.b, 0.0, 1.0);
+  float wet = clamp(pd.g, 0.0, 1.0);
+  vec3 dc = texture2D(uPanelCol, uTyreUv).rgb;
+
+  float ax = dot(vTyreP, uTyreAxis);
+  vec3 rad = vTyreP - ax * uTyreAxis;
+  float rr = length(rad) / uTyreDims.y;          // 1 at the tread, 0 at the hub
+  float side = abs(ax) / uTyreDims.x;            // 1 outboard / inboard
+  float facing = 1.0 - clamp(abs(dot(normalize(vTyreN + vec3(1e-4)), uTyreAxis)), 0.0, 1.0);
+
+  float sidewall = smoothstep(0.30, 0.90, side) * smoothstep(0.60, 0.95, rr);
+  float inner = smoothstep(0.70, 0.42, rr) * (1.0 - facing * 0.35);
+  float spatter = 0.25 + 1.0 * smoothstep(0.28, 0.86, vnoise(vTyreP * vec3(13.0, 13.0, 13.0)));
+  float wind = 1.0 - 0.45 * smoothstep(6.0, 30.0, uSpeed);
+  float amt = clamp((thick * 1.05 + dust * 1.00) * wind * spatter, 0.0, 1.0);
+  gTyreCaked = clamp(amt * (0.30 + 0.95 * clamp(sidewall + inner, 0.0, 1.0)), 0.0, 0.92);
+
+  vec3 caked = mix(dc * 0.55 + vec3(0.10, 0.085, 0.065), vec3(0.20, 0.155, 0.115), 0.45);
+  diffuseColor.rgb = mix(diffuseColor.rgb * (1.0 - 0.22 * clamp(uRubber, 0.0, 1.0)), caked, gTyreCaked);
+}
+`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+roughnessFactor = mix(roughnessFactor, mix(0.86, 0.97, gTyreCaked), clamp(gTyreCaked + 0.25 * clamp(uRubber, 0.0, 1.0), 0.0, 1.0));
+`);
+    mat.userData.shader = shader;
+  };
+  mat.customProgramCacheKey = () => 'vr-car-tyre';
+}
+
 const _m4 = new THREE.Matrix4();
 const _v = new THREE.Vector3();
 const _b1 = new THREE.Vector3();
@@ -387,8 +522,6 @@ const _b3 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qi = new THREE.Quaternion();
 const _up = new THREE.Vector3();
-const _col = new THREE.Color();
-const _col2 = new THREE.Color();
 
 /**
  * Drive the visuals from the physics state. `alpha` is the fixed-step
@@ -519,11 +652,6 @@ function applyDamage(view, car) {
 }
 
 // Wheel -> the arch panel of that wheel, for caked dirt on the tyre.
-const WHEEL_ARCH = [8, 9, 10, 11];
-const TYRE_BASE_R = 0.102, TYRE_BASE_G = 0.106, TYRE_BASE_B = 0.114;
-// Linear tone the tyre tread is baked with (car-body.js CAR_MAT.rubber); the
-// instance colour is the multiplier that turns it into dirty or polished rubber.
-const BAKE = new THREE.Color(0x15161a);
 
 /**
  * Push the dirt state into the shader textures and the tyre instances.
@@ -567,24 +695,17 @@ export function updateCarDirt(view, car, dirt) {
     sh.uniforms.uSprayOrigin.value.set(dirt.map.originX, dirt.map.originZ);
   }
 
-  // Tyres: rubber darkens and polishes the tread, caked dirt does the opposite
-  // (docs/04 §4.2 "kanał gumy na oponach"). Per-instance colour multiply, so
-  // one instanced draw call still shows four differently dirty wheels.
-  const inst = view.wheels.instanceColor;
-  for (let i = 0; i < 4; i++) {
-    const rubber = clamp01(panels.rubber[i]);
-    const arch = WHEEL_ARCH[i];
-    const caked = clamp01(panels.thick[arch] * 0.8 + panels.dust[arch] * 0.5);
-    const dr = panels.cr[arch], dg = panels.cg[arch], db = panels.cb[arch];
-    const rr = TYRE_BASE_R * (1 - caked) * (1 - rubber) + dr * caked * 0.9 + 0.020 * rubber;
-    const gg = TYRE_BASE_G * (1 - caked) * (1 - rubber) + dg * caked * 0.9 + 0.020 * rubber;
-    const bb = TYRE_BASE_B * (1 - caked) * (1 - rubber) + db * caked * 0.9 + 0.024 * rubber;
-    _col.setRGB(rr, gg, bb, THREE.SRGBColorSpace);
-    _col2.setRGB(clampRatio(_col.r / BAKE.r), clampRatio(_col.g / BAKE.g), clampRatio(_col.b / BAKE.b));
-    inst.setXYZ(i, _col2.r, _col2.g, _col2.b);
+  // Tyres are drawn with the material the glb exported; the dirt response is a
+  // shader patch on those same materials, fed the corner's panel state (no
+  // per-wheel colour, so rubber and alloy can never read as one flat tint).
+  if (view.tyreMats) {
+    for (let i = 0; i < 4; i++) {
+      const m = view.tyreMats[i];
+      const ts = m && m.userData.shader;
+      if (!ts) continue;
+      ts.uniforms.uSpeed.value = car.body.groundSpeed;
+      ts.uniforms.uRubber.value = panels.rubber ? clamp01(panels.rubber[i]) : 0;
+    }
   }
-  inst.needsUpdate = true;
 }
-
-function clampRatio(v) { return v < 0.25 ? 0.25 : (v > 2.2 ? 2.2 : v); }
 function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }

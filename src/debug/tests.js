@@ -14,10 +14,11 @@ import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
 import { buildRoad } from '../world/road-spline.js';
 import { solveGhost } from '../game/ghost.js';
-import { planGates } from '../game/stage.js';
+import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
+import { RallyHud } from '../game/hud-rally.js';
 
 const G = 9.81;
 
@@ -554,6 +555,66 @@ function testTouch() {
   check('touch: the car accelerates from the touch state', car.body.vel.x > 10, `vx=${car.body.vel.x.toFixed(1)}`);
 }
 testTouch();
+
+// ---------------------------------------------------------------- main menu
+// The modal screen stack is the gate for the stage clock: boot lands on the menu,
+// the countdown may only begin after START, and every screen has a way back.
+// Same stub-DOM shape as tools/stagetest.mjs C (no jsdom installed).
+class MenuStubEl {
+  constructor(tag) {
+    this.tag = tag; this.children = []; this.className = ''; this.textContent = '';
+    this.style = {}; this.parentNode = null; this.attrs = {};
+  }
+  setAttribute(k, v) { this.attrs[k] = v; }
+  addEventListener() {}
+  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+}
+class MenuStubDoc {
+  constructor() { this.body = new MenuStubEl('body'); }
+  createElement(t) { return new MenuStubEl(t); }
+  getElementById() { return null; }
+}
+
+function testMenuStateMachine() {
+  const SEED = 99, LEN = 900;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const run = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 90 });
+  const wheelStub = () => ({ alpha: 0, kappa: 0, N: 0, slipEnergy: 0, airborneFrames: 0 });
+  const car = { body: { pos: { x: road.x[12], z: road.z[12] }, groundSpeed: 0 }, wheels: [wheelStub(), wheelStub(), wheelStub(), wheelStub()] };
+  const rally = new RallyHud(new MenuStubDoc(), {
+    stages: [{ key: 'FOREST', label: 'Leśny' }, { key: 'SWAMP', label: 'Bagno' }],
+  });
+  const c0 = run.countdown;
+  const frames = (n) => {
+    for (let i = 0; i < n; i++) {
+      if (rally.driving()) run.step(DT, car);          // the gate main.js uses
+      rally.update(DT, { car, stage: run, notes: [], stageName: 'ODCINEK LEŚNY' });
+    }
+  };
+  const trail = [];
+  rally.openMenu();
+  trail.push(`boot=${rally.top()}`);
+  frames(180);                                        // 3 s on the menu
+  const frozen = run.countdown === c0 && run.state === STATE.PRE_START && rally.top() === 'menu';
+  rally.focus = rally.rowIndex('screen:settings'); rally.activate();
+  trail.push(`settings=${rally.top()}`);
+  const openSettings = rally.top() === 'settings';
+  const toggles = rally.rowIndex('toggle:blockTiles') >= 0 && rally.rowIndex('cycle:touchOverlay') >= 0;
+  rally.focus = rally.rowIndex('back'); rally.activate();
+  trail.push(`back=${rally.top()}`);
+  const backToMenu = rally.top() === 'menu';
+  rally.focus = rally.rowIndex('start'); rally.activate();
+  trail.push(`start=${rally.top()}`);
+  frames(30);
+  const began = rally.driving() && run.countdown < c0 && run.state === STATE.PRE_START;
+  frames(Math.round(6 / DT) + 10);                     // odliczanie + kawałek jazdy
+  const running = run.state === STATE.RUNNING;
+  const ok = frozen && openSettings && toggles && backToMenu && began && running;
+  check('T12 menu gates the stage clock: countdown only after START', ok,
+    `${trail.join(' ')} frozen=${frozen} settings=${openSettings} toggles=${toggles} back=${backToMenu} began=${began} running=${running}`);
+}
+testMenuStateMachine();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

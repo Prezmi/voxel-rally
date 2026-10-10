@@ -72,8 +72,15 @@ function params() {
   else if (qName === 'HIGH') qualityPreset(QUALITY.HIGH);
   if (postFlag === '0') settings.post = false;
   else if (postFlag === '1') settings.post = true;
+  // ?menu=off / ?frames=N: the car drives off at boot. ?shot=1 only makes the boot
+  // fast for the headless harness - the menu still owns the first screen, so nothing
+  // drives until START.
+  const autoStart = frames > 0 || q.get('menu') === 'off';
+  const shotBoot = autoStart || q.get('shot') === '1';
+  const menuScreen = q.get('menu') && q.get('menu') !== 'off' ? q.get('menu') : '';
   return {
     seed, biome: BIOME_INFO[biome] ? biome : 'FOREST', carId, lengthTarget: len,
+    autoStart, shotBoot, menuScreen,
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
     surfaceKey, frames, rain, cam, ref, tod, stats,
@@ -84,11 +91,11 @@ async function generateStage(cfg, hud) {
   const world = new VoxelWorld(cfg.seed);
 
   hud.boot(`VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\nterrain…`);
-  await nextFrame(cfg.frames > 0);
+  await nextFrame(cfg.shotBoot);
   const terrain = makeTerrain(cfg.seed, cfg.biome);
 
   hud.boot(`VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\nroad spline…`);
-  await nextFrame(cfg.frames > 0);
+  await nextFrame(cfg.shotBoot);
   const road = buildRoad({ seed: cfg.seed, lengthTarget: cfg.lengthTarget, terrainHeightAt: terrain.heightAt, biome: cfg.biome });
   // Repainting the spline's own surface attribute is enough: road-carve builds the
   // road block from road.surfaceId at carve time (docs/03), so the whole streamed
@@ -100,11 +107,13 @@ async function generateStage(cfg, hud) {
   // Terrain has to exist in a chunk before it can be carved, so the start line is
   // filled + carved here and Streaming streams the rest of the stage lazily.
   hud.boot(`VOXEL RALLY\nseed ${cfg.seed}  road ${road.length.toFixed(0)} m\nfilling the start line…`);
-  await nextFrame(cfg.frames > 0);
+  await nextFrame(cfg.shotBoot);
   prewarmArea(world, terrain, road, carveIndex, road.x[0], road.z[0], 140);
 
   return { seed: cfg.seed, biome: cfg.biome, world, terrain, road, gates, carveIndex, roadLength: road.length };
 }
+
+const STAGE_LABEL = { FOREST: 'Leśny', MOUNTAIN: 'Górski', SWAMP: 'Bagno', PLATEAU: 'Wyżyna', CANYON: 'Wąwóz' };
 
 async function main() {
   const hud = new Hud();
@@ -155,18 +164,56 @@ async function main() {
   const notes = buildPaceNotes(stage.road, ghost);
   const voice = new Voice({ notes: notes.notes, emit: bus });
   const stageName = `ODCINEK ${cfg.biome === 'FOREST' ? 'LEŚNY' : cfg.biome} · SZUTER · ${cfg.seed}`;
-  const rally = new RallyHud(document, { bus });
+  const rally = new RallyHud(document, { bus, stages: BIOMES.map((b) => ({ key: b, label: STAGE_LABEL[b] || b })) });
+  rally.stageIdx = Math.max(0, BIOMES.indexOf(cfg.biome));
   function restartRun() {
     resetCar();
     view3d.shake = 0;
     voice.reset();
     stageRun.reset(refTime);
   }
-  // Menu action, shared by ENTER and the gamepad "A" (docs/06 §5, skills/game-ui-ux #4).
+  // Menu action, shared by ENTER, the pad "A" and a tap on a menu row (docs/06 §5).
+  // Everything the HUD can do to itself (back / screens / HUD density / etap) is
+  // already resolved inside RallyHud.activate(); only world+render acts come here.
   function activateMenu() {
     const it = rally.activate();
-    if (it && it.label.indexOf('Restart') === 0) restartRun();
-    else if (it) rally._pop('result');
+    if (!it) return;
+    if (it.act === 'start') startRun();
+    else if (it.act === 'restart') restartRun();
+    else if (it.act === 'toggle:blockTiles') settings.blockTiles = !settings.blockTiles;
+    else if (it.act === 'toggle:showCoDriverArrows') {
+      settings.showCoDriverArrows = !settings.showCoDriverArrows;
+      rally.arrows = settings.showCoDriverArrows;
+    } else if (it.act === 'cycle:touchOverlay') {
+      const order = ['auto', 'on', 'off'];
+      settings.touchOverlay = order[(order.indexOf(settings.touchOverlay) + 1) % order.length];
+      applyTouch();
+    } else if (it.act === 'quality') {
+      const q = (settings.quality + 1) % 3;
+      qualityPreset(q);
+      renderer.setQuality(q);
+    }
+    rally.refreshMenu();          // a toggle row re-labels itself (wł./wył.)
+  }
+  // START: a different etap means a different stage, so reload with ?biome=... and
+  // land straight in the countdown; otherwise the frozen clock just starts running.
+  function startRun() {
+    const want = rally.stageKey();
+    if (want && want !== cfg.biome) {
+      const u = new URL(location.href);
+      u.searchParams.set('biome', want);
+      u.searchParams.delete('shot'); u.searchParams.delete('frames'); u.searchParams.delete('menu');
+      location.href = u.href;
+      return;
+    }
+    if (input.touch.enabled) input.touch.setVisible(true);
+  }
+  // Ustawienia dotyku: 'auto' = auto-detekcja input.touch, 'on'/'off' = wola gracza.
+  function applyTouch() {
+    const want = settings.touchOverlay;
+    if (want === 'on') input.touch.enable(window);
+    else if (want === 'off' && input.touch.enabled) input.touch.disable();
+    rally.setTouchInset(input.touch.enabled ? 240 : 0);   // HUD podnosi dolne panele
   }
 
   // A few metres along the arc: at arc 0 the rear axle still straddles the uncarved terrain behind the start line.
@@ -239,7 +286,11 @@ async function main() {
       const modes = ['CHASE', 'ONBOARD', 'BUMPER', 'FREE'];
       settings.cameraMode = modes[(modes.indexOf(settings.cameraMode) + 1) % modes.length];
     } else if (code === 'KeyH') hud.toggle();
-    else if (code === 'KeyP' || code === 'Escape') loop.time.paused = !loop.time.paused;
+    else if (code === 'Escape') {
+      // ESC cofa w menu, w grze pauzuje (skills/game-ui-ux #5: wyjście zawsze)
+      if (!rally.driving()) { rally.back(); rally._dirtyAll = true; }
+      else loop.time.paused = !loop.time.paused;
+    }
     else if (code === 'KeyR') { restartRun(); }
     else if (code === 'KeyN') {
       // Gęstość HUD-u jak w opcjach CMR: pełny -> minimalny -> wyłączony (PLAN §10).
@@ -254,6 +305,8 @@ async function main() {
       setTimeout(() => hud.boot(null), 1800);
     }
     else if (code === 'Tab') rally.moveFocus(1);
+    else if (code === 'ArrowUp' && !rally.driving()) rally.moveFocus(-1);
+    else if (code === 'ArrowDown' && !rally.driving()) rally.moveFocus(1);
     else if (code === 'Enter') activateMenu();
     else if (code === 'KeyQ') input.tapShift(-1);
     else if (code === 'KeyE') input.tapShift(1);
@@ -279,11 +332,22 @@ async function main() {
 
   window.addEventListener('resize', () => renderer.onResize());
 
+  let padsShown = true;
+  function framePads() {
+    const want = rally.driving();
+    if (want !== padsShown) { input.touch.setVisible(want); padsShown = want; }
+  }
+
   // ---- the loop: fixed sim, interpolated render (docs/06 §3) ----
   const loop = new FrameLoop({
     stepSim(dt) {
       car.assists = { ...settings.assists, ...(car.assistsOverride || {}) };
-      car.setInput(input.sample(dt));
+      // Menu screen on top = the stage clock never advances and the car is parked on
+      // the handbrake, so the stage cannot start before the player presses START.
+      const driving = rally.driving();
+      const smp = input.sample(dt);
+      if (!driving) { smp.throttle = 0; smp.brake = 0; smp.steer = 0; smp.handbrake = 1; }
+      car.setInput(smp);
       const events = car.step(dt);
       for (const e of events) {
         if (e.type === 'impact') view3d.addShake(Math.min(0.6, e.impulse / 90000) * settings.cameraShake);
@@ -291,12 +355,12 @@ async function main() {
       dirt.step(car, dt);
       // Stage clock + gates advance on the same fixed step as the physics, so the
       // stage times a replay produces are identical (PLAN.md §8 #7).
-      stageRun.step(dt, car);
+      if (driving) stageRun.step(dt, car);
       const i = stage.road.nearest(car.body.pos.x, car.body.pos.z);
       ctx.arc = i >= 0 ? stage.road.s[i] : ctx.arc;
       // Co-driver runs on the same fixed step as the physics: the note a replayed
       // drive hears is the note the first drive heard (PLAN.md §8 #7).
-      voice.advance(ctx.arc, dt);
+      if (driving) voice.advance(ctx.arc, dt);
     },
     render(alpha) {
       syncCarMesh(view, car, alpha, dirt);
@@ -313,6 +377,7 @@ async function main() {
       // into the rAF callback and kills the loop (black viewport, HUD only).
       try {
         hud.tick(1 / 60, { ...ctx, loop: l });
+        framePads();
         rally.update(1 / 60, { car, stage: stageRun, notes: notes.notes, voice, stageName });
         if (rally.pendingActivate) { rally.pendingActivate = false; activateMenu(); }
       } catch (e) {
@@ -373,6 +438,12 @@ async function main() {
   // so leaving it up in shot mode paints over the WebGL frame and every headless
   // screenshot reads as a black viewport. The render-cost numbers stay available on
   // window.__vrStats + renderer.info for the shot harness.
+  applyTouch();
+  if (!cfg.autoStart) {
+    // ?menu=settings / ?menu=controls otwieraja dany ekran (harness zrzutow)
+    if (cfg.menuScreen === 'settings' || cfg.menuScreen === 'controls') rally.openScreen(cfg.menuScreen);
+    else rally.openMenu();                             // boot -> menu, START odpala odliczanie
+  }
   hud.boot(null);
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
   window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice };

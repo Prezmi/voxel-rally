@@ -5,23 +5,39 @@ import { settings } from '../core/settings.js';
 import { DT } from '../core/time.js';
 
 const RAD2DEG = 180 / Math.PI;
+// The dev panel is a diagnostic, not a game feature: any field it reads may be
+// undefined on a frame where a subsystem has not booted yet (a toFixed on undefined
+// used to take the whole HUD tick down). Nothing here may throw.
+const num = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+const str = (v, d = '—') => (v === undefined || v === null ? d : String(v));
 
 export class Hud {
   constructor() {
+    this.root = document.getElementById('hud');
     this.tl = document.getElementById('hud-tl');
     this.tr = document.getElementById('hud-tr');
     this.bl = document.getElementById('hud-bl');
     this.br = document.getElementById('hud-br');
     this._acc = 0;
     this._last = ['', '', '', ''];
-    this.enabled = settings.showPhysicsHud;   // the DEV panel is opt-in (key H)
-    if (!this.enabled) { this.enabled = true; this.toggle(); }
+    // Opt-in only: ?debug=1 (or the saved setting, or key H). Off by default so a
+    // screenshot - and a phone screen - never carries a mono text wall over the HUD.
+    const url = typeof location !== 'undefined' && location.search
+      ? /[?&](debug|devhud)=1/.test(location.search) : false;
+    this.enabled = !!(settings.showPhysicsHud || url);
+    this._apply();
+  }
+
+  _apply() {
+    if (this.root && this.root.classList) this.root.classList.toggle('on', this.enabled);
+    for (const el of [this.tl, this.tr, this.bl, this.br]) if (el) el.textContent = '';
+    this._last = ['', '', '', ''];
   }
 
   toggle() {
     this.enabled = !this.enabled;
-    const v = this.enabled ? '' : 'none';
-    for (const el of [this.tl, this.tr, this.bl, this.br]) if (el) el.style.display = v;
+    settings.showPhysicsHud = this.enabled;
+    this._apply();
     return this.enabled;
   }
 
@@ -34,44 +50,44 @@ export class Hud {
     const { car, loop, stream, stage, input, arc } = ctx;
     const dirt = ctx.dirt || null;
     const b = car.body;
-    const kmh = b.groundSpeed * 3.6;
+    const kmh = num(b.groundSpeed) * 3.6;
 
     const gear = car.powertrain.gear;
-    const rpm = car.powertrain.rpm;
-    const redline = car.params.engine.redline;
+    const rpm = num(car.powertrain.rpm);
+    const redline = num(car.params.engine.redline, 1);
     const bar = (n, v) => '▰'.repeat(Math.round(v * n)) + '▱'.repeat(n - Math.round(v * n));
 
     this._set(0, [
       `${car.params.name}`,
       `${kmh.toFixed(0).padStart(4)} km/h   ${gear === 0 ? 'N' : gear}`,
       `${bar(22, Math.min(1, rpm / redline))} ${rpm.toFixed(0)} rpm`,
-      `throttle ${input.state.throttle.toFixed(2)}  brake ${input.state.brake.toFixed(2)}  hb ${input.state.handbrake.toFixed(2)}`,
-      `steer ${(input.state.steer * 100).toFixed(0)}%  -> ${(car.wheels[0].steer * RAD2DEG).toFixed(1)}°`,
+      `throttle ${num(input.state.throttle).toFixed(2)}  brake ${num(input.state.brake).toFixed(2)}  hb ${num(input.state.handbrake).toFixed(2)}`,
+      `steer ${(num(input.state.steer) * 100).toFixed(0)}%  -> ${(num(car.wheels[0] && car.wheels[0].steer) * RAD2DEG).toFixed(1)}°`,
     ].join('\n'));
 
-    const surf = surface(car.wheels[2].surfaceId);
-    const slip = car.wheels.map((w) => (w.alpha * RAD2DEG).toFixed(1).padStart(6)).join(' ');
-    const kap = car.wheels.map((w) => w.kappa.toFixed(2).padStart(6)).join(' ');
-    const loads = car.wheels.map((w) => (w.N / 1000).toFixed(1).padStart(6)).join(' ');
+    const surf = surface(car.wheels[2] ? car.wheels[2].surfaceId : 0);
+    const slip = car.wheels.map((w) => num(w.alpha).toFixed(1).padStart(6)).join(' ');
+    const kap = car.wheels.map((w) => num(w.kappa).toFixed(2).padStart(6)).join(' ');
+    const loads = car.wheels.map((w) => (num(w.N) / 1000).toFixed(1).padStart(6)).join(' ');
     this._set(2, [
-      `surface ${surf.name}   mu ${car.wheels[0].muEff.toFixed(2)}`,
+      `surface ${str(surf && surf.name)}   mu ${num(car.wheels[0] && car.wheels[0].muEff).toFixed(2)}`,
       `alpha deg [${slip}]`,
       `kappa     [${kap}]`,
-      `load kN   [${loads}]  sum ${(car.wheels.reduce((a, w) => a + w.N, 0) / 1000).toFixed(2)}`,
-      `roll ${(Math.asin(Math.max(-1, Math.min(1, -b.m[7]))) * RAD2DEG).toFixed(1)}°  pitch ${(Math.asin(Math.max(-1, Math.min(1, b.m[1]))) * RAD2DEG).toFixed(1)}°  air ${car.airborneWheels}`,
+      `load kN   [${loads}]  sum ${(car.wheels.reduce((a, w) => a + num(w.N), 0) / 1000).toFixed(2)}`,
+      `roll ${(Math.asin(Math.max(-1, Math.min(1, -num(b.m && b.m[7])))) * RAD2DEG).toFixed(1)}°  pitch ${(Math.asin(Math.max(-1, Math.min(1, num(b.m && b.m[1])))) * RAD2DEG).toFixed(1)}°  air ${num(car.airborneWheels)}`,
       dirt ? `BRUD ${dirt.panels.summary()}` : '',
-      dirt ? `obiektyw ${(dirt.lens.severity() * 100).toFixed(0)}%  brud sim ${dirt.stats.msMean.toFixed(2)} ms  splaty ${dirt.stats.splats}` : '',
+      dirt ? `obiektyw ${(num(dirt.lens.severity()) * 100).toFixed(0)}%  brud sim ${num(dirt.stats && dirt.stats.msMean).toFixed(2)} ms  splaty ${num(dirt.stats && dirt.stats.splats)}` : '',
     ].filter((l) => l !== '').join('\n'));
 
     this._set(1, [
-      `${stage.biome}  seed ${stage.seed}`,
+      `${str(stage.biome)}  seed ${str(stage.seed)}`,
       // `arc` comes from the caller: main.js owns the current arc position, while
       // `stage` is the generated stage object and has no arc on it. Reading
       // stage.arc here threw on the first tick and took the whole frame loop down
       // (black viewport, HUD only) - the debug overlay must never own game state.
-      `arc ${(arc ?? 0).toFixed(0)} / ${stage.roadLength.toFixed(0)} m`,
-      `chunks ${stream.stats.chunks}  tris ${(stream.stats.tris / 1000).toFixed(0)}k  props ${stream.stats.props}`,
-      `fps ${loop.fps.toFixed(0)}  sim ${loop.simMs.toFixed(2)} ms  draw ${loop.renderMs.toFixed(2)} ms`,
+      `arc ${num(arc).toFixed(0)} / ${num(stage.roadLength).toFixed(0)} m`,
+      `chunks ${num(stream.stats.chunks)}  tris ${(num(stream.stats.tris) / 1000).toFixed(0)}k  props ${num(stream.stats.props)}`,
+      `fps ${num(loop.fps).toFixed(0)}  sim ${num(loop.simMs).toFixed(2)} ms  draw ${num(loop.renderMs).toFixed(2)} ms`,
       `steps/frame ${Math.round(1 / DT)} @ ${(1 / DT).toFixed(0)} Hz`,
     ].join('\n'));
 

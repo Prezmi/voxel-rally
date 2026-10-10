@@ -44,6 +44,9 @@ export const settings = {
   // HUD (PLAN.md §10: CMR "Game Displays: Full / Minimal / Off")
   hudMode: 'FULL',             // FULL | MINIMAL | OFF, cycled with N
   showCoDriverArrows: true,    // CMR options: co-driver arrows On/Off
+  // Nakładka sterowania dotykowego (skills/game-ui-ux #7): 'auto' = pokaż przy
+  // coarse pointerze / ?touch=on, 'on' | 'off' ustawia menu USTAWIENIA.
+  touchOverlay: 'auto',
 
   // Debug
   showPhysicsHud: false,

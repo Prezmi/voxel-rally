@@ -4,7 +4,8 @@
 // named damage ranges, so the merge is unit-testable headless
 // (src/debug/tests.js) and render/carMesh.js stays the only place that owns a
 // BufferGeometry. The output keeps the car shader contract (docs/04 §4.2):
-//   position / normal / color    geometry + baked face shading
+//   position / normal / color    geometry + the glb's own material colour
+//                                  (no baked face shading, no per-part tone)
 //   aPanel (0..15)               dirt panel per vertex
 //   aLivUv, aLiv                 livery coords + strength
 //   aLamp                        0 none, 1 headlight, 2 tail-light
@@ -43,27 +44,12 @@ export const PART_PANEL = {
   car_flap: 'flank',
 };
 
-/** Part tones used when a node carries no usable material colour. */
-const PART_TINT = {
-  car_body: 0x8a1008, car_fender: 0x8a1008, car_panel: 0x8a1008, car_snorkel: 0x25272b,
-  car_lamps: 0xe9e4cf, car_fascia: 0x2a2c31, car_grille: 0x1a1c20, car_splitter: 0x141517,
-  car_spoiler: 0x8a1008, car_rear: 0x2a2c31, car_diffuser: 0x141517, car_flap: 0x25272b,
-};
-
 /** Damage regions emitted, in merge order (each one a contiguous range). */
 export const REGIONS = ['hood', 'roof', 'glass', 'flank', 'front', 'bumperF',
   'rear', 'under', 'wing', 'lampFL', 'lampFR'];
 
 const SIDED_BASE = /^(flank|sill|arch)/;
 const LIV_PARTS = new Set(['car_body', 'car_fender', 'car_panel', 'car_spoiler']);
-
-/** Hard-edged face shading, same rule as render/car-body.js shadeOf. */
-function shadeOf(nx, ny, nz) {
-  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
-  if (ay >= ax && ay >= az) return ny > 0 ? 1.0 : 0.54;
-  if (az >= ax) return nz > 0 ? 0.93 : 0.70;
-  return nx > 0 ? 0.88 : 0.78;
-}
 
 /** Car-local envelope from params. Heights are ASSET frame (the glb is authored
  *  with the ground at y = 0); `g` is the CoM-frame ground used for the fit. */
@@ -107,10 +93,14 @@ export function panelOf(name, cx, cy, cz, boxes) {
   return classifyPanel(cx, cy, cz, boxes);
 }
 
-function tintOf(name, mat) {
-  let hex = PART_TINT[name] === undefined ? 0x808080 : PART_TINT[name];
-  if (mat && mat.color && typeof mat.color.getHex === 'function') hex = mat.color.getHex();
-  return hex;
+/** The colour of the material the node was exported with, already in the
+ *  renderer's linear working space. Nothing else: no per-part tone table, no
+ *  sRGB re-encode. A node with no material stays neutral white and is lit by
+ *  the scene rather than painted. */
+function tintOf(mat) {
+  const c = mat && mat.color;
+  if (c && Number.isFinite(c.r) && Number.isFinite(c.g) && Number.isFinite(c.b)) return [c.r, c.g, c.b];
+  return [1, 1, 1];
 }
 
 /**
@@ -149,8 +139,7 @@ export function buildAssetBody(nodes, params) {
     for (const g of groups) {
       const mat = mats[g.materialIndex] || null;
       const matName = mat && mat.name ? String(mat.name) : '';
-      const hex = tintOf(name, mat);
-      const cr = ((hex >> 16) & 255) / 255, cg = ((hex >> 8) & 255) / 255, cb = (hex & 255) / 255;
+      const [cr, cg, cb] = tintOf(mat);
       const end = Math.min(np, (g.start || 0) + (g.count || 0));
       for (let k = g.start || 0; k + 2 < end; k += 3) {
         const v = [idx ? idx[k] : k, idx ? idx[k + 1] : k + 1, idx ? idx[k + 2] : k + 2];
@@ -181,9 +170,8 @@ export function buildAssetBody(nodes, params) {
         const liv = (LIV_PARTS.has(name) && region !== 'glass' && region !== 'lampFL' && region !== 'lampFR' && region !== 'under') ? 1 : 0;
         const list = bucket.get(region) || bucket.get('flank');
         for (let j = 0; j < 3; j++) {
-          const shade = shadeOf(tri.nx[j] / nAvg, tri.ny[j] / nAvg, tri.nz[j] / nAvg);
           list.push(tri.x[j], tri.y[j], tri.z[j], tri.nx[j] / nAvg, tri.ny[j] / nAvg, tri.nz[j] / nAvg,
-            cr * shade, cg * shade, cb * shade, panel, liv, lamp);
+            cr, cg, cb, panel, liv, lamp);
         }
         tris++;
       }
