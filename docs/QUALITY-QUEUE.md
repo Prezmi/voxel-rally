@@ -12,11 +12,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P1 · checkpoint and start banner plates in `src/world/props.js:608-614` still use
-      the near-coplanar slab sandwich that caused the gantry checkerboard; rebuild them
-      as one solid core with bands running through it
-- [ ] P2 · dead/bare trees have no billboard band so they pop out at ~90 m while pines
-      and oaks reach 320 m; add a sprite entry in `src/world/props.js` (`SPRITE_PROPS`)
 - [ ] P3 · mud, sand and peat still carry the old heavy sink values in
       `src/world/surfaces.js` after the gravel retune, so those surfaces are far slower
       than intended; retune to a consistent band
@@ -45,7 +40,36 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 - [ ] P14 · depth of field and bloom are not present; a single cheap post pass
       (depth-based blur near the far edge plus a low-res bright-pass bloom) would sell
       the atmosphere; must stay inside the frame budget and be gated by quality
+- [ ] P15 · verge fern/bush sprites hover in mid-air over the terraced verge: placed at
+      `world.columnTopAt()` of their own column while the neighbouring block-tile slab
+      stands a block higher, so the green plates float (seen at 10-40 m in
+      `shots/quality-snags.png`); sit them on the lower of the two column tops
+- [ ] P16 · `pickSpecies` hands `PROP.DEAD` 55-70 % of the stand in SWAMP/CANYON, and now
+      that snags reach 320 m the biome reads as one brown bristle with no leafy mass;
+      cap any single species near 45 % and let the grove pick the dominant one
+- [ ] P17 · two checks share the id T21 (the fx pool check in `src/debug/tests.js:562`
+      and the gate board check at `:1255`), so the id cannot address one of them; renumber
+      the gate check to its place in the sequence (the new vegetation band check is T22)
 
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P2 · dead/bare trees have no billboard band so they pop out at ~90 m while pines
+      and oaks reach 320 m; add a sprite entry in `src/world/props.js` (`SPRITE_PROPS`)
+      · done — `PROP.DEAD` joined `SPRITE_PROPS`/`SPRITE_SPEC` (`src/world/props.js:20,32`)
+      so snags get the mid crossed-quad and the far billboard band like every other tree
+      (they used to be dropped at the 90 m hard prop limit), the 6th atlas cell is painted
+      as a bare snag with a 0.4 m trunk, a snapped crown and three broken limbs sized to
+      the 2.14 m voxel envelope (`src/world/props.js:419-451`), the atlas cell order is now
+      derived from `SPRITE_PROPS` so the UV can never drift from the paint order
+      (`src/world/props.js:43-49`), and T22 (`src/debug/tests.js:1269`) guards that every
+      tree species owns both alpha bands plus its own painted cell. Proof: 33/33 checks
+      (32 before, +1) and `shots/quality-snags.png` (CANYON, read back) shows bare snags
+      running to the horizon instead of stopping short
+- [x] P1 · checkpoint and start banner plates in `src/world/props.js` still use the
+      near-coplanar slab sandwich that caused the gantry checkerboard; rebuild them as one
+      solid core with bands running through it
+      · done in 307e14a by the previous (timed-out) run, never recorded here —
+      `GATE_PLANES` + the rebuilt `buildGateGeometry` (`src/world/props.js:722-795`) and
+      the coplanar-face guard T21 (`src/debug/tests.js:1205-1256`)

@@ -24,7 +24,7 @@ import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
-import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, buildGateGeometry, GATE_PLANES } from '../world/props.js';
+import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex } from '../world/road-carve.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
@@ -1257,6 +1257,49 @@ function testGateBoardIsSolid() {
     + `span=${span.toFixed(1)}m planes=${Object.values(GATE_PLANES).join('/')}`);
 }
 testGateBoardIsSolid();
+
+// ---------------------------------------------------------------- test 22
+// Vegetation LOD bands: every tree species must own all three bands - solid near
+// geometry, the mid crossed-quad sprite, and the far single billboard. A species with no
+// sprite variant has no mid/far band at all, so streaming drops it at the 90 m hard prop
+// limit while oaks and pines reach vegFar (320 m): that is how the bare snags popped out
+// of the skyline ~90 m before the leafy trees. Second half of the check is the atlas -
+// one painted cell per sprite species, all distinct, because the UV is addressed by
+// SPRITE_PROPS.indexOf().
+function testVegetationOwnsEveryLodBand() {
+  // Same headless stand-in as T21: the fake geometry keeps the attribute arrays.
+  class FakeGeo {
+    setAttribute(n, a) { this[n] = a.array; }
+    setIndex(i) { this.idx = i; }
+    computeBoundingSphere() {}
+  }
+  const THREE_STUB = { BufferGeometry: FakeGeo, Float32BufferAttribute: class { constructor(a) { this.array = a; } } };
+  const mid = buildSpriteGeometries(THREE_STUB);
+  const bill = buildBillboardGeometries(THREE_STUB);
+  const TREES = [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.DEAD, PROP.BUSH, PROP.FERN];
+  const gaps = [];
+  for (const p of TREES) {
+    const n = PROP_NAMES[p], sp = SPRITE_SPEC[p];
+    if (!SPRITE_PROPS.includes(p)) gaps.push(`${n}/no-sprite-band`);
+    if (!sp || !(sp.w > 1) || !(sp.h > 1)) { gaps.push(`${n}/no-sprite-spec`); continue; }
+    if (!mid[p] || !mid[p].idx || mid[p].idx.length !== sp.planes * 6) gaps.push(`${n}/mid-quad`);
+    if (!bill[p] || !bill[p].idx || bill[p].idx.length !== 6) gaps.push(`${n}/billboard`);
+  }
+  const cells = SPRITE_ATLAS.species;
+  if (cells.length !== SPRITE_PROPS.length) gaps.push(`cells=${cells.length}!=species=${SPRITE_PROPS.length}`);
+  if (new Set(cells).size !== cells.length) gaps.push('duplicate-paint-cell');
+  if (cells.length > SPRITE_ATLAS.cols * SPRITE_ATLAS.rows) gaps.push('atlas-over-full');
+  if (new Set(SPRITE_PROPS.map((_, i) => atlasRect(i).join(','))).size !== SPRITE_PROPS.length) gaps.push('atlas-rect-collision');
+  // A sprite species still needs a solid near build: a 2-plane alpha quad cannot carry a
+  // trunk next to the car, and that is what the near band is for.
+  for (const p of [PROP.DEAD, PROP.OAK, PROP.PINE]) if (!NEAR_LOD_TRIS[p]) gaps.push(`${PROP_NAMES[p]}/no-near-lod`);
+  const snag = SPRITE_SPEC[PROP.DEAD];
+  const ok = gaps.length === 0 && snag.w >= 1.6 && snag.w <= 3.0 && snag.h >= 4.5;
+  check('T22 every tree species owns the mid sprite and the far billboard band with its own painted atlas cell (nothing pops at the 90 m hard prop limit)',
+    ok, `species=${SPRITE_PROPS.map((p) => PROP_NAMES[p]).join(',')} snag=${snag.w}x${snag.h}m/planes=${snag.planes} `
+    + `atlas=${SPRITE_ATLAS.cols}x${SPRITE_ATLAS.rows}@${SPRITE_ATLAS.cellPx}px gaps=[${gaps.join(' ')}]`);
+}
+testVegetationOwnsEveryLodBand();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

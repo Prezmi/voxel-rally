@@ -13,21 +13,40 @@ export const PROP_NAMES = ['oak', 'pine', 'dead', 'spectator', 'post', 'gate', '
 // Vegetation species that are drawn as crossed alpha quads (sprite billboards),
 // which is how CMR 2.0 drew its trees (PLAN §10.2: "drzewa to sprite'y, nie
 // polygony"). Everything else stays a voxel prop.
-export const SPRITE_PROPS = [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.BUSH, PROP.FERN];
+// PROP.DEAD is here too: a snag without a sprite variant had no mid/far band at all,
+// so the near voxel build was dropped at the hard 90 m prop limit while oaks and pines
+// carried on to vegFar (320 m) - bare trees popped out of the skyline ~90 m before the
+// leafy ones, most visible in SWAMP/CANYON where snags are half the stand.
+export const SPRITE_PROPS = [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.BUSH, PROP.FERN, PROP.DEAD];
 export const SPRITE_SPEC = {
   [PROP.OAK]: { w: 5.6, h: 7.2, planes: 3 },
   [PROP.PINE]: { w: 4.6, h: 9.4, planes: 3 },
   [PROP.BIRCH]: { w: 4.4, h: 7.8, planes: 3 },
   [PROP.BUSH]: { w: 2.3, h: 1.7, planes: 2 },
   [PROP.FERN]: { w: 1.8, h: 1.3, planes: 2 },
+  // Same outer envelope as the near LOD snag (NEAR_LOD_SPEC below) so the near -> mid
+  // handover does not move the skyline: the voxel build reaches 1.17 m of limbs to one
+  // side and 0.97 m to the other, i.e. ~2.1 m across. Three planes, not two: with the
+  // bare trunk painted only 6 texels wide, two planes left the snag reading thinner at
+  // 30 m than the voxel tree it replaces at 24 m.
+  [PROP.DEAD]: { w: 2.10, h: 5.94, planes: 3 },
 };
-const SPR = { OAK: 0, PINE: 1, BIRCH: 2, BUSH: 3, FERN: 4 };
+const SPR = { OAK: 0, PINE: 1, BIRCH: 2, BUSH: 3, FERN: 4, DEAD: 5 };
 const TEX_PX = 32;                       // 32x32, nearest neighbour (true pixel art)
 // One canvas atlas, painted once at boot: every sprite species lives in its own
 // 32x32 cell of a single texture, so the whole forest is one texture and one shader
 // program (PLAN §10.2 "zero assetów": still fully procedural, still no file).
 const ATLAS = { cols: 4, w: TEX_PX * 4, h: TEX_PX * 2 };
-const SPR_CELL = [SPR.OAK, SPR.PINE, SPR.BIRCH, SPR.BUSH, SPR.FERN];
+// Atlas cell painted for each sprite species. DERIVED from SPRITE_PROPS, because
+// buildSpriteGeometries/atlasRect address the cell by SPRITE_PROPS.indexOf(): a species
+// appended to one list and not the other would silently sample another species' foliage.
+const SPR_PAINT = { [PROP.OAK]: SPR.OAK, [PROP.PINE]: SPR.PINE, [PROP.BIRCH]: SPR.BIRCH,
+  [PROP.BUSH]: SPR.BUSH, [PROP.FERN]: SPR.FERN, [PROP.DEAD]: SPR.DEAD };
+const SPR_CELL = SPRITE_PROPS.map((p) => SPR_PAINT[p]);
+/** Atlas layout as the renderer sees it, so a test can prove every sprite species owns
+ *  a painted cell and that the atlas is not over-full. */
+export const SPRITE_ATLAS = { cellPx: TEX_PX, cols: ATLAS.cols, rows: ATLAS.h / TEX_PX,
+  species: SPR_CELL.slice() };
 
 /** Atlas cell of one sprite species as [u0,v0,u1,v1], inset by half a texel so a
  *  neighbouring cell can never bleed in at the quad edge. */
@@ -273,8 +292,8 @@ export function generateChunkProps(cx, cz, stage) {
 /**
  * Procedural foliage textures, painted once at boot into small canvases and read
  * with NearestFilter (PLAN §10.2 "tekstura 16x16 lub 32x32 generowana proceduralnie
- * w kodzie (zero assetów)"). No file, no fetch, no per-frame work: the five
- * canvases are shared by every instance of the species.
+ * w kodzie (zero assetów)"). No file, no fetch, no per-frame work: the six cells are
+ * painted into one shared canvas, so every instance of every species samples it.
  */
 export function buildFoliageTextures(THREE) {
   if (typeof document === 'undefined') return null;      // headless: no canvas
@@ -394,6 +413,46 @@ function paintFoliage(kind, data) {
       for (let x = 16 - half; x <= 16 + half; x++) if (ph(x, y, 7) > 0.11) leaf(x, y, base, true, 15);
     }
     for (let y = 26; y < TEX_PX; y++) trunk(16, y, 1, [70, 56, 36], 21);
+    return;
+  }
+
+  if (kind === SPR.DEAD) {
+    // A bare snag: no leaf mass, so the whole silhouette has to come from the trunk and
+    // the broken limbs. Painted from the voxel snag palette (NEAR_LOD_SPEC / buildTree
+    // Geometries) so the sprite and the near voxel tree read as the same tree, and 6
+    // texels (0.38 m at the 2.02 m quad) is the real trunk diameter - thinner and the
+    // snag vanishes at the 300 m this band has to reach, thicker and it reads as a post.
+    const pale = [106, 88, 67], mid = [91, 76, 57], dark = [76, 63, 46];
+    const wood = (x, y, c, s) => {
+      // Bark tone plus a vertical banding noise: flat wood at 300 m is a pale stick.
+      const t = 0.68 + 0.5 * ph(x, y >> 2, s + 5);
+      px(data, x, y, c[0] * t, c[1] * t * 0.97, c[2] * t * 0.92, 255);
+    };
+    // Trunk: tapers from 3 texels half-width (0.4 m, the real snag diameter) at the
+    // ground to 2 texels under the snapped crown. Never thinner than 2: one texel is
+    // 6 cm, which is sub-pixel past 150 m and the far band turns into a sparkle.
+    for (let y = 5; y < TEX_PX; y++) {
+      const u = (y - 5) / (TEX_PX - 6);
+      const half = Math.max(2, Math.round(1.6 + 1.6 * u));
+      const lean = Math.round(1.4 * u * (ph(y, 3, 11) > 0.5 ? 1 : -1));
+      for (let dx = -half; dx <= half; dx++) wood(16 + lean + dx, y, dx < 0 ? pale : mid, 17);
+      if (y % 6 === 3) for (let dx = -half; dx <= half; dx++) px(data, 16 + lean + dx, y, dark[0], dark[1], dark[2], 255);
+    }
+    // Limbs start INSIDE the trunk (a limb starting at the trunk face is a floating
+    // stick at distance) and step up, or droop for the lowest one.
+    const limb = (y0, dir, len, up) => {
+      for (let s = 0; s < len; s++) {
+        const y = up ? y0 - Math.floor(s / 2) : y0 + Math.floor(s / 3);
+        wood(16 + dir * s, y, mid, 23);
+        if (s > 1) wood(16 + dir * s, y + 1, dark, 29);      // shaded underside
+      }
+    };
+    limb(13, -1, 11, true);
+    limb(18, 1, 12, true);
+    limb(24, -1, 9, false);
+    // Nubs and the snapped top: the ragged edge is what stops the far band reading as a
+    // row of toothpicks.
+    for (const [x, y] of [[5, 9], [27, 12], [7, 20], [26, 19], [16, 4], [18, 3]]) wood(x, y, pale, 37);
     return;
   }
 
