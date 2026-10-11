@@ -126,6 +126,7 @@ void main() {
 
     this.terrainMaterial = null;
     this.propMaterial = null;
+    this.tileMaterial = null;
     this.carMaterial = null;
     this._buildMaterials();
 
@@ -333,6 +334,11 @@ float fbm1(vec2 p) { return vnoise(p); }
     // instanceColor and the baked vertex colours still feed USE_INSTANCING_COLOR /
     // USE_COLOR in the standard shader (both materials support them).
     this.propMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.0 });
+    // Road block tiles get their own base material instead of the prop fallback: packed
+    // damp earth is rougher than a prop, and the layer needs to be separable from props
+    // so its shadow policy (receive only, never cast, never self-shadow) and its plate
+    // tone can be set in one place. streaming._adoptBlockTiles clones this.
+    this.tileMaterial = new THREE.MeshStandardMaterial({ vertexColors: false, roughness: 0.94, metalness: 0.0, flatShading: false });
     this.carMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.42, metalness: 0.25 });
   }
 

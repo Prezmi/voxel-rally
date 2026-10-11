@@ -23,7 +23,7 @@ export const ROAD_TONE = {
 export const RUT_GLOSS = {
   from: 0.10,                        // wear at or below this is fully in the rut
   to: 0.45,                          // wear at or above this is back to panel roughness
-  road: 0.74,                        // 26 % glossier inside the rut: packed, damp earth
+  road: 0.71,                        // 29 % glossier inside the rut: packed, damp earth
 };
 
 /** The tone band the shader multiplies a panel by, as measured numbers. */

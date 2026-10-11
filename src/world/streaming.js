@@ -66,7 +66,8 @@ const BLOCK_SURFACES = Object.keys(BLOCK_NODE).map(Number);
 // surface type with a fixed capacity allocated once at boot. No allocation per frame.
 const TILE_CAP_CHUNK = 192;
 const TILE_CAPACITY = 4096;
-const VERGE = 2.8;                 // nominal m past carriageway+shoulder that still counts
+const VERGE = 1.7;                 // nominal m past carriageway+shoulder that still counts
+const VERGE_SHRINK = 0.78;         // grass/verge plates shrink: paving stops at the edge
 // The verge used to end on a ruled tile line. The cutoff jitters per column and the
 // grass band is thinned out to bare dirt, so the corridor edge is ragged.
 const VERGE_SALT = 0x5177a1e3;
@@ -75,11 +76,11 @@ const BARE_SALT = 0x2be4c07d;
 // instead of leaving slots, and the slab sits a hair BELOW the column top: TILE_LIFT
 // used to be +0.02, which put a lit lip under every plate and let graded ground show
 // through as a gap.
-const TILE_SPAN = 1.12;
-const TILE_LIFT = -0.02;
+const TILE_SPAN = 1.30;
+const TILE_LIFT = -0.03;           // top face stays at or under the column top, never proud
 const TILE_JITTER = 0.14;          // m of in-plane jitter, affordable because tiles overlap
-const RUT_DROP = 0.055;            // packed wheel line sits lower than the crown
-const CROWN_RAISE = 0.045;         // the centre of the road is the high line
+const RUT_DROP = 0.04;             // packed wheel line sits lower than the crown
+const CROWN_RAISE = 0.02;          // the centre of the road is the high line (inside LIFT)
 const PEBBLE_CHANCE = 0.18;        // share of the road-edge band that becomes small stones
 // Free high bits of the per-column tile table (surface ids are < 32): what relief and
 // what kind of edge material this column's tile carries.
@@ -311,7 +312,7 @@ export class Streaming {
         d: Math.min(1.4, Math.max(0.6, bb.max.z - bb.min.z)),
         h: useBox ? h : 1,
       });
-      const srcMat = rec.material || this.renderer.propMaterial;
+      const srcMat = rec.material || this.renderer.tileMaterial || this.renderer.propMaterial;
       const mat = srcMat.clone();
       mat.vertexColors = false;
       // The baked slabs carry their own vertex colours from an older, wider palette.
@@ -330,7 +331,11 @@ export class Streaming {
       // carriageway and the road reads as a patchwork again.
       im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(TILE_CAPACITY * 3), 3);
       im.instanceColor.setUsage(THREE.DynamicDrawUsage);
-      im.castShadow = false;                                // a 0.18 m slab: no own shadow
+      // Shadow policy for the tile layer, one line each: the plates never cast, so no
+      // plate ever shades the plate next to it (those were the hard cast edges), and a
+      // layer that cannot cast cannot shade itself either. They still take the tree and
+      // car shadow.
+      im.castShadow = false;                                // never cast, never self-shadow
       im.receiveShadow = true;
       im.count = 0;
       im.visible = false;
@@ -375,9 +380,12 @@ export class Streaming {
       if (!sid || !BLOCK_SURFACES.includes(sid)) continue;
       let flags = 0;
       if (lat > hw + SHOULDER * 0.4) {
-        // Verge: skip a fifth of the columns so bare dirt shows between the grass
-        // blocks instead of one unbroken mint carpet.
-        if (hash01(c + cx * 17, cz * 31 + cx, BARE_SALT) < 0.22) continue;
+        // Verge: bare dirt shows between the plates, and the dropout deepens outwards so
+        // nothing sits far up the bank where it reads as paving. Grass survives only in
+        // the inner half of the verge band; the outer half drops over half its columns.
+        const outer = lat > hw + SHOULDER + verge * 0.5;
+        if (outer && sid === SURF.GRASS) continue;
+        if (hash01(c + cx * 17, cz * 31 + cx, BARE_SALT) < (outer ? 0.55 : 0.22)) continue;
       } else if (lat > hw - 0.55) {
         if (hash01(c + cx * 13, cz * 29 + cx, VERGE_SALT) < PEBBLE_CHANCE) flags = FLAG_PEBBLE;
       } else if (Math.abs(lat - hw * 0.55) < hw * 0.22) {
@@ -449,13 +457,16 @@ export class Streaming {
           // column, so it is laid at the LOWEST top under its own footprint. Taking the
           // source column's top is what left plates hovering over the graded crown.
           const stride = TILE_STRIDE[ring] || 1;
-          const span = stride * TILE_SPAN * (peb ? 0.45 : 1);
+          const span = stride * TILE_SPAN * (peb ? 0.45 : (sid === SURF.GRASS ? VERGE_SHRINK : 1));
           const half = span * 0.5;
           let y = chunk.columnTop(c);
           if (y < 0) continue;
-          for (const sx of [wx - half, wx + half]) {
-            for (const sz of [wz - half, wz + half]) {
-              const hy = this.world.columnTopAt(Math.floor(sx), Math.floor(sz));
+          // Clamp on the whole footprint, not just its corners: a plate whose neighbours
+          // are lower has to come down to the lowest column it covers, or it bridges the
+          // slot between them and reads as a slab on legs.
+          for (const fx of [-half, 0, half]) {
+            for (const fz of [-half, 0, half]) {
+              const hy = this.world.columnTopAt(Math.floor(wx + fx), Math.floor(wz + fz));
               if (hy >= 0 && hy < y) y = hy;
             }
           }
@@ -469,7 +480,7 @@ export class Streaming {
           }
           const jx = (hash01(c + rec.cx * 7, rec.cz * 19 + rec.cx, VERGE_SALT) - 0.5) * TILE_JITTER * stride;
           const jz = (hash01(c + rec.cx * 23, rec.cz * 11 + rec.cx, BARE_SALT) - 0.5) * TILE_JITTER * stride;
-          const relief = (rut ? -RUT_DROP : 0) + (crown ? CROWN_RAISE : 0) + (peb ? 0.03 : 0);
+          const relief = (rut ? -RUT_DROP : 0) + (crown ? CROWN_RAISE : 0) + (peb ? 0.01 : 0);
           this._pos.set(wx + off.x + jx, y + TILE_LIFT + relief + off.y, wz + off.z + jz);
           this._quat.identity();
           this._scale.set(span, off.h, span);
@@ -480,12 +491,12 @@ export class Streaming {
           // rut and one over the crown / outer edge as light as that band.
           const tc = this._tileCol || (this._tileCol = new THREE.Color());
           const w01 = (chunk.wear ? chunk.wear[c] : 0) / 255;
-          let tint = 0.80 + 0.20 * w01;        // was 0.94 + 0.12: a washed plate over banded ground
-          if (rut) tint *= 0.80;               // damp, compacted wheel line
-          else if (crown) tint *= 1.14;        // the high line catches the sky
-          else if (sid === SURF.GRASS) tint *= 0.88;
-          if (peb) tint = 1.15;                // stones read paler than the packed edge
-          if (tint > 1.25) tint = 1.25;
+          let tint = 0.96 + 0.08 * w01;        // 8 % band: one surface, not a checkerboard
+          if (rut) tint *= 0.93;               // damp, compacted wheel line
+          else if (crown) tint *= 1.06;        // the high line catches the sky
+          else if (sid === SURF.GRASS) tint *= 0.97;
+          if (peb) tint = 1.08;                // stones read paler than the packed edge
+          if (tint > 1.10) tint = 1.10;
           im.setColorAt(used, tc.setRGB(tint, tint, tint));
           this._tileCount.set(sid, used + 1);
         }
