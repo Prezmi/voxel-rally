@@ -17,3 +17,23 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T11:00:22.887Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen: P8** — “night stages have no headlight beams; add two cheap cone volumes or a spot light plus road decals that stay inside the frame budget” (lowest P number in `docs/QUALITY-QUEUE.md`).
+
+**What the item actually was.** Half of it had already landed and was never recorded: the SpotLight pool and the two additive cone shells exist (`src/render/headlights.js`, added in `099c8c4`) and are pinned by T29/T30. So the run spent itself on the first night frame ever captured — one headless Chrome pass, `?seed=95` (a real DUSK stage, tod 0.85) `&frames=900&shot=1&cam=BUMPER&stats=1`, read back at `shots/quality-night-beams.png`. Judgement of my own shot: the pool does land corridor-sized on the road, but **the shafts rendered as two solid pale cards welded to the nose** — the ramp opened at `a: 0.34` *at the lens*, and every driver camera sits at lamp height *inside* the cone, so the near wall of both shells filled the lower half of the frame as geometry, the far half (where the pool actually lights the road) was the dim part of the curve, and the doubled core (`2 × 1.0 × 0.16` = 0.32 additive) was brighter than the road it drew over.
+
+**Changes (path:line)**
+- `src/render/headlights.js:61-63` — rings rebuilt: `t 0 / 0.20 / 0.55 / 1`, `r 0.10 / 0.70 / 1.55 / 2.35`, `a 0 / 0.40 / 0.85 / 0` → nothing at the lens, peak at 11 m (the middle of the pool), nothing at the far end; 96 → 144 tris, inside the 160 pinned for a cheap volume.
+- `src/render/headlights.js:67` — `gain: 0.16 → 0.13`; core additive 0.32 → 0.221.
+- `src/render/headlights.js:144` `shaftWallAlpha(t)`, `src/render/headlights.js:162` `shaftPeak()` — the ring interpolation the shader does per fragment, now readable headless.
+- `src/debug/tests.js:2542` (check at `:2584`) — new **T41**: shell alpha exactly 0 at both ends, the first 4 m of the cone the camera sits inside stay under 50 % of peak (47 % now, >100 % before), exactly one rise and one fall, peak at 35-75 % of reach *and* over ground the pool lights (2.14 illuminance under it), core clamped 0.10..0.26, rings monotone with a lens-sized first ring, cost re-pinned ≤ 160 tris. No test deleted or weakened; checks 51 → 52.
+- `docs/QUALITY-QUEUE.md` — P8 recorded in Done; three new defects filed from the same frame as P35 (lit-box past the 26 m pool cut-off), P36 (`stageClimate` never rolls the rig’s dark half — `src/world/road-spline.js:284` tops out at 0.87 vs the night stop `src/render/lighting.js:28-29`), P37 (lens flare fires off the headlights at night).
+- SpotLight, cone angle and footprint untouched (T30 already proves them).
+
+**Verbatim test line:**
+```
+PASS  T41 the night shaft reads as light, not as geometry: nothing at the lens, peak over the lit pool, one rise and fall, brighter haze never outranks the road  rings t 0/0.2/0.55/1 r 0.1/0.7/1.55/2.35 a 0/0.4/0.85/0 gain 0.13 | peak 11.0 m of 20 m core 0.221 max 0.221 near-quarter 47% turns=1 | lit ground under peak 2.14 | tris=144 (budget 160) | gaps=[]
+52/52 passed
+```
+`tools/smoke.mjs` drive clean, no NaN. Committed locally as `954e130` (not pushed). Caveat recorded in the queue: the one allowed screenshot pass went to the diagnostic frame, so this new ramp has no after-shot yet — the next night capture must read it back.
+To https://github.com/Prezmi/voxel-rally.git
+   8e425d9..954e130  main -> main

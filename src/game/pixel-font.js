@@ -148,4 +148,16 @@ function textWidth(text, scale = 1) {
   return normalize(text).length * ADV * Math.max(1, Math.round(scale));
 }
 
-export { drawText, textWidth, normalize, GLYPH_W, GLYPH_H, ADV, GW, GH, CELL };
+/**
+ * Pure glyph read-out: the GH rows of one glyph as GW chars of '0'/'1', or null when
+ * the character has no bitmap. No canvas, no DOM, importable from node. The HUD draws
+ * through the sheet, but render/car-livery.js needs the CELLS themselves so it can
+ * paint a competition number as rectangles at its own scale (queue P9).
+ */
+function glyphRows(ch) {
+  const c = normalize(String(ch == null ? '' : ch));
+  if (c.length !== 1 || !INDEX.has(c)) return null;
+  return RAW[c].split(',');
+}
+
+export { drawText, textWidth, normalize, glyphRows, GLYPH_W, GLYPH_H, ADV, GW, GH, CELL };

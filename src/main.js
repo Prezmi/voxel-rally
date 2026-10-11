@@ -373,7 +373,7 @@ async function main() {
       sheetPose = showroomPose(cfg.viewName, {
         min: { x: _box.min.x, y: _box.min.y, z: _box.min.z },
         max: { x: _box.max.x, y: _box.max.y, z: _box.max.z },
-      }, renderer.camera.aspect || 16 / 9);
+      }, renderer.camera.aspect || 16 / 9, (cfg.sheet && cfg.sheet.dist) || 0);
       // The sheet's 45 mm lens on a 36 mm sensor, converted to three's vertical fov.
       renderer.camera.fov = sheetPose.fovDeg;
       renderer.camera.updateProjectionMatrix();

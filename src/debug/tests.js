@@ -12,7 +12,7 @@ import { TYRE_BASE, CARS } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
-import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP } from '../render/car-livery.js';
+import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP, LIVERY_TEXEL, LIVERY_NUM, LIVERY_SAMPLE, liveryNumberRects, buildLiveryTexture } from '../render/car-livery.js';
 import { FxSystem, FX_CAPACITY, DUST_TUNE } from '../fx/fx.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
@@ -2588,6 +2588,128 @@ function testShaftRampReadsAsLightNotAsGeometry() {
     + `| lit ground under peak ${under.toFixed(2)} | tris=${tris} (budget 160) | gaps=[${gaps.join(' ')}]`);
 }
 testShaftRampReadsAsLightNotAsGeometry();
+
+// ---------------------------------------------------------------- test 42
+// Livery legibility (queue P9: the door number stops reading past ~15 m). Three things
+// have to hold at once, and all three are measurable headless: the number is GEOMETRY
+// (blocks of the HUD's own bitmap, not a system-font glyph), its strokes are thick
+// enough to survive a mip box, and the texture is actually minified through a mip chain
+// instead of nearest-neighbour, which is what punched holes in the digit on screen.
+function testLiveryNumberReadsAtDistance() {
+  const src = readFileSync(new URL('../render/car-livery.js', import.meta.url), 'utf8');
+  const gaps = [];
+  const disc = LIVERY_ROUND.r * LIVERY_TEXEL * 2;      // the 0.35 m roundel, in texels
+  if (!(LIVERY_TEXEL >= 1024)) gaps.push(`atlas is ${LIVERY_TEXEL} texels`);
+  if (!(disc >= 36)) gaps.push(`roundel is only ${disc.toFixed(1)} texels across`);
+
+  let capFrac = 1, stroke = 1e9, coverMin = 1, coverMax = 0, spill = 0, rectsTotal = 0;
+  const detail = [];
+  for (const id of ['A', 'B', 'C', 'D']) {
+    const n = liveryNumberRects(id);
+    if (!n.rects.length) { gaps.push(`${id}: no number geometry`); continue; }
+    rectsTotal += n.rects.length;
+
+    // 1. the whole lit box, bold growth included, stays inside the white disc
+    let out = 0;
+    for (const [x, y, w, h] of n.rects) {
+      for (const [px, py] of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
+        out = Math.max(out, Math.hypot(px - n.cx, py - n.cy) - n.r);
+      }
+    }
+    spill = Math.max(spill, out);
+    if (out > 0) gaps.push(`${id}: the number leaves the roundel by ${out.toFixed(2)} texels`);
+
+    // 2. centred on the roundel, and the lit box measures what it claims to
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const [x, y, w, h] of n.rects) {
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
+    }
+    if (Math.abs((x0 + x1) / 2 - n.cx) > 1 || Math.abs((y0 + y1) / 2 - n.cy) > 1) {
+      gaps.push(`${id}: number off the roundel centre by ${((x0 + x1) / 2 - n.cx).toFixed(2)},${((y0 + y1) / 2 - n.cy).toFixed(2)}`);
+    }
+    if (Math.abs((x1 - x0) - (n.inkW * n.cell + n.bold)) > 1 || Math.abs((y1 - y0) - n.cap) > 1) {
+      gaps.push(`${id}: lit box ${x1 - x0}x${y1 - y0} disagrees with cell ${n.cell} cap ${n.cap}`);
+    }
+
+    // 3. size + stroke: a stroke must still carry ink two mip levels down (a 4x4 texel
+    //    box), which is where a 0.35 m roundel sits at ~18-20 m on a 1080p screen.
+    const s = n.cell + n.bold;
+    stroke = Math.min(stroke, s);
+    capFrac = Math.min(capFrac, n.cap / disc);
+    if (n.cap < 0.5 * disc) gaps.push(`${id}: cap ${n.cap} of a ${disc.toFixed(0)} texel roundel is a dot, not a number`);
+    if (s < 4) gaps.push(`${id}: ${s} texel strokes vanish in the 4x mip box`);
+
+    // ink share of the disc: enough to read, never a blob that reads as a dark plate.
+    // Rasterise in a frame centred on the roundel (the rects live at u 0.25 / v 0.09 of
+    // a 1024 canvas, so a local grid is the only sane window).
+    const W = Math.ceil(disc) + 4, ox = n.cx - W / 2, oy = n.cy - W / 2;
+    const g = new Uint8Array(W * W);
+    for (const [x, y, w, h] of n.rects) {
+      for (let iy = Math.round(y - oy); iy < Math.round(y - oy) + h; iy++) {
+        for (let ix = Math.round(x - ox); ix < Math.round(x - ox) + w; ix++) {
+          if (ix >= 0 && iy >= 0 && ix < W && iy < W) g[iy * W + ix] = 1;
+        }
+      }
+    }
+    let ink = 0, area = 0;
+    for (let iy = 0; iy < W; iy++) {
+      for (let ix = 0; ix < W; ix++) {
+        if (Math.hypot(ix + 0.5 - (n.cx - ox), iy + 0.5 - (n.cy - oy)) > n.r) continue;
+        area++;
+        if (g[iy * W + ix]) ink++;
+      }
+    }
+    const cover = area ? ink / area : 0;
+    coverMin = Math.min(coverMin, cover); coverMax = Math.max(coverMax, cover);
+    if (!(cover >= 0.10 && cover <= 0.50)) gaps.push(`${id}: number covers ${(cover * 100).toFixed(0)}% of the roundel`);
+    detail.push(`${id}'${n.label}' cell ${n.cell}+${n.bold} cap ${n.cap}/${disc.toFixed(0)} cover ${(cover * 100).toFixed(0)}% rects ${n.rects.length}`);
+  }
+
+  // 4. the sampler: minifying with NearestFilter and no mip chain is the defect itself,
+  //    so build the texture through a stub DOM/three and read back what it asks for.
+  const prevDoc = globalThis.document;
+  const drawn = [];
+  const ctx2d = new Proxy({ fillRect: (x, y, w, h) => drawn.push([x, y, w, h]) }, {
+    get: (p, k) => (k in p ? p[k] : () => {}), set: (p, k, v) => { p[k] = v; return true; },
+  });
+  globalThis.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ctx2d }) };
+  const F = { Nearest: 1003, Mip: 1008, Linear: 1006, Clamp: 33071 };
+  let tex = null;
+  try {
+    tex = buildLiveryTexture('A', {
+      NearestFilter: F.Nearest, LinearMipmapLinearFilter: F.Mip, LinearFilter: F.Linear,
+      ClampToEdgeWrapping: F.Clamp, SRGBColorSpace: 'srgb',
+      CanvasTexture: class { constructor(img) { this.image = img; } },
+    });
+  } finally { globalThis.document = prevDoc; }
+  if (!tex) gaps.push('buildLiveryTexture did not return a texture');
+  else {
+    if (tex.image.width !== LIVERY_TEXEL || tex.image.height !== LIVERY_TEXEL) gaps.push(`canvas ${tex.image.width}x${tex.image.height}`);
+    if (tex.magFilter !== F.Nearest) gaps.push('magnification is no longer nearest (the block digit turns to mush up close)');
+    if (tex.minFilter !== F.Mip) gaps.push(`minFilter ${tex.minFilter} is not a mipmap filter`);
+    if (tex.generateMipmaps !== LIVERY_SAMPLE.mips || LIVERY_SAMPLE.mips !== true) gaps.push('no mip chain is generated');
+    if (!(tex.anisotropy >= 4)) gaps.push(`anisotropy ${tex.anisotropy} cannot hold a flank seen at a graze angle`);
+  }
+  // the paint path must actually draw the geometry, and must not go back to a font
+  if (drawn.length < liveryNumberRects('A').rects.length + 3) gaps.push(`drawLivery painted ${drawn.length} rects for ${liveryNumberRects('A').rects.length} number cells + 3 fields`);
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
+  if (/ctx\.font\s*=|fillText\s*\(/.test(code)) gaps.push('car-livery.js paints the number with a system font again');
+  if (!/LIVERY_NUM/.test(src)) gaps.push('the number block spec is not used by the paint path');
+
+  // 5. the ?sheetDist knob T42 measured with: the sheet frames at ~8 m, which cannot
+  //    answer "does it still read at 20 m".
+  const sc = showroomConfig('?showroom=1&view=side&sheetDist=22');
+  const pose = showroomPose('side', { min: { x: -2.1, y: 0, z: -0.95 }, max: { x: 2.1, y: 1.2, z: 0.95 } }, 16 / 9, sc.dist);
+  const poseDefault = showroomPose('side', { min: { x: -2.1, y: 0, z: -0.95 }, max: { x: 2.1, y: 1.2, z: 0.95 } }, 16 / 9);
+  if (!(sc.active && sc.dist === 22)) gaps.push(`?sheetDist=22 parsed as ${sc.dist}`);
+  if (!(pose.dist === 22 && poseDefault.dist !== 22)) gaps.push('sheetDist does not move the showroom camera');
+  if (!(sc.dist > poseDefault.dist)) gaps.push('the knob moved the camera closer, not further');
+
+  check('T42 the door number is geometry that reads at distance: pixel-bitmap blocks, strokes >= a 4x mip box, cap >= half the roundel, inside the disc, centred, painted through a mip-sampled 1024 atlas, never a font glyph',
+    gaps.length === 0,
+    `atlas ${LIVERY_TEXEL} | roundel ${disc.toFixed(1)} texels = ${(LIVERY_ROUND.r * 2 / (0.46 / 4.114)).toFixed(3)} m | min cap ${(capFrac * 100).toFixed(0)}% of the roundel, min stroke ${stroke} texels, cover ${(coverMin * 100).toFixed(0)}-${(coverMax * 100).toFixed(0)}%, spill ${spill.toFixed(2)}, rects ${rectsTotal} | min ${LIVERY_TEXEL >= 1024 ? 'ok' : 'low'} | aniso ${tex && tex.anisotropy} minFilter ${tex && tex.minFilter} mag ${tex && tex.magFilter} | drawn ${drawn.length} | sheetDist ${sc.dist} vs ${poseDefault.dist.toFixed(2)} | ${detail.join(' ')} | gaps=[${gaps.join(' ')}]`);
+}
+testLiveryNumberReadsAtDistance();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

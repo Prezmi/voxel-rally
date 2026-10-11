@@ -32,13 +32,19 @@ export const SHEET_VIEWS = {
   '3q': { dx: 0.62, dy: -0.72, dz: 0, eyeAdd: 0.16, fill: 0.55, seen: 'size', tilt: true },
 };
 
-/** Parse the showroom URL. Only ?showroom=1 turns anything on. */
+/** Parse the showroom URL. Only ?showroom=1 turns anything on.
+ *  ?sheetDist=<metres> overrides the sheet's own framing distance: the design sheet
+ *  always frames the car at ~8 m, which cannot answer "does the door number still read
+ *  at 20 m" (queue P9). Clamped, and read from the debug URL only. */
+export const SHEET_DIST_MIN = 3, SHEET_DIST_MAX = 120;
 export function showroomConfig(search) {
   const q = new URLSearchParams(typeof search === 'string' ? search : '');
   const raw = (q.get('view') || 'three-quarter').toLowerCase();
+  const d = Number(q.get('sheetDist'));
   return {
     active: q.get('showroom') === '1',
     view: SHEET_VIEWS[raw] ? raw : 'three-quarter',
+    dist: Number.isFinite(d) ? Math.min(SHEET_DIST_MAX, Math.max(SHEET_DIST_MIN, d)) : 0,
   };
 }
 
@@ -58,9 +64,10 @@ export function showroomRoute() {
  * Camera pose for `view`, from the placed car's world bbox, with the sheet's own
  * distance maths: fw = sensor/lens, fh = fw * H/W, and dist chosen so the extent this
  * view sees fills 70% (side) / 55% (the rest) of the frame.
- * bbox: {min:{x,y,z},max:{x,y,z}} in game coords; aspect = W/H.
+ * bbox: {min:{x,y,z},max:{x,y,z}} in game coords; aspect = W/H. `distOverride` (from
+ * ?sheetDist) replaces the framed distance only, never the eye or the aim.
  */
-export function showroomPose(view, bbox, aspect = 16 / 9) {
+export function showroomPose(view, bbox, aspect = 16 / 9, distOverride = 0) {
   const v = SHEET_VIEWS[view] || SHEET_VIEWS['three-quarter'];
   const fw = SHEET_SENSOR / SHEET_LENS;
   const fh = fw / (aspect || 16 / 9);
@@ -69,7 +76,8 @@ export function showroomPose(view, bbox, aspect = 16 / 9) {
   const tall = bbox.max.y - bbox.min.y;     // car height  (sheet Z)
   const size = Math.max(lenX, wide, tall);
   const seen = v.seen === 'len' ? lenX : v.seen === 'wide' ? wide : size;
-  const dist = Math.max(seen / (v.fill * fw), tall / ((v.fill + 0.10) * fh));
+  const fit = Math.max(seen / (v.fill * fw), tall / ((v.fill + 0.10) * fh));
+  const dist = Number.isFinite(distOverride) && distOverride > 0 ? distOverride : fit;
   const cx = (bbox.min.x + bbox.max.x) / 2;
   const cz = (bbox.min.z + bbox.max.z) / 2;
   const eye = v.midEye ? (bbox.min.y + bbox.max.y) / 2 : bbox.min.y + SHEET_EYE;

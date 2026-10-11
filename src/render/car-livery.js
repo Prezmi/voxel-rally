@@ -1,5 +1,5 @@
 // Livery generated in code (PLAN §10.2 "Auto z numerem i barwami zespołu"):
-// one 128x128 nearest-neighbour canvas per car id, baked once at boot, no assets.
+// one nearest-neighbour canvas per car id, baked once at boot, no assets.
 //
 // The map is an ATLAS, matched to the projection in render/car-asset.js:
 //   u 0.05..0.45, v 0.05..0.95  -> the two flanks (u = length, v = height)
@@ -14,6 +14,11 @@
 // a clean red body, ONE white door band, ONE competition-number roundel,
 // ONE thin sponsor strip. Nothing else - no lettering, no quarter panels,
 // no dark end blocks, no belt-line webbing.
+// The HUD's own pixel bitmap (src/game/pixel-font.js), so the door number and the
+// rally signs speak the same language - and so the number is geometry the suite can
+// measure instead of a system-font glyph that changes with the platform.
+import { glyphRows, GW } from '../game/pixel-font.js';
+
 const TEAM = {
   A: { primary: '#c4262a', secondary: '#f4f1ea', num: 7 },
   B: { primary: '#1c3f8c', secondary: '#f4f1ea', num: 3 },
@@ -21,11 +26,43 @@ const TEAM = {
   D: { primary: '#d8a416', secondary: '#22242a', num: 5 },
 };
 
-// 512, not 128: the flank half of the atlas is 0.46 of the canvas over a 4.1 m
-// body (T35/T38), so at 128 the 0.35 m roundel was under 4 texels wide and the
-// number dissolved. At 512 it is ~20 texels across and the digit stays legible.
-const S = 512;
+// 1024, not 512: the flank half of the atlas is 0.46 of the canvas over a 4.1 m body
+// (T35/T38), so a 512 canvas gives the 0.35 m roundel only ~20 texels across, and a
+// digit inside it 11-14 texels with 1-2 texel strokes. Past ~15 m the roundel is
+// smaller on screen than it is in the map, so those hairline strokes lose whole
+// texels and the number dissolves (queue P9). At 1024 the roundel is ~40 texels and
+// a stroke is 4-5 texels, i.e. it survives two mip levels. Cost: 4 MB RGBA (+1.3 MB
+// of mips) per car instead of 1 MB, which is what the one hero decal on the car costs.
+export const LIVERY_TEXEL = 1024;
+const S = LIVERY_TEXEL;
 const INK = '#1a1b1f';
+
+/** Ring around the roundel, in texels. Kept thick for the same reason as the digits:
+ *  a 2 texel hairline is gone in the first mip level, and the ring is what separates
+ *  the white disc from the body colour at distance. */
+const RING_W = Math.max(2, Math.round(S / 341));
+
+/**
+ * How the competition number is painted (queue P9). It is NOT text: every lit cell of
+ * the pixel bitmap becomes one filled rect, so the digit is resolvable geometry that
+ * `liveryNumberRects` can report and src/debug/tests.js T42 can measure.
+ *   gap    empty bitmap columns between two digits
+ *   bold   every cell rect is cell+bold texels across, so a stroke is a block and not
+ *          a hairline (this is the legibility trick: it costs the counters of 0/6/8/9
+ *          one texel each and buys every stroke one)
+ *   margin texels kept between the lit box and the roundel edge
+ */
+export const LIVERY_NUM = { gap: 1, bold: 1, margin: 1 };
+
+/**
+ * Sampler spec (queue P9, the other half of the fix). MAGNIFICATION stays nearest so
+ * the block digit stays a block; MINIFICATION must not stay nearest, because with no
+ * mip chain a roundel that is 40 texels in the map and 14 texels on screen samples 14
+ * of them and drops the other 26 at random - the number shimmering away past 15 m is
+ * that aliasing, not only a lack of resolution. Mip levels average the digit INTO the
+ * white disc instead of punching holes in it.
+ */
+export const LIVERY_SAMPLE = { mips: true, aniso: 8 };
 
 /** Atlas rects the paint occupies (u/v, same space as the projection in
  *  render/car-asset.js). They sit BELOW the belt line, so the door band, the
@@ -60,6 +97,52 @@ export function liveryFor(carId) {
   return TEAM[carId] || TEAM.A;
 }
 
+/**
+ * The competition number as GEOMETRY, in canvas texels: one rect per lit cell of the
+ * 5x7 bitmap, sized to the biggest integer cell that still sits inside the roundel
+ * (a circle is convex, so a whose-box-inside-the-circle test bounds every rect). Pure:
+ * no canvas, no DOM, so node can measure the strokes and the fit (T42).
+ * Returns { rects:[[x,y,w,h]...], cell, bold, cap, inkW, inkH, cx, cy, r, label }.
+ */
+export function liveryNumberRects(carId) {
+  const label = String(liveryFor(carId).num);
+  const cx = ux(LIVERY_ROUND.u), cy = vy(LIVERY_ROUND.v);
+  const r = LIVERY_ROUND.r * S;
+  const b = LIVERY_NUM.bold;
+
+  // Lit cells in one shared column space, plus the tight box they occupy.
+  const cells = [];
+  let c0 = Infinity, c1 = -Infinity, r0 = Infinity, r1 = -Infinity;
+  for (let i = 0; i < label.length; i++) {
+    const rows = glyphRows(label[i]) || glyphRows(' ');
+    const base = i * (GW + LIVERY_NUM.gap);
+    for (let row = 0; row < rows.length; row++) {
+      for (let col = 0; col < GW; col++) {
+        if (rows[row][col] !== '1') continue;
+        cells.push([base + col, row]);
+        if (base + col < c0) c0 = base + col;
+        if (base + col > c1) c1 = base + col;
+        if (row < r0) r0 = row;
+        if (row > r1) r1 = row;
+      }
+    }
+  }
+  const inkW = Math.max(1, c1 - c0 + 1), inkH = Math.max(1, r1 - r0 + 1);
+
+  // Biggest integer cell pitch whose lit box (bold growth included) fits the disc.
+  const reach = 2 * (r - LIVERY_NUM.margin);
+  let cell = 1;
+  while (Math.hypot(inkW * (cell + 1) + b, inkH * (cell + 1) + b) <= reach) cell++;
+
+  // Centre the lit box - not the glyph box - on the roundel.
+  const ox = cx - (inkW * cell + b) / 2 - c0 * cell;
+  const oy = cy - (inkH * cell + b) / 2 - r0 * cell;
+  const rects = cells.map(([col, row]) => [
+    Math.round(ox + col * cell), Math.round(oy + row * cell), cell + b, cell + b,
+  ]);
+  return { rects, cell, bold: b, cap: inkH * cell + b, inkW, inkH, cx, cy, r, label };
+}
+
 export function drawLivery(ctx, carId) {
   const t = liveryFor(carId);
 
@@ -80,14 +163,16 @@ export function drawLivery(ctx, carId) {
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = INK;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = RING_W;
   ctx.stroke();
-  const label = String(t.num);
+
+  // 3b. The number, drawn cell by cell (queue P9). The old path was
+  // `ctx.font = 'bold 14px monospace'; fillText(...)`: a system-font outline whose
+  // strokes were 1-2 texels of a 20 texel roundel, unreadable past 15 m and different
+  // on every platform. Blocks of a known bitmap at a known pitch are neither.
+  const num = liveryNumberRects(carId);
   ctx.fillStyle = '#141414';
-  ctx.font = `bold ${label.length > 1 ? 11 : 14}px monospace`;   // ~2/3 of the 20 texel roundel
-  ctx.textBaseline = 'middle';
-  ctx.fillText(label, cx - ctx.measureText(label).width / 2, cy);
-  ctx.textBaseline = 'alphabetic';
+  for (const [x, y, w, h] of num.rects) ctx.fillRect(x, y, w, h);
 
   // 4. One thin sponsor strip ahead of the door. A bar, not lettering.
   ctx.fillStyle = t.secondary;
@@ -101,9 +186,12 @@ export function buildLiveryTexture(carId, THREE) {
   ctx.imageSmoothingEnabled = false;
   drawLivery(ctx, carId);
   const tex = new THREE.CanvasTexture(canvas);
+  const mip = THREE.LinearMipmapLinearFilter !== undefined
+    ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   tex.magFilter = THREE.NearestFilter;
-  tex.minFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
+  tex.minFilter = mip;
+  tex.generateMipmaps = LIVERY_SAMPLE.mips;
+  tex.anisotropy = LIVERY_SAMPLE.aniso;
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;

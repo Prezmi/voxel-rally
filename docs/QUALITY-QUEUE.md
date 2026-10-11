@@ -12,6 +12,19 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
+- [ ] P38 · the livery sampler clamps the WHOLE atlas, not the sub-rect: `texture2D(uLivery,
+      clamp(vLivUv, 0.03, 0.97))` (`src/render/carMesh.js:385`) against `FLANK_UV.u0 = 0.02`
+      (`src/render/car-asset.js:77`) — the flank starts 0.01 atlas units *under* the clamp floor,
+      so the rear 0.01/0.11168 = **0.089 m of both flanks** samples one duplicated texel column
+      (a flat smear at the tail of the door panel, and it eats any dirt detail there). Clamp per
+      projection, or move the flank anchor inside the guard
+- [ ] P39 · the livery atlas is not quality-gated: 1024² (4 MB RGBA + 1.3 MB of mips) at every
+      preset, while at LOW the roundel lands at 9-12 px on a 1080p screen (`tools/livery-read.mjs`
+      measures the column) — a per-preset atlas size / anisotropy dial is free VRAM at LOW
+- [ ] P40 · the roundel's legibility ceiling is ~24-28 m: at 9 px (~32 m) only the dark ring
+      survives and the digit is a grey smudge, in the mip column of `tools/livery-read.mjs` *and*
+      in `shots/quality-roundel-22m.png`. Reading past that needs a bigger roundel (T35 pins
+      0.30-0.40 m) or the number as real geometry on the door, not more texture resolution
 - [ ] P29 · the same export defect is still live for the hero model: neither car builder
       sets `use_backface_culling`, so `assets/models/rally_v2.glb` (45 materials) and
       `rally_a.glb` (51) all land `doubleSided`, and `src/render/carMesh.js` /
@@ -54,8 +67,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       ghost blobs (upper right and lower left of `shots/quality-night-beams.png`) sit in a
       frame where the key is already at dusk strength — `lensFlareAlpha` gates on the sun
       (`sunVis`/`sun`) with no dark-stage term
-- [ ] P9 · livery number roundel is hard to read past ~15 m; raise the decal resolution
-      or draw the number as geometry so it reads at distance
 - [ ] P10 · the left-handed touch layout is CSS-only and unverified; make it a real
       mirrored layout and prove it with a shot
 - [ ] P11 · quality LOW now streams chunks to 250 m for the far vegetation band; confirm
@@ -160,6 +171,46 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P9 · livery number roundel is hard to read past ~15 m; raise the decal resolution or draw
+      the number as geometry so it reads at distance
+      · done — the item named one dial (resolution) and the frame showed three faults at once.
+      Measured first, in the map: a 0.35 m roundel in a 512 atlas is **20 texels across**, the
+      digit 11-14 texels with **1-2 texel strokes**, and the texture was built with
+      `minFilter = NearestFilter` + `generateMipmaps = false` — so past ~15 m, where the roundel
+      is smaller on screen than in the map, the sampler dropped whole strokes at random. That is
+      why it dissolved *gradually with distance* rather than simply looking small. All three fixed:
+      (1) `LIVERY_TEXEL` 512 -> **1024** (`src/render/car-livery.js:38`), roundel 40 texels, cost
+      4 MB + 1.3 MB of mips per car instead of 1 MB; (2) the number is now **geometry, not a font
+      glyph**: every lit cell of the HUD's own 5x7 bitmap (`glyphRows`, exported from
+      `src/game/pixel-font.js:150`) is one filled rect at the biggest integer pitch that still
+      fits the disc, drawn **bold** (rect = cell+1) so a stroke is 4-5 texels instead of a
+      hairline — `liveryNumberRects(carId)` (`src/render/car-livery.js:104`) is pure (no canvas)
+      so node can measure it, and `drawLivery` no longer touches `ctx.font`/`fillText`
+      (`src/render/car-livery.js:175`), which also removes the platform font dependency that made
+      the digit different on every machine; (3) the sampler minifies through a chain now —
+      `minFilter = LinearMipmapLinear`, `generateMipmaps true`, `anisotropy 8`, magnification kept
+      nearest so the block digit stays a block (`src/render/car-livery.js:57`, applied at `:186-192`).
+      The block font is also the game's own sign/HUD language, so the door number matches the rally
+      boards. New check **T42** (`src/debug/tests.js:2598`, check at `:2703`) pins all of it: atlas
+      >= 1024 and roundel >= 36 texels, per car the lit box sits inside the disc (spill 0.00) and
+      on its centre (<= 1 texel), cap >= half the roundel (55-72 %), stroke >= 4 texels (the 4x4
+      mip box a 0.35 m roundel sits in at ~18-20 m), ink share of the disc 19-28 % (a dot or a
+      plate both fail), the texture built through a stub DOM/three really asks for a mip minFilter +
+      chain + anisotropy while staying nearest on magnification, `drawLivery` really paints the
+      11-24 cell rects, and the file never goes back to a system font. Proof, first pass, node-only
+      (`tools/livery-read.mjs`, read back as `shots/livery-read.png`): the same door minified the
+      two ways, at 24/16/12/9 px roundel — the mip column reads 7/3/12/5 down to 12 px (~24 m)
+      while the nearest column, same texture, loses strokes by 16 px and is confetti by 12 px: the
+      sampler was doing at least as much damage as the resolution. In-game proof, one headless pass
+      read back: `shots/quality-roundel-22m.png` (`?showroom=1&view=side&sheetDist=22` — the new
+      `?sheetDist` knob, `src/debug/showroom.js:36` + `:75`, since the design sheet always frames at
+      7.5 m and cannot answer a distance question) shows the asset car ACTIVE at 22 m with the ring
+      and the digit clear on the door, the band and the sponsor strip intact. Note for P33: this
+      pass fetched `rally_v2.glb` fine (`[car] asset car "rally_v2" ACTIVE`), so that failure is a
+      race, not a permanent state. Residual limits filed as P38-P40 (the atlas-wide UV clamp eats
+      0.089 m of the flank, the atlas is not quality-gated, and past ~28 m only the ring survives —
+      more resolution cannot buy what a 0.35 m decal cannot show).
 
 - [x] P8 · night stages have no headlight beams; add two cheap cone volumes or a spot
       light plus road decals that stay inside the frame budget
