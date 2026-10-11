@@ -56,13 +56,33 @@ export const EXHAUST_NODES = ['car_exhaust_l', 'car_exhaust_r'];
  *  spawn() still returns -1 at capacity, so the frame cost never grows. */
 export const DUST_TUNE = {
   looseMul: 1.00,          // rate gain on a `loose` surface row (gravel, mud, sand..)
-  hardMul: 0.18,           // asphalt / stone: nearly none, the rally read is loose only
+  hardMul: 0.10,           // asphalt / stone: almost none, the rally read is loose only
   ttlMin: 0.90,            // s, plume lifetime floor (was 0.50)
   ttlSpan: 1.50,           // s of jitter on top of ttlMin (was 0.90)
-  windMul: 0.32,           // fraction of the wind field carried into the plume
-  drag: 0.62,              // age() drag: lower = the plume travels and hangs (was 0.90)
-  sizeLoose: 1.25,         // size gain on loose ground (0.20..0.56 -> 0.25..0.70)
+  windMul: 0.52,           // fraction of the wind field carried into the plume (was 0.32)
+  drag: 0.55,              // age() drag: lower = the plume travels and hangs (was 0.90)
+  sizeLoose: 1.55,         // size gain on loose ground (0.20..0.56 -> 0.31..0.87)
+  sizeJit: 0.62,           // spread of the size jitter: no two puffs the same (was 0.36)
+  outward: 1.15,           // m/s thrown sideways out of the contact patch (was 0)
+  gravelDark: 0.78,        // HEAT gain on loose ground: gravel dust is darker dust
 };
+
+/** Shift soot (docs/06 §2): a short dark puff off the tips on EVERY gear change,
+ *  independent of whether the gate voices a crack. Its capacity is carved out of
+ *  the old flame pool, so the FX stack never holds more particles than before. */
+export const SOOT_TUNE = {
+  rate: 130,             // particles/s while the puff is being laid down
+  burst: 0.16,           // s of emission window
+  ttlMin: 0.40,          // s, soot lifetime floor
+  ttlSpan: 0.30,         // s of jitter -> 0.40..0.70 s, fading not popping
+  sizeLo: 0.05,          // m, seed radius (grows with age in fx-view mode 4)
+  sizeSpan: 0.11,        // m of size variety
+  push: 1.5,             // m/s out of the tip, rearwards
+  carry: 0.45,           // fraction of car speed the puff keeps (drifts with the car)
+  rise: 0.55,            // m/s of buoyancy
+  glowHeat: 0.55,        // HEAT of the warm inner core on a rev-matched downshift
+};
+
 
 export class ParticlePool {
   constructor(capacity) {
@@ -100,14 +120,18 @@ export class ParticlePool {
 // only consumer that cares about flames. An upshift always pops; a downshift only
 // pops on throttle lift (the open throttle swallows the afterburn).
 export class ExhaustFx {
-  constructor(pool, emitter = defaultBus) {
+  constructor(pool, emitter = defaultBus, sootPool = null) {
     this.pool = pool;
+    this.soot = sootPool;
     this.bus = emitter;
     this.burst = 0;            // s of plume left (150..350 ms window)
     this.rate = 0;             // particles/s while bursting
     this.strength = 0;         // 0..1 burst intensity (length + brightness)
     this.glow = 0;             // 0..1 continuous high-load glow
     this.acc = 0;
+    this.sootBurst = 0;        // s of soot puff left
+    this.sootAcc = 0;
+    this.sootRev = 0;          // 1 while a rev-matched downshift lights the core
     this.pending = 0;          // shifts seen since the last step
     this.pUp = 0;
     this.pRpm = 0;
@@ -118,6 +142,11 @@ export class ExhaustFx {
   }
 
   onShift(e) {
+    if (!e) return;
+    // Soot is not gated by the crack: every gear change pushes a dark puff, and a
+    // downshift that was rev-matched (throttle still open) lights a warm core in it.
+    this.sootBurst = Math.max(this.sootBurst, SOOT_TUNE.burst);
+    this.sootRev = (!e.up && (e.throttle || 0) >= LIFT_THROTTLE) ? 1 : this.sootRev;
     // One gate for both media: src/audio/backfire.js asks shiftPop() the same
     // question, so a plume without a crack (or a crack without a plume) is
     // structurally impossible.
@@ -166,6 +195,35 @@ export class ExhaustFx {
       emit = Math.floor(this.acc);
       this.acc -= emit;
     }
+
+    // ---- shift soot: dark grey to black, expands, drifts with the car, gone in
+    // 0.4..0.7 s. Its own pool, carved out of the old flame capacity. ----
+    if (this.soot && this.sootBurst > 0 && tips) {
+      this.sootBurst -= dt;
+      if (this.sootBurst <= 0) { this.sootBurst = 0; this.sootRev = 0; }
+      const S = this.soot, sd = S.data;
+      const spd = car.body.groundSpeed || 0;
+      const rev = this.sootRev;
+      this.sootAcc += SOOT_TUNE.rate * dt;
+      let sn = Math.floor(this.sootAcc); this.sootAcc -= sn;
+      for (let i = 0; i < sn; i++) {
+        const o = S.spawn();
+        if (o < 0) break;
+        const tip = (i & 1) * 3;
+        const jx = rnd() - 0.5, jy = rnd() - 0.5, jz = rnd() - 0.5;
+        sd[o + F.X] = tips[tip] + jx * 0.05;
+        sd[o + F.Y] = tips[tip + 1] + jy * 0.03;
+        sd[o + F.Z] = tips[tip + 2] + jz * 0.05;
+        sd[o + F.VX] = rx * SOOT_TUNE.push + this._m[0] * spd * SOOT_TUNE.carry + jx * 0.9;
+        sd[o + F.VY] = SOOT_TUNE.rise * (0.6 + 0.8 * rnd()) + jy * 0.4;
+        sd[o + F.VZ] = rz * SOOT_TUNE.push + this._m[6] * spd * SOOT_TUNE.carry + jz * 0.9;
+        const ttl = SOOT_TUNE.ttlMin + SOOT_TUNE.ttlSpan * rnd();
+        sd[o + F.LIFE] = ttl; sd[o + F.TTL] = ttl;
+        sd[o + F.SIZE] = SOOT_TUNE.sizeLo + SOOT_TUNE.sizeSpan * rnd();
+        sd[o + F.HEAT] = rev ? SOOT_TUNE.glowHeat * (0.6 + 0.4 * rnd()) : 0.06 * rnd();
+      }
+    }
+
     if (!emit || !tips) return;
 
     for (let i = 0; i < emit; i++) {
@@ -173,19 +231,19 @@ export class ExhaustFx {
       if (o < 0) break;
       const strong = this.burst > 0 ? this.strength : this.glow * 0.35;
       const tip = (i & 1) * 3;
-      const sp = 2.2 + 6.5 * strong;
+      const sp = 1.4 + 3.6 * strong;                       // an exhaust pop, not a torch
       const jx = (rnd() - 0.5), jy = (rnd() - 0.5), jz = (rnd() - 0.5);
       d[o + F.X] = tips[tip] + jx * 0.05;
       d[o + F.Y] = tips[tip + 1] + jy * 0.04;
       d[o + F.Z] = tips[tip + 2] + jz * 0.05;
       d[o + F.VX] = rx * sp + jx * 1.6 + ux * 0.4;
-      d[o + F.VY] = ry * sp + 0.9 + strong * 1.4 + uy * 0.6;
+      d[o + F.VY] = ry * sp + 0.5 + strong * 0.7 + uy * 0.6;
       d[o + F.VZ] = rz * sp + jz * 1.6 + uz * 0.4;
-      const ttl = 0.06 + 0.16 * strong + 0.10 * rnd();
+      const ttl = 0.05 + 0.10 * strong + 0.06 * rnd();     // was 0.06..0.32: shorter
       d[o + F.LIFE] = ttl;
       d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = 0.05 + 0.16 * strong * (0.7 + 0.6 * rnd());
-      d[o + F.HEAT] = clamp(0.45 + 0.55 * strong + 0.25 * rpmN, 0, 1.6);
+      d[o + F.SIZE] = 0.04 + 0.09 * strong * (0.7 + 0.6 * rnd());   // was 0.05..0.21
+      d[o + F.HEAT] = clamp(0.75 + 0.75 * strong + 0.35 * rpmN, 0, 1.6);  // warmer core
     }
   }
 
@@ -248,17 +306,21 @@ export class AmbientFx {
       mul3v(this._m, this._l, this._p);                // reused scratch, no alloc
       const d = this.dust.data;
       const s = Math.abs(car.wheels[w].slip || 0);
-      const rough = (surface(car.wheels[w].surfaceId) || {}).loose ? 1 : 0.7;
+      const loose = !!(surface(car.wheels[w].surfaceId) || {}).loose;
+      const rough = loose ? 1 : 0.7;
       d[o + F.X] = b.pos.x + this._p.x + (rnd() - 0.5) * 0.3;
       d[o + F.Y] = groundY + rnd() * 0.1;
       d[o + F.Z] = b.pos.z + this._p.z + (rnd() - 0.5) * 0.3;
-      d[o + F.VX] = -(this._m[0]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4 + windX * DUST_TUNE.windMul;
+      // Out of the contact patch first (sideways off the tyre, more with slip),
+      // then rearwards; the wind field takes over as the plume ages (low drag).
+      const out = DUST_TUNE.outward * (0.6 + 1.2 * s) * (lz > 0 ? 1 : -1);
+      d[o + F.VX] = -(this._m[0]) * (1.2 + 3.2 * s) + this._m[2] * out + (rnd() - 0.5) * 1.4 + windX * DUST_TUNE.windMul;
       d[o + F.VY] = 0.7 + 1.9 * s + rnd() * 0.7;
-      d[o + F.VZ] = -(this._m[6]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4 + windZ * DUST_TUNE.windMul;
+      d[o + F.VZ] = -(this._m[6]) * (1.2 + 3.2 * s) + this._m[8] * out + (rnd() - 0.5) * 1.4 + windZ * DUST_TUNE.windMul;
       const ttl = DUST_TUNE.ttlMin + DUST_TUNE.ttlSpan * rnd();
       d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = (0.20 + 0.36 * rnd()) * DUST_TUNE.sizeLoose * rough;
-      d[o + F.HEAT] = clamp(0.35 + 0.6 * s + 0.02 * spd, 0, 1);
+      d[o + F.SIZE] = (0.20 + DUST_TUNE.sizeJit * rnd()) * DUST_TUNE.sizeLoose * rough;
+      d[o + F.HEAT] = clamp((0.35 + 0.6 * s + 0.02 * spd) * (loose ? DUST_TUNE.gravelDark : 1.0), 0, 1);
     }
 
     // ---- leaves / needles near the treeline, drifting on the wind field -----
@@ -307,8 +369,10 @@ export class AmbientFx {
 
 // ---------------------------------------------------------------- façade
 // main.js: new FxSystem({ scale }), fx.step(dt, car, env) in the sim step,
-// render/fx-view.js draws the four pools.
-export const FX_CAPACITY = { flame: 384, dust: 768, leaves: 256, motes: 512 };
+// render/fx-view.js draws the pools.
+// The soot pool is carved out of the old 384-slot flame pool: five pools, the
+// same total particle budget as before.
+export const FX_CAPACITY = { flame: 256, soot: 128, dust: 768, leaves: 256, motes: 512 };
 
 export class FxSystem {
   constructor(opts = {}) {
@@ -316,12 +380,13 @@ export class FxSystem {
     this.scale = s;
     this.enabled = opts.enabled !== false;
     this.flame = new ParticlePool(Math.round(FX_CAPACITY.flame * s));
+    this.soot = new ParticlePool(Math.round(FX_CAPACITY.soot * s));
     this.dust = new ParticlePool(Math.round(FX_CAPACITY.dust * s));
     this.leaves = new ParticlePool(Math.round(FX_CAPACITY.leaves * s));
     this.motes = new ParticlePool(Math.round(FX_CAPACITY.motes * s));
-    this.exhaust = new ExhaustFx(this.flame, opts.bus || defaultBus);
+    this.exhaust = new ExhaustFx(this.flame, opts.bus || defaultBus, this.soot);
     this.ambient = new AmbientFx(this.dust, this.leaves, this.motes);
-    this.maxLive = Math.round(0.75 * (this.flame.capacity + this.dust.capacity
+    this.maxLive = Math.round(0.75 * (this.flame.capacity + this.soot.capacity + this.dust.capacity
       + this.leaves.capacity + this.motes.capacity));
     this.tips = new Float32Array(6);      // world coords of the two exhaust tips
     this.localTips = new Float32Array(6);
@@ -338,7 +403,7 @@ export class FxSystem {
   }
 
   live() {
-    return this.flame.count + this.dust.count + this.leaves.count
+    return this.flame.count + this.soot.count + this.dust.count + this.leaves.count
       + this.motes.count;
   }
 
@@ -362,6 +427,7 @@ export class FxSystem {
 
     // Age + compact every pool: one in-place pass each, no allocation.
     age(this.flame, dt, 0.5);
+    age(this.soot, dt, 1.1);
     age(this.dust, dt, DUST_TUNE.drag);
     age(this.leaves, dt, 0.0);
     age(this.motes, dt, 0.0);
@@ -370,6 +436,7 @@ export class FxSystem {
     let over = this.live() - this.maxLive;
     if (over > 0) over -= killOldest(this.motes, over);
     if (over > 0) over -= killOldest(this.leaves, over);
+    if (over > 0) over -= killOldest(this.soot, over);
     if (over > 0) killOldest(this.dust, over);
   }
 }

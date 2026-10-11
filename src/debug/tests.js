@@ -15,7 +15,7 @@ import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
 import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP, LIVERY_TEXEL, LIVERY_NUM, LIVERY_SAMPLE, liveryNumberRects, buildLiveryTexture } from '../render/car-livery.js';
-import { FxSystem, FX_CAPACITY, DUST_TUNE, shiftPop, POP_FLOOR, LIFT_THROTTLE } from '../fx/fx.js';
+import { FxSystem, FX_CAPACITY, DUST_TUNE, SOOT_TUNE, STRIDE, shiftPop, POP_FLOOR, LIFT_THROTTLE } from '../fx/fx.js';
 import { BackfirePop, BACKFIRE, popVoice, crackTrain, shiftRpmN } from '../audio/backfire.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
@@ -40,8 +40,7 @@ import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render
 import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, wheelTreadPlan, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
-  radialBlurAmount, sunVisibility,
-  DOF_TUNE, dofFocus, dofCoc, dofRadiusPx, dofTapCount } from '../render/post/tune.js';
+  radialBlurAmount, sunVisibility } from '../render/post/tune.js';
 import { MODEL_QUEUE, ModelQueue, nextBackoffMs } from '../render/model-queue.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle, shaftWallAlpha, shaftPeak } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
@@ -2467,6 +2466,7 @@ const FEEL_RANGES = { speedFov: [0, 1], cornerLean: [0, 1], rideSag: [0, 1] };
 const DUST_RANGES = {
   looseMul: [0, 2], hardMul: [0, 1], ttlMin: [0.1, 4], ttlSpan: [0, 4],
   windMul: [0, 1.5], drag: [0, 2], sizeLoose: [0.5, 2],
+  sizeJit: [0, 1], outward: [0, 5], gravelDark: [0.4, 1.5],
 };
 
 function testRallyAtmosphereBudget() {
@@ -3660,139 +3660,135 @@ function testBackfireHasASound() {
 }
 testBackfireHasASound();
 
-// ---------------------------------------------------------------- test 55
-// Depth of field (queue P14). Headless: the whole depth -> blur ramp, the quality
-// gate and the focus clamp are pure data in tune.js; the pass graph must NOT grow
-// (the blur is folded into the composite), and the composite is the only place that
-// reads the scene depth attachment.
-const DOF_RANGES = {
-  nearFlat: [1, 120], farSpan: [10, 900], maxFrac: [0, 0.05], maxPx: [1, 32], taps: [1, 8],
-  minFocus: [1, 60], maxFocus: [60, 900],
-  'level.LOW': [0, 2], 'level.MEDIUM': [0, 2], 'level.HIGH': [0, 2],
-  'tapsLevel.LOW': [0, 8], 'tapsLevel.MEDIUM': [0, 8], 'tapsLevel.HIGH': [0, 8],
-};
-
-function testDepthOfField() {
+// ---------------------------------------------------------------------------
+// T56 shift soot + the pinned dust film caps. Headless, in the house style: the
+// gearbox emits a real 'shift', the fx pools must fill with short-lived dark
+// soot inside the OLD total particle budget, and the DUST_FILM table pinned in
+// render/carMesh.js is replayed here (cap + veil math) to prove the upper body
+// never goes chalky - the rear panel stays within a small delta of the base red
+// even at a standstill under the worst dust load.
+function testSootPuffAndDustFilmCaps() {
   const gaps = [];
+  const SF = { TTL: 7, SIZE: 8, HEAT: 9 };            // pool field offsets (STRIDE 10)
 
-  // 1) every dial finite and inside its pinned range (one table, like T33/T40).
-  const walk = (obj, path) => {
-    for (const [k, v] of Object.entries(obj)) {
-      const p = path ? `${path}.${k}` : k;
-      if (v && typeof v === 'object') { walk(v, p); continue; }
-      if (!Number.isFinite(v)) { gaps.push(`${p} is not finite (${v})`); continue; }
-      const r = DOF_RANGES[p];
-      if (!r) gaps.push(`${p} has no pinned range`);
-      else if (v < r[0] || v > r[1]) gaps.push(`${p}=${v} outside ${r[0]}..${r[1]}`);
+  // ---- 1. a simulated upshift has to lay down soot --------------------------
+  const fx = new FxSystem({ scale: 1, bus });
+  const car = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  fx.setLocalTips(defaultExhaust(car.params));
+  for (let i = 0; i < 30; i++) fx.step(DT, car, 0.0);          // warm the pools
+  const sootAtRest = fx.soot.count;
+  if (car.powertrain) car.powertrain.shiftUp();                // the real emitter
+  else bus.emit('shift', { up: true, gear: 2, rpm: 5200, throttle: 1, demand: 0.6 });
+  let sootMax = 0, overCap = 0, liveMax = 0, overLive = 0;
+  let ttlLo = Infinity, ttlHi = 0, heatMax = 0, sizeLo = Infinity, sizeHi = 0;
+  for (let i = 0; i < 120; i++) {
+    fx.step(DT, car, 0.0);
+    if (fx.soot.count > sootMax) {
+      sootMax = fx.soot.count;
+      const sd = fx.soot.data;
+      for (let r = 0; r < sootMax; r++) {
+        const o = r * STRIDE;
+        ttlLo = Math.min(ttlLo, sd[o + SF.TTL]); ttlHi = Math.max(ttlHi, sd[o + SF.TTL]);
+        heatMax = Math.max(heatMax, sd[o + SF.HEAT]);
+        sizeLo = Math.min(sizeLo, sd[o + SF.SIZE]); sizeHi = Math.max(sizeHi, sd[o + SF.SIZE]);
+      }
     }
+    for (const P of [fx.flame, fx.soot, fx.dust, fx.leaves, fx.motes]) if (P.count > P.capacity) overCap++;
+    const live = fx.live();
+    if (live > liveMax) liveMax = live;
+    if (live > fx.maxLive) overLive++;
+  }
+  if (sootAtRest !== 0) gaps.push(`soot was already being laid at a standstill (${sootAtRest})`);
+  if (!(sootMax > 0)) gaps.push('an upshift spawned no soot at all');
+  if (!(ttlLo >= SOOT_TUNE.ttlMin - 1e-6 && ttlHi <= SOOT_TUNE.ttlMin + SOOT_TUNE.ttlSpan + 1e-6)) gaps.push(`soot ttl ${ttlLo.toFixed(2)}..${ttlHi.toFixed(2)} outside ${SOOT_TUNE.ttlMin}..${SOOT_TUNE.ttlMin + SOOT_TUNE.ttlSpan}`);
+  if (!(heatMax <= 0.1)) gaps.push(`an upshift soot core is lit (heat ${heatMax.toFixed(2)})`);
+  if (!(sizeHi > sizeLo)) gaps.push('soot puffs are all one size');
+  if (overCap) gaps.push(`${overCap} pool over capacity`);
+  if (overLive) gaps.push(`${overLive} frames over the live budget`);
+
+  // a rev-matched downshift (throttle still open) lights the warm inner core
+  const fx2 = new FxSystem({ scale: 1, bus });
+  fx2.setLocalTips(defaultExhaust(car.params));
+  bus.emit('shift', { up: false, gear: 2, rpm: 5200, throttle: 0.9, demand: 0.5 });
+  for (let i = 0; i < 12; i++) fx2.step(DT, car, 0.9);
+  let revHeat = 0;
+  const sd2 = fx2.soot.data;
+  for (let i = 0; i < fx2.soot.count; i++) revHeat = Math.max(revHeat, sd2[i * STRIDE + SF.HEAT]);
+  if (!(revHeat >= SOOT_TUNE.glowHeat * 0.5)) gaps.push(`a rev-matched downshift has no warm core (heat ${revHeat.toFixed(2)})`);
+
+  // capacity: five pools, the same total particle budget as the four before
+  const total = Object.values(FX_CAPACITY).reduce((a, b) => a + b, 0);
+  if (total !== 1920) gaps.push(`FX budget grew: ${total} != 1920`);
+  if (FX_CAPACITY.flame + FX_CAPACITY.soot !== 384) gaps.push('soot did not come out of the flame pool');
+
+  // the soot pool is actually drawn, dark and expanding (fx-view mode 4)
+  const viewSrc = readFileSync(new URL('../render/fx-view.js', import.meta.url), 'utf8');
+  if (!/makeSystem\(fx\.soot, 4,/.test(viewSrc)) gaps.push('the soot pool has no draw call');
+  if (!/uMode == 4/.test(viewSrc)) gaps.push('the soot program is missing from the fragment shader');
+  if (!/grow = \(uMode == 4\)/.test(viewSrc)) gaps.push('soot does not expand as it ages');
+
+  // ---- 2. the pinned dust film caps keep the red red ------------------------
+  const carMesh = readFileSync(new URL('../render/carMesh.js', import.meta.url), 'utf8');
+  const lit = /export const DUST_FILM = \{([\s\S]*?)\n\};/.exec(carMesh);
+  const F2 = {};
+  if (!lit) gaps.push('carMesh.js no longer pins a DUST_FILM table');
+  else {
+    for (const p of lit[1].matchAll(/(\w+):\s*(-?[\d.]+)/g)) F2[p[1]] = Number(p[2]);
+    for (const k of ['upperCap', 'lowerCap', 'rockerMix', 'rockerFull', 'archKeep', 'archCeil',
+      'rearKeep', 'dustGain', 'windLo', 'windHi', 'windMax', 'veilCap', 'veilHeight', 'streakMix']) {
+      if (!Number.isFinite(F2[k])) gaps.push(`DUST_FILM.${k} is not a number`);
+    }
+    // the shader must interpolate the table, not re-author the numbers inline
+    const F = String.raw`(?:glslFloat\()?\$\{(?:glslFloat\()?DUST_FILM\.`;
+    for (const re of [new RegExp(String.raw`gFilmCap = mix\(\$\{glslFloat\(DUST_FILM\.upperCap\)\}`),
+      new RegExp(String.raw`\$\{glslFloat\(DUST_FILM\.windLo\)\}`),
+      new RegExp(String.raw`0\.0, \$\{glslFloat\(DUST_FILM\.veilCap\)\}`),
+      new RegExp(String.raw`\$\{glslFloat\(DUST_FILM\.streakMix\)\}`)]) {
+      if (!re.test(carMesh)) gaps.push(`the shader no longer reads ${re}`);
+    }
+  }
+  const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / Math.max(1e-6, b - a))); return t * t * (3 - 2 * t); };
+  // replay of the shader: a cap keyed to where dust may sit, then film and veil
+  const shade = (T, gHeight, gSrcN, xLocal, speed) => {
+    const wind = 1 - T.windMax * smooth(T.windLo, T.windHi, speed);
+    const lowH = 1 - smooth(T.rockerMix, T.rockerFull, gHeight);
+    const arch = (1 - smooth(0, T.archKeep, gSrcN)) * (1 - smooth(T.archCeil, T.archCeil + 0.2, gHeight));
+    const rear = (1 - smooth(T.rearKeep, T.rearKeep + 0.45, xLocal)) * lowH;
+    const cap = T.upperCap + (T.lowerCap - T.upperCap) * Math.min(1, Math.max(lowH, Math.max(arch, rear)));
+    const raw = (1 * 0.95 + 1 * T.dustGain * wind) * (1.45 * 1.30 * 1.30) * 1.32;   // worst case load
+    const film = Math.min(raw, cap);
+    const veil = Math.min(1 * 0.30 * wind, T.veilCap) * Math.min(film * 2.2, 1) * (0.35 + 0.65 * 1.32)
+      * (1 - 0.7 * smooth(0, T.veilHeight, gHeight));
+    const base = [0.62, 0.09, 0.07], dirt = [0.42, 0.35, 0.27];
+    let maxD = 0;
+    for (let c = 0; c < 3; c++) {
+      const col = base[c] + (dirt[c] - base[c]) * film;
+      const out = col + ((dirt[c] * 1.22 + 0.14) - col) * veil;
+      maxD = Math.max(maxD, Math.abs(out - base[c]));
+    }
+    return { film, maxD };
   };
-  walk(DOF_TUNE, '');
+  // rear quarter / roofline, maximum dust, car standing still
+  const upper = shade(F2, 0.78, 0.62, -0.52, 0);
+  const chalky = shade({ ...F2, upperCap: 0.95, dustGain: 0.50, veilCap: 0.40, windLo: 5.0, windHi: 26.0, windMax: 0.55, veilHeight: 1e9 }, 0.78, 0.62, -0.52, 0);
+  if (!(upper.film <= F2.upperCap + 1e-9)) gaps.push(`upper body film ${upper.film.toFixed(3)} passed its cap ${F2.upperCap}`);
+  if (!(upper.maxD <= 0.10)) gaps.push(`upper body drifted ${upper.maxD.toFixed(3)} off the base panel colour`);
+  if (!(chalky.maxD >= 0.30)) gaps.push(`the pinned model no longer reproduces the chalky rear (${chalky.maxD.toFixed(3)})`);
+  if (!(upper.maxD < chalky.maxD * 0.35)) gaps.push(`the caps barely changed anything: ${upper.maxD.toFixed(3)} vs ${chalky.maxD.toFixed(3)}`);
+  // splatter survives low and behind the wheels, and dust blows off with speed
+  const sill = shade(F2, 0.05, 0.9, -0.1, 0);
+  const archPanel = shade(F2, 0.55, 0.05, -0.4, 0);
+  if (!(sill.film > 0.7 && archPanel.film > 0.7)) gaps.push(`the low zone lost its splatter (sill ${sill.film.toFixed(2)} arch ${archPanel.film.toFixed(2)})`);
+  const slow = shade(F2, 0.78, 0.62, -0.52, 8.3), mid = shade(F2, 0.78, 0.62, -0.52, 16.7), fast = shade(F2, 0.78, 0.62, -0.52, 33.3);
+  if (!(fast.maxD < mid.maxD && mid.maxD <= slow.maxD && fast.film <= mid.film && mid.film <= slow.film)) gaps.push(`dust does not blow off with speed (drift ${slow.maxD.toFixed(3)}/${mid.maxD.toFixed(3)}/${fast.maxD.toFixed(3)} film ${slow.film.toFixed(3)}/${mid.film.toFixed(3)}/${fast.film.toFixed(3)})`);
+  if (!(F2.windLo <= 17.5 && F2.windLo >= 13.0)) gaps.push(`dust blow-off does not start near 60 km/h (${F2.windLo} m/s)`);
+  if (!(F2.lowerCap > F2.upperCap * 3)) gaps.push('the upper cap is not much lower than the lower one');
 
-  // 2) the composite's linearisation is the projection identity run backwards: a
-  //    window depth written at distance d must read back as d at both ends of the
-  //    frustum, or every coc below is measured against the wrong distance.
-  const near = 0.25, far = 1320;
-  const winAt = (d) => (far * (1 - near / d)) / (far - near);
-  const distOf = (zw) => -((near * far) / ((far - near) * zw - far));
-  for (const d of [near, 1, 7, 30, 120, 400, 900, far]) {
-    const zw = winAt(d);
-    if (!(zw > 0 && zw <= 1)) gaps.push(`window depth out of range at ${d} m: ${zw}`);
-    const back = distOf(zw);
-    if (Math.abs(back - d) > 1e-6 * Math.max(1, d)) gaps.push(`depth round trip ${d} -> ${back.toFixed(3)} m`);
-  }
-
-  // 3) the ramp: dead zero in the sharp band, 1 at the far end, monotone between.
-  const f = 12;
-  const edge = f + DOF_TUNE.nearFlat;
-  if (dofCoc(edge, f) !== 0) gaps.push('a pixel at focus+nearFlat already blurs');
-  if (dofCoc(f, f) !== 0) gaps.push('the focus plane itself blurs');
-  if (Math.abs(dofCoc(edge + DOF_TUNE.farSpan, f) - 1) > 1e-9) gaps.push('the far end does not reach full blur');
-  let prev = -1, over = 0;
-  for (let d = 0; d <= 600; d += 3) {
-    const c = dofCoc(d, f);
-    if (c < prev - 1e-9) gaps.push(`coc falls with distance at ${d} m`);
-    if (c < 0 || c > 1) gaps.push(`coc out of 0..1 at ${d} m: ${c}`);
-    if (d <= edge && c !== 0) over++;
-    prev = c;
-  }
-  if (over) gaps.push(`${over} samples inside the sharp band are not 0`);
-  // the sky (far plane) must be fully defocused, a mid-distance treeline only partly
-  if (dofCoc(far, f) < 0.999) gaps.push('the far plane is not fully defocused');
-  const mid = dofCoc(edge + DOF_TUNE.farSpan * 0.5, f);
-  if (!(mid > 0.35 && mid < 0.65)) gaps.push(`the ramp is not centred on its span (${mid})`);
-
-  // 4) quality gate: the cheap preset pays least, POST off pays nothing, and no
-  //    resolution can buy a blur disc past the ceiling.
-  const rLow = dofRadiusPx({ post: true, level: 'LOW', height: 630 });
-  const rMed = dofRadiusPx({ post: true, level: 'MEDIUM', height: 630 });
-  const rHigh = dofRadiusPx({ post: true, level: 'HIGH', height: 630 });
-  if (!(rLow > 0 && rLow < rMed && rMed < rHigh)) gaps.push(`the quality gate does not step: ${rLow}/${rMed}/${rHigh}`);
-  if (dofRadiusPx({ post: false, level: 'HIGH', height: 630 }) !== 0) gaps.push('DOF runs with POST off');
-  for (const lvl of BLOOM_LEVELS) {
-    const r = dofRadiusPx({ post: true, level: lvl, height: 8192 });
-    if (r > DOF_TUNE.maxPx + 1e-9) gaps.push(`${lvl} blur radius ${r} px over the ${DOF_TUNE.maxPx} px ceiling`);
-  }
-  if (Math.abs(dofRadiusPx({ post: true, level: 'nonsense', height: 630 }) - rMed) > 1e-9) gaps.push('an unknown level does not fall back to MEDIUM');
-
-  // 5) tap count: the cheap preset takes fewer taps, nobody exceeds the table, and a
-  //    garbage level still lands inside the loop bound the shader compiles (i < 5).
-  const tLow = dofTapCount('LOW'), tMed = dofTapCount('MEDIUM'), tHigh = dofTapCount('HIGH');
-  if (!(tLow >= 1 && tLow <= tMed && tMed <= tHigh && tHigh <= DOF_TUNE.taps)) gaps.push(`tap ladder wrong ${tLow}/${tMed}/${tHigh} vs ${DOF_TUNE.taps}`);
-  if (dofTapCount('garbage') > 4 || dofTapCount(undefined) > 4) gaps.push('a tap count exceeds the compiled loop bound');
-
-  // 6) garbage in -> finite, clamped out (a stale save or a NaN camera can never put
-  //    a negative focus or a 400 px disc on the GPU).
-  for (const v of [NaN, Infinity, -1e9, 1e9, undefined, '12']) {
-    const fo = dofFocus(v), co = dofCoc(v, v), px = dofRadiusPx({ post: true, level: v, height: v });
-    const tc = dofTapCount(v);
-    if (!Number.isFinite(fo) || fo < DOF_TUNE.minFocus || fo > DOF_TUNE.maxFocus) gaps.push(`focus leaked ${fo} for input ${v}`);
-    if (!Number.isFinite(co) || co < 0 || co > 1) gaps.push(`coc leaked ${co} for input ${v}`);
-    if (!Number.isFinite(px) || px < 0 || px > DOF_TUNE.maxPx) gaps.push(`radius leaked ${px} for input ${v}`);
-    if (!(tc >= 0 && tc <= 4)) gaps.push(`taps leaked ${tc} for input ${v}`);
-  }
-  // the focus clamp is what stops a bumper cam (0.4 m off the nose) from putting the
-  // whole frame in the blur band
-  if (dofFocus(0.4) < DOF_TUNE.minFocus) gaps.push('a bumper-cam distance focuses inside the car');
-
-  // 7) the budget: DOF buys no pass. The graph is still 4/6/6 with exactly one
-  //    composite, and POST off is still the zero-pass fallback.
-  const per = {};
-  for (const [qName, q] of [['LOW', QUALITY.LOW], ['MED', QUALITY.MED], ['HIGH', QUALITY.HIGH]]) {
-    qualityPreset(q);
-    const g = passGraph({ post: settings.post, bloom: settings.bloom, shafts: true });
-    per[qName] = g.length;
-    if (g.some((p) => /dof|depth/i.test(p.name) || /dof|depth/i.test(p.kind))) gaps.push(`${qName}: DOF added a pass`);
-    if (g.length > MAX_POST_PASSES) gaps.push(`${qName}: ${g.length} passes > budget ${MAX_POST_PASSES}`);
-    if (g[g.length - 1].kind !== 'composite') gaps.push(`${qName}: composite is not the last pass`);
-  }
-  if (per.LOW !== 4 || per.MED !== 6 || per.HIGH !== 6) gaps.push(`pass count moved: ${per.LOW}/${per.MED}/${per.HIGH} (want 4/6/6)`);
-  if (passGraph({ post: false, bloom: 'HIGH', shafts: true }).length !== 0) gaps.push('POST off still builds passes');
-  qualityPreset(QUALITY.MED);
-
-  // 8) the GPU half really reads the depth, mirrors the node-side ramp, and is gated
-  //    by the same POST flag; and there is exactly one owner of the focus distance.
-  const comp = readFileSync(new URL('../render/post/composer.js', import.meta.url), 'utf8');
-  const frag = comp.slice(comp.indexOf('COMPOSITE_FRAG'), comp.indexOf('export class PostComposer'));
-  if (!/uniform sampler2D uDepth/.test(frag)) gaps.push('the composite declares no depth sampler');
-  if (!/texture2D\(uDepth,\s*vUv\)/.test(frag)) gaps.push('the composite never samples the depth attachment');
-  if (!/uNearP \* uFarP/.test(frag) || !/uFarP - uNearP/.test(frag)) gaps.push('the composite does not linearise with the projection identity');
-  if (!/x \* x \* \(3\.0 - 2\.0 \* x\)/.test(frag)) gaps.push('the composite does not mirror the node-side smoothstep');
-  if (!/uDofNear/.test(frag) || !/uFocus \+ uDofNear/.test(frag)) gaps.push('the composite does not ramp from the focus plane');
-  if (!/uDofPx > 0\.02/.test(frag)) gaps.push('the DOF taps are not gated on a zero radius');
-  if (!/depthTexture: new THREE\.DepthTexture\(w, h\)/.test(comp)) gaps.push('the scene target carries no sampled depth attachment');
-  if (!/dofRadiusPx\(\{\s*post: this\.enabled/.test(comp)) gaps.push('the blur radius is not gated by the POST flag');
-  if (!/setFocus\(v\)\s*\{\s*this\.focusIn = dofFocus\(v\)/.test(comp)) gaps.push('setFocus does not clamp through dofFocus');
-  if ((comp.match(/uDofPx\.value/g) || []).length !== 1) gaps.push('uDofPx is written from more than one place');
-  const mainSrc = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
-  if ((mainSrc.match(/post\.setFocus\(/g) || []).length !== 1) gaps.push('main.js does not own the focus distance');
-  const camSrc = readFileSync(new URL('../render/camera.js', import.meta.url), 'utf8');
-  if (/setFocus\(/.test(camSrc)) gaps.push('two owners push the focus distance (camera.js)');
-
-  check('T55 depth of field: a pinned dial table, a depth ramp that round-trips the projection and stays dead zero inside the sharp band, a quality-gated radius and tap count, ZERO new passes (folded into the composite, still 4/6/6), and one clamped focus owner',
+  check('T56 a gearbox upshift lays a short dark soot puff (0.40..0.70 s ttl, warm core only on a rev-matched downshift, inside the unchanged 1920 particle budget, drawn as its own pool), and the pinned DUST_FILM caps keep the upper body within a small delta of the base panel colour while the sills, arches and rear keep real splatter and dust blows off from ~60 km/h up',
     gaps.length === 0,
-    `ramp ${DOF_TUNE.nearFlat}+${DOF_TUNE.farSpan} m focus ${DOF_TUNE.minFocus}..${DOF_TUNE.maxFocus} | px ${rLow.toFixed(1)}/${rMed.toFixed(1)}/${rHigh.toFixed(1)} cap ${DOF_TUNE.maxPx} | taps ${tLow}/${tMed}/${tHigh} | passes ${per.LOW}/${per.MED}/${per.HIGH} <= ${MAX_POST_PASSES} | midSpan ${mid.toFixed(2)} | gaps=[${gaps.join(' ')}]`);
+    `soot=${sootMax} live=${liveMax}/${fx.maxLive} ttl ${ttlLo.toFixed(2)}..${ttlHi.toFixed(2)} heat up=${heatMax.toFixed(2)} rev=${revHeat.toFixed(2)} size ${sizeLo.toFixed(3)}..${sizeHi.toFixed(3)} caps ${Object.values(FX_CAPACITY).join('/')} | upper film ${upper.film.toFixed(3)} drift ${upper.maxD.toFixed(3)} (chalky was ${chalky.maxD.toFixed(3)}) sill ${sill.film.toFixed(2)} arch ${archPanel.film.toFixed(2)} speed ${slow.film.toFixed(3)}/${mid.film.toFixed(3)}/${fast.film.toFixed(3)} | gaps=[${gaps.join(' ')}]`);
 }
-testDepthOfField();
+testSootPuffAndDustFilmCaps();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

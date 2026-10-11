@@ -15,6 +15,36 @@ import { BEAM, BEAM_VERT, BEAM_FRAG, beamAnchors, beamGeometry, beamMaterialSpec
 import { settings } from '../core/settings.js';
 
 /**
+ * Pinned dust-film caps (docs/04). Read headless by src/debug/tests.js and
+ * interpolated into the car shader below, so the numbers the test asserts are
+ * the numbers the GPU runs. The upper body used to share the sills' 0.95 film
+ * ceiling, which is exactly why a few seconds of gravel turned the rear chalky.
+ */
+export const DUST_FILM = {
+  upperCap: 0.16,      // was 0.95 (one flat ceiling over the whole car)
+  lowerCap: 0.92,      // sills, arch lids, rear bumper, behind the wheels
+  rockerMix: 0.20,     // gHeight where the upper cap starts closing in
+  rockerFull: 0.55,    // gHeight where it is fully in force
+  archKeep: 0.42,      // gSrcN (distance from the throwing wheel) under which a panel keeps real splatter
+  archCeil: 0.80,      // ...but only up to this gHeight, so the roof stays clean
+  rearKeep: -0.35,     // vLocal.x behind which the rear keeps splatter (still low only)
+  dustGain: 0.34,      // was 0.50: dry dust's share of the film
+  windLo: 16.7,        // m/s ~ 60 km/h: dust starts to blow off (was 5.0)
+  windHi: 30.0,        // was 26.0
+  windMax: 0.86,       // was 0.55: a fast car runs far cleaner than a slow one
+  veilCap: 0.14,       // was 0.40: the pale dry veil is a thin sheen now
+  veilHeight: 0.30,    // the veil is already 70% gone by this gHeight
+  streakMix: 0.70,     // the veil rides the airflow bands instead of a flat haze
+  streakKeep: 0.30,    // how much haze survives between the streaks
+};
+
+/** GLSL needs a float literal; JS prints 30 as "30" and smoothstep then has no overload. */
+export function glslFloat(n) {
+  const v = Number(n);
+  return Number.isInteger(v) ? v.toFixed(1) : String(v);
+}
+
+/**
  * Bake one panel index + airflow direction per body vertex (docs/04 §4.2: the
  * dirt layer is per panel and the streaks run along the panel's airflow). The
  * panel index is assigned per volume by car-body.js, so the 16 panels land on
@@ -382,7 +412,7 @@ vec2 gPanelUv = vec2(0.0);
 float gThick = 0.0, gWet = 0.0, gDust = 0.0, gStreak = 0.0;
 vec3 gDirtCol = vec3(0.0);
 // Per-fragment dirt shape, computed once in the roughness hook and reused.
-float gCov = 0.0, gWind = 0.0, gSrcN = 0.0, gHeight = 0.0, gSpatter = 0.0;
+float gCov = 0.0, gWind = 0.0, gSrcN = 0.0, gHeight = 0.0, gSpatter = 0.0, gFilmCap = 1.0;
 float dhash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float dhash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
 // Cheap value noise: the splatter has to be stationary in car space, never a
@@ -446,9 +476,20 @@ float vnoise(vec3 p) {
   float blobs = vnoise(vLocal * vec3(3.0, 4.4, 3.0));
   float speck = vnoise(vLocal * vec3(11.5, 13.5, 11.5));
   gSpatter = 0.22 + 1.10 * smoothstep(0.30, 0.88, blobs * 0.62 + speck * 0.48);
-  // Loose dry dust blows off as speed rises, so the car stops going chalky.
-  gWind = 1.0 - 0.55 * smoothstep(5.0, 26.0, uSpeed);
-  gCov = clamp((gThick * 0.95 + gDust * 0.50 * gWind) * grime * gSpatter, 0.0, 0.95);
+  // Loose dry dust blows off progressively from ~60 km/h up, so a fast car is
+  // cleaner than a slow one instead of ending the stage powdered.
+  gWind = 1.0 - ${glslFloat(DUST_FILM.windMax)} * smoothstep(${glslFloat(DUST_FILM.windLo)}, ${glslFloat(DUST_FILM.windHi)}, uSpeed);
+
+  // Ceiling on the film, keyed to where dust may physically sit. Only the low
+  // zone - sills and lower flanks, the arch lids, the rear bumper, everything
+  // right behind a throwing wheel - may hold a real splatter plate; above the
+  // rocker line the same dust is capped to a thin sheen, so the red survives.
+  float lowH = 1.0 - smoothstep(${glslFloat(DUST_FILM.rockerMix)}, ${glslFloat(DUST_FILM.rockerFull)}, gHeight);
+  float arch = (1.0 - smoothstep(0.0, ${glslFloat(DUST_FILM.archKeep)}, gSrcN))
+    * (1.0 - smoothstep(${glslFloat(DUST_FILM.archCeil)}, ${glslFloat(DUST_FILM.archCeil)} + 0.2, gHeight));
+  float rear = (1.0 - smoothstep(${glslFloat(DUST_FILM.rearKeep)}, ${glslFloat(DUST_FILM.rearKeep)} + 0.45, vLocal.x)) * lowH;
+  gFilmCap = mix(${glslFloat(DUST_FILM.upperCap)}, ${glslFloat(DUST_FILM.lowerCap)}, clamp(max(lowH, max(arch, rear)), 0.0, 1.0));
+  gCov = clamp((gThick * 0.95 + gDust * ${glslFloat(DUST_FILM.dustGain)} * gWind) * grime * gSpatter, 0.0, gFilmCap);
 
   // docs/04: rough = mix(rough, mix(0.95, 0.35, wet), thick) - wet mud glints.
   roughnessFactor = mix(roughnessFactor, mix(0.95, 0.35, gWet), clamp(gCov * 1.10 + gDust * 0.30 * gWind, 0.0, 1.0));
@@ -477,8 +518,13 @@ float vnoise(vec3 p) {
   col = mix(col, dirtCol * 0.85, clamp(streakMask, 0.0, 0.85));
   // Dry dust is a pale veil, not a dark plate - that is what keeps gravel dust
   // looking like dust rather than like mud (docs/04 risk R4).
-  float veil = clamp(gDust * 0.30 * gWind, 0.0, 0.40) * clamp(film * 2.2, 0.0, 1.0)
-    * (0.35 + 0.65 * gSpatter) * (1.0 - gWet);
+  float veil = clamp(gDust * 0.30 * gWind, 0.0, ${glslFloat(DUST_FILM.veilCap)}) * clamp(film * 2.2, 0.0, 1.0)
+    * (0.35 + 0.65 * gSpatter) * (1.0 - gWet)
+    * (1.0 - 0.7 * smoothstep(0.0, ${glslFloat(DUST_FILM.veilHeight)}, gHeight));
+  // Streaky, never a uniform haze: the dry veil rides the same airflow bands as
+  // the wet runs, so it reads as brushed-off streaks with clean panel between.
+  float haze = ${DUST_FILM.streakKeep} + (1.0 - ${DUST_FILM.streakKeep}) * clamp(across * 1.8, 0.0, 1.0);
+  veil *= mix(1.0, haze, ${DUST_FILM.streakMix});
   col = mix(col, dirtCol * 1.22 + vec3(0.14), veil);
 
   // Damage as a surface state of the panel (docs/02 §8): pixel cracks, not a bar.
