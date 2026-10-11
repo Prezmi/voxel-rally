@@ -34,6 +34,7 @@ import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
+import { buildColliders, queryNearBrute, COLLIDER_CELL, SPECIES_SHAPE } from '../world/prop-colliders.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
 import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
@@ -3181,6 +3182,140 @@ function testShippedMapCorridor() {
     gaps.length === 0, gaps.join(' ') + ' | ' + per.join(' | '));
 }
 testShippedMapCorridor();
+
+// ---------------------------------------------------------------- test 48-52
+// Scenery collision: src/world/prop-colliders.js turns the prop list into a
+// chunk-keyed grid, and propContact() in src/car/vehicle.js answers it in the
+// wheel substep loop (after hullContact, before integrate).
+function testPropColliders() {
+  // Which way the sim drives a car at yaw 0: probe the sign, do not assume it.
+  const probe = makeCar(new FlatWorld(SURF.DIRT), {});
+  probe.placeAt(0, 0, 0);
+  for (let i = 0; i < 40; i++) {
+    probe.setInput({ throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+    probe.step(DT);
+  }
+  // placeAt(x, z, yaw, groundY): at yaw 0 the sim drives the car along +X, so the
+  // planted tree sits down that axis (probed above, not assumed).
+  const fwd = probe.body.pos.x >= 0 ? 1 : -1;
+  const TREE_X = fwd * 45;
+  const tree = { prop: PROP.OAK, x: TREE_X, y: 0, z: 0, yaw: 0, scale: 1 };
+  const FULL = { throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+
+  // 1) speed + damage, not a drive-through
+  {
+    const w = new FlatWorld(SURF.DIRT);
+    const car = makeCar(w, {});
+    car.placeAt(0, 0, 0);
+    car.setPropColliders(buildColliders([tree]));
+    let peak = 0, hits = 0;
+    for (let i = 0; i < Math.round(7 / DT); i++) {
+      car.setInput(FULL);
+      for (const e of car.step(DT)) if (e.type === 'propHit') hits++;
+      peak = Math.max(peak, car.body.groundSpeed);
+    }
+    const after = car.body.groundSpeed;
+    const through = fwd * car.body.pos.x > TREE_X + 0.5;
+    check('T48 a full-throttle car driven straight into a planted tree loses most of its speed and takes damage instead of passing through',
+      hits > 0 && peak > 12 && after < 0.35 * peak && !through && car.damage.totalSeverity > 0,
+      `peak=${peak.toFixed(1)} -> ${after.toFixed(1)} m/s hits=${hits} severity=${car.damage.totalSeverity.toFixed(2)} frontHits=${car.damage.frontHits} stopX=${car.body.pos.x.toFixed(1)} treeX=${TREE_X}`);
+  }
+
+  // 2) the non-solid species never collide
+  {
+    const w = new FlatWorld(SURF.DIRT);
+    const car = makeCar(w, {});
+    car.placeAt(0, 0, 0);
+    const grid = buildColliders([
+      { prop: PROP.FERN, x: TREE_X, y: 0, z: 0, yaw: 0, scale: 1 },
+      { prop: PROP.BUSH, x: TREE_X + 1, y: 0, z: 0.3, yaw: 0, scale: 1 },
+    ]);
+    car.setPropColliders(grid);
+    let hits = 0;
+    for (let i = 0; i < Math.round(7 / DT); i++) {
+      car.setInput(FULL);
+      for (const e of car.step(DT)) if (e.type === 'propHit') hits++;
+    }
+    const through = fwd * car.body.pos.x > TREE_X + 3;
+    check('T49 ferns and bushes are non-solid: no collider is built for them and the car drives through untouched',
+      grid.count === 0 && grid.skipped === 2 && hits === 0 && through,
+      `colliders=${grid.count} skipped=${grid.skipped} hits=${hits} x=${car.body.pos.x.toFixed(1)} solidSpecies=${Object.keys(SPECIES_SHAPE).length}`);
+  }
+
+  // 3) no trapping: a car started dead centre on a trunk is ejected
+  {
+    const w = new FlatWorld(SURF.DIRT);
+    const car = makeCar(w, {});
+    const grid = buildColliders([tree, { prop: PROP.PINE, x: TREE_X + 0.3, y: 0, z: 0.4, yaw: 0, scale: 1 }]);
+    car.placeAt(TREE_X, 0, 0, 0);   // dead centre on the trunk
+    car.setPropColliders(grid);
+    for (let i = 0; i < 20; i++) {
+      car.setInput({ throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+      car.step(DT);
+    }
+    const clear = grid.hit(car.body.pos.x, car.body.pos.z, 0.05, {}) <= 0;
+    const d = Math.hypot(car.body.pos.x - TREE_X, car.body.pos.z);
+    check('T50 a car started inside a collider is ejected along the shortest axis instead of being trapped in it',
+      clear && d > 0.42, `dist=${d.toFixed(2)} m (oak trunk r=0.42) pos=(${car.body.pos.x.toFixed(1)}, ${car.body.pos.z.toFixed(2)}) colliders=${grid.count}`);
+  }
+
+  // 4) the grid matches a brute force scan, plus the per-map counts / build time
+  {
+    const per = [];
+    let missing = 0, sampled = 0, far = 0;
+    for (const def of MAP_CATALOG) {
+      const bytes = new Uint8Array(readFileSync(fileURLToPath(new URL(`../../${mapUrl(def.id)}`, import.meta.url))));
+      const world = new VoxelWorld(def.seed || 1);
+      const res = applyMap(world, bytes);
+      const g = buildColliders(res.propTables);
+      for (let a = 0; a < 40; a++) {
+        const i = res.road.indexAt(res.road.length * (a + 0.5) / 40);
+        const x = res.road.x[i], z = res.road.z[i], r = 3;
+        const got = g.queryNear(x, z, r);
+        const set = new Set(got);
+        for (const sh of queryNearBrute(g.colliders, x, z, r)) if (!set.has(sh)) missing++;
+        for (const sh of set) if (Math.abs(sh.x - x) > r + sh.r + COLLIDER_CELL
+          || Math.abs(sh.z - z) > r + sh.r + COLLIDER_CELL) far++;
+        sampled++;
+      }
+      per.push(`${def.id} props=${g.props} -> colliders=${g.count} (solids=${g.solids} nonSolidSkipped=${g.skipped} fenceLinks=${g.fences}) cells=${g.cells} build=${g.builtMs.toFixed(0)}ms`);
+    }
+    check('T51 every shipped map builds a chunk-keyed collider grid, and its query matches a brute force scan on sampled positions',
+      missing === 0 && sampled === 40 * MAP_CATALOG.length,
+      `missing=${missing} farOutsideQuery=${far} samples=${sampled} | ${per.join(' | ')}`);
+  }
+
+  // 5) cost of the contact pass on the T9 voxel patch (1200 steps, grid vs no grid)
+  function simCost(props) {
+    const world = new VoxelWorld(4242);
+    for (let cz = -1; cz <= 1; cz++) for (let cx = -1; cx <= 1; cx++) {
+      const ch = world.ensureChunk(cx, cz);
+      for (let lz = 0; lz < 16; lz++) for (let lx = 0; lx < 16; lx++) {
+        const col = lz * 16 + lx;
+        for (let y = 0; y <= 20; y++) ch.blocks[col * 96 + y] = 3;
+        ch.height[col] = 20; ch.surface[col] = 2;
+      }
+    }
+    const c = new Vehicle('A', world, {});
+    c.placeAt(0, 0, 0, 21);
+    c.body.vel.x = 20;
+    c.wheels.forEach((wh) => { wh.omega = 20 / wh.rEff; });
+    if (props) c.setPropColliders(buildColliders(props));
+    const t = process.hrtime.bigint();
+    for (let i = 0; i < 1200; i++) {
+      c.setInput({ throttle: 0.7, brake: 0, steer: 0.15, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+      c.step(DT);
+    }
+    return Number(process.hrtime.bigint() - t) / 1e6 / 1200;
+  }
+  const grove = [];
+  for (let z = 6; z >= -14; z -= 3) grove.push({ prop: PROP.OAK, x: 4, y: 20, z, yaw: 0, scale: 1 });
+  const before = simCost(null), after = simCost(grove);
+  check('T52 the collider contact pass keeps the sim cost per 1/120 step inside the T9 budget',
+    after <= 4 && after - before <= 0.5,
+    `no-colliders=${before.toFixed(3)} ms/step with-colliders=${after.toFixed(3)} ms/step (budget <=4) colliders=${grove.length}`);
+}
+testPropColliders();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

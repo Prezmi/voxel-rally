@@ -30,6 +30,7 @@ import { FrameLoop } from './core/loop.js';
 import { startPerfHarness } from './debug/perf-harness.js';
 import { pregenerateStage } from './world/pregen.js';
 import { MAP_CATALOG, MAP_SIZE_BUDGET, mapById, mapUrl, fetchMap, applyMap } from './world/map-load.js';
+import { buildColliders } from './world/prop-colliders.js';
 import { loadStageCache } from './world/stage-cache.js';
 import { DT } from './core/time.js';
 import { showroomConfig, showroomRoute, showroomPose } from './debug/showroom.js';
@@ -203,8 +204,15 @@ async function loadMapStage(cfg, hud) {
     + `${loadMs.toFixed(0)} ms · ${res.stats.chunks} chunks (${res.stats.near} near + ${res.stats.far} far) · `
     + `${res.stats.props} props · `
     + `${res.stats.tiles} tiles · road ${res.road.length.toFixed(0)} m · corridor ${cov.near}/${cov.far} m`);
+  // Scenery is solid (src/world/prop-colliders.js): the authored prop list becomes a
+  // chunk-keyed collider grid once, here at load, and the physics step queries it.
+  const propColliders = buildColliders(res.propTables);
+  console.log(`[props] colliders ${propColliders.count} solid / ${propColliders.props} props `
+    + `(${propColliders.skipped} non-solid, ${propColliders.fences} fence links) in ` 
+    + `${propColliders.builtMs.toFixed(1)} ms over ${propColliders.cells} cells`);
   return {
     seed: entry.seed, biome, world, road: res.road, gates: res.gates, carveIndex,
+    propColliders,
     roadLength: res.road.length, propTables: res.propTables, tileTables: res.tileTables,
     preGen: true, mapEntry: entry, mapCoverage: cov,
     mapStats: { chunks: res.stats.chunks, near: res.stats.near, far: res.stats.far, filled: 0, carved: 0, props: res.stats.propLists, tiles: res.stats.tileLists, bytes: f.bytes.length, loadMs },
@@ -316,6 +324,7 @@ async function main() {
   carWorld.surfaceAt = (x, z) => stage.world.surfaceAt(Math.floor(x), Math.floor(z));
   carWorld.rutAt = (x, z) => stage.world.rutAt(Math.floor(x), Math.floor(z));
   const car = new Vehicle(cfg.carId, carWorld, { assists: { ...settings.assists } });
+  car.setPropColliders(stage.propColliders);
   const dirt = new DirtSystem();
   dirt.rain(cfg.rain);
   if (cfg.dirtSeed > 0) dirt.seedPanels(cfg.dirtSeed);
@@ -663,6 +672,11 @@ async function main() {
       for (const e of events) {
         if (e.type === 'impact' && e.impulse > 18000) {
           view3d.addShake(Math.min(0.45, (e.impulse - 18000) / 130000) * settings.cameraShake);
+        } else if (e.type === 'propHit') {
+          // Scenery contact: the same shake budget as a landing, and the existing
+          // wheel-dust field gets a kick so the hit is visible as well as audible.
+          view3d.addShake(Math.min(0.45, e.impulse / 90000) * settings.cameraShake);
+          fx.ambient.bumpDust(6 + Math.round(e.speed * 2));
         }
       }
       dirt.step(car, dt);

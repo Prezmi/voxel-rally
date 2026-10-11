@@ -60,6 +60,13 @@ export class Vehicle {
       v3(sx * this.params.hull.x,
          this.params.hull.cy + sy * this.params.hull.y,
          sz * this.params.hull.z));
+    // Scenery collision probes (src/world/prop-colliders.js): the hull footprint at
+    // axle height, corners first so a trunk cannot slip between two probes.
+    { const hx = this.params.hull.x, hz = this.params.hull.z;
+      this.propPoints = [v3(hx, 0, hz), v3(hx, 0, -hz), v3(-hx, 0, hz), v3(-hx, 0, -hz),
+        v3(hx, 0, 0), v3(-hx, 0, 0), v3(0, 0, hz), v3(0, 0, -hz)]; }
+    this.propColliders = null;      // set by the stage once the prop list is loaded
+    this.propHitCd = 0;             // damage cooldown, so one tree is one hit
     this.events = [];               // impacts for audio / FX / damage
     // docs/02 §9 gives the wheel a finer step than the body. The tyre contact
     // spring (200 kN/m) against an 18 kg unsprung mass is a ~20 Hz mode and the
@@ -195,6 +202,9 @@ export class Vehicle {
 
   setInput(input) { this.input = input; }
 
+  /** Hand the car the solid scenery grid (see src/world/prop-colliders.js). */
+  setPropColliders(grid) { this.propColliders = grid || null; }
+
   /** True while the car is on its side, on its roof, or being righted. */
   rolled() { return isRolled(this); }
 
@@ -278,6 +288,7 @@ export class Vehicle {
       }
 
       hullContact(this, h);
+      propContact(this, h);
       b.applyGravityAero();
       b.integrate(h);
       applyDeformationAndDamage(this, h);
@@ -331,6 +342,68 @@ function accumulateOnBody(car, w) {
   const mx = w.hub.x - b.pos.x, my = w.hub.y - b.pos.y, mz = w.hub.z - b.pos.z;
   b.torque.x += -mz * w.N;
   b.torque.z += mx * w.N;
+}
+
+// ---- scenery collision (src/world/prop-colliders.js) -----------------------
+// Trees, rocks, tents, gantry legs and fence lines are solid. The probe radius is
+// half the track plus a finger of mudguard, so the car stops on the body rather than
+// on a wheel that slipped past the trunk.
+const PROP_PROBE_R = 0.55, PROP_RESTITUTION = 0.3, PROP_SCRUB = 0.55, PROP_PUSH_MAX = 1.5;
+
+function propContact(car, h) {
+  const grid = car.propColliders;
+  if (!grid || !grid.count) return;
+  const b = car.body;
+  const probes = car.propPoints;
+  const out = car._propHit || (car._propHit = { nx: 0, nz: 0, depth: 0, shape: null });
+  let depth = 0, nx = 0, nz = 0, rx = 0, rz = 0, hx = 0, hz = 0, species = -1;
+  for (let k = 0; k < probes.length; k++) {
+    mul3v(b.m, probes[k], car._tmp);
+    const px = b.pos.x + car._tmp.x, pz = b.pos.z + car._tmp.z;
+    if (grid.hit(px, pz, PROP_PROBE_R, out) <= 0) continue;
+    if (out.depth <= depth) continue;
+    depth = out.depth; nx = out.nx; nz = out.nz;
+    rx = car._tmp.x; rz = car._tmp.z; hx = px; hz = pz; species = out.shape.prop;
+  }
+  if (depth <= 0) return;
+
+  // 1) push out along the shape's shortest axis. A car that ends up INSIDE a shape
+  // (a spawn, a restart, a step that tunnelled a thin post) comes back out the way it
+  // went in: it is never trapped.
+  const push = Math.min(depth + 1e-3, PROP_PUSH_MAX);
+  b.pos.x += nx * push; b.pos.z += nz * push;
+
+  // 2) velocity at the contact point: kill the inward part with restitution ~0.3 and
+  // scrub the tangential slide (the car sideslips along the trunk, it does not slide
+  // freely past it).
+  car._local.x = rx; car._local.y = 0; car._local.z = rz;
+  crossInto(b.angVel, car._local, car._vHub);
+  const vx = b.vel.x + car._vHub.x, vz = b.vel.z + car._vHub.z;
+  const vn = vx * nx + vz * nz;
+  if (vn < 0) { const j = -(1 + PROP_RESTITUTION) * vn; b.vel.x += nx * j; b.vel.z += nz * j; }
+  const tx = -nz, tz = nx;
+  const vt = vx * tx + vz * tz;
+  b.vel.x += tx * -vt * PROP_SCRUB; b.vel.z += tz * -vt * PROP_SCRUB;
+  b.angVel.x *= 0.7; b.angVel.y *= 0.7; b.angVel.z *= 0.7;
+
+  // 3) the wheels lose their drive speed with the car: a tree does not let the
+  // drivetrain keep winding the engine up.
+  for (const w of car.wheels) w.omega *= 0.6;
+
+  // 4) damage + feedback, once per hit (cooldown), scaled by closing speed.
+  const speed = Math.hypot(vx, vz);
+  car.propHitCd -= h;
+  if (car.propHitCd > 0 || speed < 1.5) return;
+  car.propHitCd = 0.3;
+  const impulse = Math.min(240000, car.mass * speed * 1.6);
+  // Local +X is forward (the body frame is yawed a quarter turn, cf. fx.js rear =
+  // -m[0]), so the front axle is the rx > 0 half.
+  const wi = (rx > 0 ? 0 : 2) + (rz > 0 ? 1 : 0);    // nearest corner of the car
+  if (rx > 0) car.damage.registerFrontHit(impulse);
+  car.damage.registerWheelImpact(wi, impulse);
+  car.damage.registerSteerHit(impulse);
+  car.damage.syncWheels(car.wheels);
+  car.events.push({ type: 'propHit', species, impulse, speed, x: hx, y: b.pos.y, z: hz, nx, nz });
 }
 
 function hullContact(car, h) {

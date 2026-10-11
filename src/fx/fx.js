@@ -174,6 +174,10 @@ export class AmbientFx {
     this._p = { x: 0, y: 0, z: 0 };
   }
 
+  /** A scenery hit feeds the existing wheel-dust accumulator: same particles, same
+   *  wind field, no second emission path. n is in particles. */
+  bumpDust(n) { this.dacc += Math.max(0, Math.min(28, n)); }
+
   /** env = { trees, wind, sun, rain } — all plain numbers, mutated by the caller. */
   step(dt, car, env) {
     this.t += dt;
