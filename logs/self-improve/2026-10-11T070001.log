@@ -17,3 +17,26 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T06:00:29.845Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+Done. Committed locally as `3db5c71` (not pushed).
+
+## Item chosen
+**P7** (lowest OPEN number) — "road surface still shows over-light patches in the near field because `src/render/renderer.js` applies `tone = 0.82 + 0.40 * tile`; narrow that spread to about 12 percent and let ruts get slightly glossier."
+
+## Changes
+- `src/render/road-skin.js:1-49` (new) — THREE-free home for the road skin's tuning so the shipped numbers are assertable headless (same reason `car-asset.js` stays THREE-free): `ROAD_TONE` at `:12-15` (`base 0.94`, `swing 0.12`), `RUT_GLOSS` at `:23-27` (`from 0.10`, `to 0.45`, `road 0.80`), plus `roadToneRange()` `:30` and `roadRutRoughness()` `:47`.
+- `src/render/renderer.js:10` — imports those constants.
+- `src/render/renderer.js:169` — `float tone = ${ROAD_TONE.base} + ${ROAD_TONE.swing} * tile;` was `0.82 + 0.40 * tile`: band 0.82→1.22 (48.8 %, midpoint 1.02 *above* the panel colour, brightest panel +22 %) became 0.94→1.06 (12.8 %, midpoint 1.000, +6 % max), still above PLAN §10 criterion 2's ≥12 % floor.
+- `src/render/renderer.js:246-248` — new rut term: the wheel-line end of the packed wear band loses 20 % roughness on gravel/mud/peat/dirt (asphalt keeps its own stronger compaction term at `:230`), so the rut sells itself in the specular once the value spread came down.
+- `src/debug/tests.js:22` import; **T28** at `:1698`, check at `:1746` — pins the band floor (≥12 %) and ceiling (≤18 %), the 1.000 midpoint, a max 1.10 lift, monotone 5–30 % rut gloss, that the shader compiles the pinned constants instead of a literal, and that the rut mask equals the colour pass's road family minus asphalt.
+- `docs/QUALITY-QUEUE.md` — P7 moved to Done with the note; three new defects filed: **P32** (near-field road reads as a 1 m slab staircase now that tone is flat — geometric, visible across the lower half of the shot), **P33** (the shot pass logs `[assets] "rally_v2" unavailable (Failed to fetch)` while the same URL answers 200, so every visual pass judges the procedural car), **P34** (`roadishw` `renderer.js:255` omits PEAT while `roadish` `:210` and the rut mask `:246` include it — rain glosses dirt but not peat).
+
+## Verification
+- `node src/debug/tests.js` → **`39/39 passed`** (38 before, +1, no test removed or weakened). `tools/smoke.mjs` drive clean, `nan false`.
+- Geometry untouched, so the frame's triangle count is unchanged (well under 220 k).
+- One headless Chrome pass, read back with my own read tool: `shots/quality-road-tone.png` (seed 12345, bumper cam, 520 frames — the stage finished generating, 8379 chunks, so it is a real frame, not the boot screen). My judgement: the over-lift is gone — the near-field carriageway is one worked brown surface with visible metre-scale panel variation and no blown pale patches, and the pale shoulder line reads without blooming; what dominates the frame now is the 1 m slab stepping (filed P32) rather than the shading.
+
+```
+PASS  T28 the road skin swings 12 % in value about the panel colour, never over-lit, and the wheel-line rut runs slightly glossier  tone 0.94..1.06 spread 12.8 % mid 1.000 | rut roughness 0.800 vs panel 1.000 = 20.0 % glossier | masks road=[1,2,3,8,10] rut=[2,3,8,10] | wired=true/true/true | gaps=[]
+```
+To https://github.com/Prezmi/voxel-rally.git
+   16116d0..3db5c71  main -> main

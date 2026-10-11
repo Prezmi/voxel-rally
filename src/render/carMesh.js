@@ -10,6 +10,7 @@ import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
 import { PANELS, PANEL_COUNT, PANEL_INDEX } from '../dirt/panel-dirt.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
+import { BEAM, BEAM_VERT, BEAM_FRAG, beamAnchors, beamGeometry, beamMaterialSpec, isDark, setBeamGain } from './headlights.js';
 import { settings } from '../core/settings.js';
 
 /**
@@ -67,6 +68,57 @@ function buildDirtTextures(dirt) {
   return { panelTex, panelData, colTex, colData, sprayTex, uploadSeq: -1, uploadT: 0 };
 }
 
+/**
+ * The night beams for one car body: a SpotLight pool per lamp, plus an additive open
+ * cone shell per lamp so the shaft itself is visible in clear air (a light with nothing
+ * in it draws nothing). Aim, reach, blend flags and triangle cost come from
+ * render/headlights.js - the suite pins those numbers - only the THREE plumbing lives
+ * here. Hung on the car group, so syncCarMesh's pose is all the beams ever need.
+ */
+function attachHeadlights(group, shape) {
+  const data = beamGeometry();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
+  geo.setAttribute('aFade', new THREE.BufferAttribute(data.aFade, 1));
+  geo.setIndex(new THREE.BufferAttribute(data.index, 1));
+  geo.computeBoundingSphere();
+  const spec = beamMaterialSpec();
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(BEAM.color) }, uGain: { value: BEAM.gain } },
+    vertexShader: BEAM_VERT,
+    fragmentShader: BEAM_FRAG,
+    transparent: spec.transparent,
+    blending: THREE[spec.blending],
+    depthWrite: spec.depthWrite,
+    depthTest: spec.depthTest,
+    side: THREE[spec.side],
+    toneMapped: spec.toneMapped,
+  });
+
+  const lights = [], shells = [];
+  const fwd = new THREE.Vector3(1, 0, 0), dir = new THREE.Vector3();
+  for (const a of beamAnchors(shape)) {
+    const sl = new THREE.SpotLight(BEAM.color, BEAM.spot.intensity, BEAM.spot.distance,
+      BEAM.spot.angle, BEAM.spot.penumbra, BEAM.spot.decay);
+    sl.position.set(a.pos[0], a.pos[1], a.pos[2]);
+    sl.target.position.set(a.pool[0], a.pool[1], a.pool[2]);
+    sl.castShadow = false;               // no extra depth pass for a 20 m pool
+    group.add(sl);
+    group.add(sl.target);
+    lights.push(sl);
+
+    const shell = new THREE.Mesh(geo, mat);
+    shell.position.set(a.pos[0], a.pos[1], a.pos[2]);
+    dir.set(a.dir[0], a.dir[1], a.dir[2]);
+    shell.quaternion.setFromUnitVectors(fwd, dir);
+    shell.castShadow = false;
+    shell.receiveShadow = false;
+    group.add(shell);
+    shells.push(shell);
+  }
+  return { lights, shells, mat, geo, tris: data.tris * 2 };
+}
+
 export function buildCarMesh(car, dirt) {
   const p = car.params;
   const shape = carShape(p);
@@ -110,25 +162,17 @@ export function buildCarMesh(car, dirt) {
   group.add(body);
   group.add(wheels);
 
-  // Headlights only light the road when the stage is dark (per-stage tod).
+  // Headlights only light the road when the stage is dark (per-stage tod). A light
+  // alone is invisible in clear air, so render/headlights.js adds the shaft too:
+  // two additive cone shells, 96 triangles, no shadow map (queue P8).
   const tod = typeof settings.tod === 'number' ? settings.tod : 0.7;
-  const night = tod > 0.78 || tod < 0.22;
-  const beams = [];
-  if (night) {
-    for (const z of [shape.hz * 0.6, -shape.hz * 0.6]) {
-      const sl = new THREE.SpotLight(0xffeecd, 46, 34, 0.55, 0.62, 1.3);
-      sl.position.set(shape.hx + 0.25, shape.floor + 0.34, z);
-      sl.target.position.set(shape.hx + 17, shape.floor - 2.0, z * 1.7);
-      sl.castShadow = false;
-      group.add(sl);
-      group.add(sl.target);
-      beams.push(sl);
-    }
-  }
+  const night = isDark(tod);
+  const headlights = night ? attachHeadlights(group, shape) : null;
+  const beams = headlights ? headlights.lights : [];
 
   const view = {
     group, body, wheels, spin: [0, 0, 0, 0], dtex, mat: bodyMat, livery,
-    shape, regions, beams, night, dmgKey: -1, brakeOn: -1,
+    shape, regions, beams, headlights, night, dmgKey: -1, brakeOn: -1,
     tris: { body: built.tris, wheel: wheel.tris }, asset: false, carParams: p,
     // Exhaust tip points in the car-group frame, for src/fx/fx.js. The asset car
     // overwrites these with the real car_exhaust_l / car_exhaust_r nodes.
@@ -612,6 +656,9 @@ function applyDamage(view, car) {
   const pos = geo.getAttribute('position');
   const col = geo.getAttribute('color');
   view.lightsOut = !d.lights[0] && d.frontHits >= 3;
+  // A smashed lamp cluster has to stop throwing light, not just stop glowing: the
+  // pool and the shaft follow the same state as the uHead emissive term.
+  setBeamGain(view.headlights, view.lightsOut ? BEAM.dimmed : 1);
 
   for (const name of ['lampFL', 'lampFR']) {
     const r = view.regions[name];

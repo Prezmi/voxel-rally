@@ -15,7 +15,7 @@ import { FxSystem } from '../fx/fx.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
-import { buildRoad } from '../world/road-spline.js';
+import { buildRoad, stageClimate, WEATHER } from '../world/road-spline.js';
 import { solveGhost, powertrainCeiling, SURFACE_VMAX, GHOST_TUNE } from '../game/ghost.js';
 import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
@@ -27,6 +27,7 @@ import { RallyHud } from '../game/hud-rally.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex, prewarmArea } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
+import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
@@ -1750,6 +1751,138 @@ function testRoadSkinToneBandAndRutGloss() {
     + `| masks road=[${roadish}] rut=[${rutMask}] | wired=${importsSkin}/${toneWired}/${rutWired} | gaps=[${gaps.join(' ')}]`);
 }
 testRoadSkinToneBandAndRutGloss();
+
+// T29 (docs/QUALITY-QUEUE.md P8): a dark stage had no headlight beam the eye could
+// see. A SpotLight lights the road but is invisible in clear air, so the beam is
+// geometry: two additive open cone shells per lamp. Pinned here: the day/night gate
+// agrees with the stage climate generator (beams only on a stage the rig calls dark),
+// the shaft and its light pool are one object with one axis, the volume is additive /
+// depth-tested / never depth-writing (otherwise it punches a hole in the terrain), it
+// stays inside the frame triangle budget, and a smashed lamp cluster mutes pool and
+// shaft together. render/headlights.js is THREE-free so all of this is checkable
+// headless, exactly like render/road-skin.js.
+function testNightHeadlightBeams() {
+  const src = readFileSync(new URL('../render/carMesh.js', import.meta.url), 'utf8');
+  const gaps = [];
+
+  // --- the gate matches the generator: DUSK stages get beams, daylight never does ---
+  let dusk = 0, darkDay = 0, litDark = 0;
+  for (let seed = 1; seed <= 400; seed++) {
+    const cl = stageClimate(seed, 'FOREST');
+    const dark = isDark(cl.tod);
+    if (cl.weather === WEATHER.DUSK) dusk++;
+    if (dark && cl.weather !== WEATHER.DUSK) darkDay++;
+    if (cl.weather === WEATHER.DUSK && !dark) litDark++;
+  }
+  if (dusk === 0) gaps.push('no DUSK stage in 400 seeds, the gate has nothing to light');
+  if (darkDay > 0) gaps.push(`${darkDay}/400 daylight stages would run the beams`);
+  if (litDark > 0) gaps.push(`${litDark}/400 DUSK stages would stay dark`);
+  if (!isDark(0.95) || !isDark(0.05)) gaps.push('the deep-night ends of the day cycle are not dark');
+  if (isDark(0.5) || isDark(0.72)) gaps.push('broad daylight is gated dark');
+
+  // --- anchors: pool and shaft are one object, aimed down the road (car frame, +X) ---
+  // The three shape fields the lamps mount on. render/car-body.js carShape() derives
+  // them from the car params (hx/hz = hull half-extents, floor = -comY + 0.15); they
+  // are recomputed here because car-body.js owns THREE and cannot load in Node.
+  const p = CARS.A;
+  const shape = { hx: p.hull.x, hz: p.hull.z, floor: -p.comY + 0.15 };
+  const anchors = beamAnchors(shape);
+  if (anchors.length !== 2) gaps.push(`${anchors.length} lamps, want 2`);
+  for (const a of anchors) {
+    if (a.dir.some((d) => !Number.isFinite(d)) || a.pos.some((d) => !Number.isFinite(d))) gaps.push('a lamp anchor is not finite');
+    if (a.dir[0] <= 0.9) gaps.push(`a lamp aims ${(a.dir[0] * 100).toFixed(0)} % forward, not down the road`);
+    if (a.dir[1] >= 0) gaps.push('a lamp aims above the horizon, its pool lands past the horizon');
+    if ((a.pos[2] > 0) !== (a.dir[2] > 0)) gaps.push('a lamp aims inward, the two pools never merge');
+    if (!(a.pos[0] > shape.hx)) gaps.push(`a lamp sits behind the nose at x=${a.pos[0].toFixed(2)}`);
+    if (!(Math.abs(a.pos[2]) <= shape.hz)) gaps.push(`a lamp sits outside the body at z=${a.pos[2].toFixed(2)}`);
+    if (!(Math.abs(a.pos[1] - shape.floor) < 1)) gaps.push('a lamp is not on the lamp band of the fascia');
+    const px = a.pool[0] - a.pos[0], py = a.pool[1] - a.pos[1], pz = a.pool[2] - a.pos[2];
+    const l = Math.hypot(px, py, pz);
+    if (Math.abs(l - BEAM.reach) > 1e-6) gaps.push(`pool centre sits ${l.toFixed(2)} m out, the shaft reaches ${BEAM.reach} m`);
+    if (Math.abs(px / l - a.dir[0]) > 1e-9 || Math.abs(pz / l - a.dir[2]) > 1e-9) gaps.push('pool and shaft axes disagree');
+  }
+  if (anchors.length === 2 && Math.abs(anchors[0].pos[2] + anchors[1].pos[2]) > 1e-9) gaps.push('the two lamps are not mirrored across the centreline');
+
+  // --- geometry: an open cone shell along +X, radius opening to the far end ---
+  const geo = beamGeometry();
+  const verts = BEAM.rings.length * (BEAM.segments + 1);
+  if (geo.position.length !== verts * 3 || geo.aFade.length !== verts) gaps.push(`shell has ${geo.aFade.length} verts, expected ${verts}`);
+  if (geo.index.length !== (BEAM.rings.length - 1) * BEAM.segments * 6) gaps.push('the shell is not a closed ring stack');
+  if (geo.tris * 2 !== beamTriangleCount()) gaps.push(`budget says ${beamTriangleCount()} tris, geometry built ${geo.tris * 2}`);
+  const tris = beamTriangleCount();
+  if (!(tris > 0 && tris <= 160)) gaps.push(`${tris} tris is not a cheap volume`);
+  if (!(BEAM.reach <= BEAM.spot.distance)) gaps.push(`shaft reaches ${BEAM.reach} m past a ${BEAM.spot.distance} m light pool`);
+  let rMin = 1e9, rMax = -1e9, xMin = 1e9, xMax = -1e9, bad = 0;
+  for (let i = 0; i < verts; i++) {
+    const x = geo.position[i * 3], y = geo.position[i * 3 + 1], z = geo.position[i * 3 + 2];
+    if (![x, y, z, geo.aFade[i]].every((v) => Number.isFinite(v))) bad++;
+    xMin = Math.min(xMin, x); xMax = Math.max(xMax, x);
+    const r = Math.hypot(y, z);
+    rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
+  }
+  if (bad) gaps.push(`${bad} non-finite shell vertices`);
+  if (Math.abs(xMin) > 1e-9 || Math.abs(xMax - BEAM.reach) > 1e-6) gaps.push(`shell spans x ${xMin}..${xMax}, want 0..${BEAM.reach}`);
+  if (!(rMin < BEAM.rings[0].r + 1e-6 && Math.abs(rMax - BEAM.rings[BEAM.rings.length - 1].r) < 1e-6))
+    gaps.push(`shell radii ${rMin.toFixed(2)}..${rMax.toFixed(2)} do not open out from the lens`);
+  let idxBad = 0;
+  for (let i = 0; i < geo.index.length; i++) if (geo.index[i] >= verts) idxBad++;
+  if (idxBad) gaps.push(`${idxBad} indices leave the vertex set`);
+
+  // --- the alpha ramp: no hard disc at the lens, no cut in mid-air ---
+  const alphas = BEAM.rings.map((r) => r.a);
+  if (alphas[alphas.length - 1] !== 0) gaps.push(`the shaft ends at alpha ${alphas[alphas.length - 1]}: a hard cut in mid-air`);
+  if (!(alphas[0] < alphas[1])) gaps.push('the shaft starts as a hard disc at the lens');
+  if (BEAM.rings.some((r, i) => i && r.t <= BEAM.rings[i - 1].t)) gaps.push('the shell rings are not ordered along the beam');
+  let fadeBad = 0;
+  for (let b = 0; b < BEAM.rings.length; b++) {
+    for (let i = 0; i <= BEAM.segments; i++) if (Math.abs(geo.aFade[b * (BEAM.segments + 1) + i] - BEAM.rings[b].a) > 1e-6) fadeBad++;
+  }
+  if (fadeBad) gaps.push('the ramp is not constant around a ring: a visible seam');
+
+  // --- blend contract: adds light, never occludes, never writes depth ---
+  const spec = beamMaterialSpec();
+  if (!spec.transparent) gaps.push('the shell is opaque, it hides the terrain behind it');
+  if (spec.depthWrite) gaps.push('the shell writes depth, it punches a hole in everything behind it');
+  if (!spec.depthTest) gaps.push('the shell ignores depth, the beam shows through hills and the car');
+  if (spec.blending !== 'AdditiveBlending') gaps.push(`blending ${spec.blending} is not additive`);
+  if (spec.side !== 'DoubleSide') gaps.push(`side ${spec.side}: a shell crossed twice is the whole depth cue`);
+  if (!(BEAM.gain >= 0.05 && BEAM.gain <= 0.4)) gaps.push(`peak shell alpha ${BEAM.gain} is a fog bank or invisible`);
+  if (!/attribute float aFade/.test(BEAM_VERT) || !/vFade = aFade/.test(BEAM_VERT)) gaps.push('the shader does not carry the ramp');
+  if (!/uGain \* vFade/.test(BEAM_FRAG) || !/discard/.test(BEAM_FRAG)) gaps.push('the shader ignores the gain uniform');
+  if (!/gl_FragColor = vec4\( uColor \* a, a \)/.test(BEAM_FRAG)) gaps.push('the additive output is not alpha-modulated');
+
+  // --- damage: pool and shaft go dark together, and come back ---
+  const beams = {
+    lights: anchors.map(() => ({ intensity: BEAM.spot.intensity })),
+    shells: anchors.map(() => ({ visible: true })),
+    mat: { uniforms: { uGain: { value: BEAM.gain } } },
+  };
+  const on = beams.lights[0].intensity, onGain = beams.mat.uniforms.uGain.value;
+  setBeamGain(beams, BEAM.dimmed);
+  if (Math.abs(beams.lights[0].intensity - on * BEAM.dimmed) > 1e-6) gaps.push('a smashed lamp keeps its light pool');
+  if (Math.abs(beams.mat.uniforms.uGain.value - onGain * BEAM.dimmed) > 1e-9) gaps.push('a smashed lamp keeps its shaft');
+  if (!beams.shells[0].visible) gaps.push('the dimmed shaft is hidden instead of dimmed');
+  setBeamGain(beams, 0);
+  if (beams.shells[0].visible) gaps.push('a zero-gain beam still draws');
+  setBeamGain(beams, 1);
+  if (Math.abs(beams.lights[0].intensity - on) > 1e-9) gaps.push('the beam cannot be restored once the lamps are repaired');
+
+  // --- wiring: carMesh runs this module, it does not carry its own numbers ---
+  if (!/from '\.\/headlights\.js'/.test(src)) gaps.push('carMesh.js no longer uses render/headlights.js');
+  if (!src.includes('night ? attachHeadlights(group, shape) : null')) gaps.push('beams are no longer gated on a dark stage');
+  if (!src.includes('isDark(tod)')) gaps.push('carMesh.js re-invents its own day/night threshold');
+  if (!src.includes('setBeamGain(view.headlights, view.lightsOut ? BEAM.dimmed : 1)')) gaps.push('damage no longer mutes the beams');
+  if (!src.includes('beamGeometry()') || !src.includes('beamMaterialSpec()')) gaps.push('carMesh.js builds its own shell instead of the pinned one');
+  if (!/new THREE\.SpotLight\(BEAM\.color/.test(src) || /new THREE\.SpotLight\(\s*0x/.test(src)) gaps.push('carMesh.js builds its own SpotLight numbers');
+
+  check('T29 a dark stage runs two headlight beams: pool and shaft agree, the gate matches the stage climate, damage kills both, and the volume is cheap',
+    gaps.length === 0,
+    `gate dark>${BEAM.darkAbove}/<${BEAM.darkBelow} dusk=${dusk}/400 wrongDark=${darkDay} wrongLit=${litDark} `
+    + `| reach ${BEAM.reach} m <= pool ${BEAM.spot.distance} m radii ${BEAM.rings.map((r) => r.r).join('/')} alpha ${alphas.join('/')} x${BEAM.gain} `
+    + `| lamps=${anchors.length} tris=${tris} (budget 160) dimmedPool=${(on * BEAM.dimmed).toFixed(2)}/${on.toFixed(0)} `
+    + `| gaps=[${gaps.join(' ')}]`);
+}
+testNightHeadlightBeams();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
