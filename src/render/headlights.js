@@ -23,8 +23,21 @@ export const BEAM = {
   darkAbove: 0.78,
   darkBelow: 0.22,
 
-  // Spot light: the pool on the road. Kept at the values the car shipped with.
-  spot: { intensity: 46, distance: 34, angle: 0.55, penumbra: 0.62, decay: 1.3 },
+  // Spot light: the pool on the road. The cone has to be the *same object* as the
+  // shaft drawn under it, so the width and the cut-off are derived from the shaft,
+  // not chosen freely: the shaft fans out to `rings[last].r` at `reach`, i.e.
+  // atan(2.35/20) = 6.7 deg, so the cone is a little wider than that (10.3 deg) and
+  // cut off a little past it (26 m against a 20 m shaft).
+  //
+  // The numbers the car shipped with (angle 0.55 rad = 31.5 deg, distance 34) threw
+  // a 550 m2 wedge: one lamp alone lit a 12.5 m-wide strip at 10 m and 28 m wide at
+  // 25 m, i.e. the whole 10.5 m corridor (road-carve.js: 7.5 m carriageway + 1.5 m
+  // shoulder) plus both banks and the treeline, at 1.2x the night ambient out to
+  // 18 m. The frame never went dark and the 4.7 m-wide shaft was drawing inside a
+  // 25 m-wide glow that had nothing to do with it (queue P8). These numbers put the
+  // pool back inside the corridor (3 m across at 6 m, 7.5 m at 20 m) over 119 m2,
+  // and let the world past the shaft fall back to ambient. T30 pins the agreement.
+  spot: { intensity: 50, distance: 26, angle: 0.18, penumbra: 0.62, decay: 1.3 },
   color: 0xffeecd,
 
   // Where the lamps sit on the car body and where they aim: ahead of the nose, down
@@ -46,6 +59,81 @@ export const BEAM = {
   // does not go fully black (one bulb survives) but it stops throwing a shaft.
   dimmed: 0.10,
 };
+
+/** car-body.js carShape(): `floor = ground + 0.15`, so the road plane in the car
+ *  frame sits this far under the floor band the lamps are welded to. */
+export const GROUND_UNDER_FLOOR = 0.15;
+
+/** Irradiance one lamp throws on the road plane at (x, z) in the car frame, using
+ *  the same falloff three compiles for a SpotLight (1/d^decay windowed by the
+ *  cut-off). Ignores the penumbra ramp: it is what bounds the pool, not its edge. */
+export function poolIlluminance(shape, x, z) {
+  const gy = shape.floor - GROUND_UNDER_FLOOR;
+  const cosA = Math.cos(BEAM.spot.angle);
+  let best = 0;
+  for (const a of beamAnchors(shape)) {
+    const dx = x - a.pos[0], dy = gy - a.pos[1], dz = z - a.pos[2];
+    const d = Math.hypot(dx, dy, dz);
+    if (!(d > 1e-6) || d > BEAM.spot.distance) continue;
+    const c = (dx * a.dir[0] + dy * a.dir[1] + dz * a.dir[2]) / d;
+    if (c < cosA) continue;
+    let f = 1 / Math.max(Math.pow(d, BEAM.spot.decay), 1e-4);
+    const w = Math.max(0, 1 - Math.pow(d / BEAM.spot.distance, 4));
+    f *= w * w * BEAM.spot.intensity;
+    if (f > best) best = f;
+  }
+  return best;
+}
+
+/**
+ * The ground footprint of both lamps together: how far the light actually reaches
+ * down the road, and how wide it lies across it. Marched on a step-m grid in the
+ * car frame, so the pool the SpotLight throws can be pinned against the shaft the
+ * beam geometry draws (T30) instead of being judged from a screenshot alone.
+ * `spanAt(X)` is the full across-road width of the lit band centred on X metres
+ * ahead of the car.
+ */
+export function beamFootprint(shape, step = 0.25) {
+  const x0 = shape.hx - 1;
+  const x1 = shape.hx + BEAM.spot.distance + 1;
+  const zLim = BEAM.spot.distance;
+  let area = 0, near = Infinity, far = -Infinity, peak = 0;
+  const bands = new Map();
+  for (let x = x0; x <= x1; x += step) {
+    for (let z = -zLim; z <= zLim; z += step) {
+      const e = poolIlluminance(shape, x, z);
+      if (e <= 0) continue;
+      area += step * step;
+      if (x < near) near = x;
+      if (x > far) far = x;
+      if (e > peak) peak = e;
+      const b = Math.round(x);
+      const r = bands.get(b) || [z, z];
+      if (z < r[0]) r[0] = z;
+      if (z > r[1]) r[1] = z;
+      bands.set(b, r);
+    }
+  }
+  const spanAt = (X) => {
+    let lo = Infinity, hi = -Infinity, hit = 0;
+    for (const b of bands.keys()) {
+      if (Math.abs(b - X) > 1) continue;
+      const r = bands.get(b);
+      if (r[0] < lo) lo = r[0];
+      if (r[1] > hi) hi = r[1];
+      hit++;
+    }
+    return hit ? hi - lo : 0;
+  };
+  return { area, near, far, peak, spanAt };
+}
+
+/** Half-angle the drawn shaft fans out to at its far ring, in radians: the cone of
+ *  light is supposed to be the thing causing that shaft, so it can never be narrower. */
+export function shaftHalfAngle() {
+  const last = BEAM.rings[BEAM.rings.length - 1];
+  return Math.atan2(last.r, BEAM.reach * last.t);
+}
 
 /** Blend contract of the shell material, as THREE constant NAMES so the suite can pin
  *  them without pulling THREE into Node (carMesh.js resolves the names). */

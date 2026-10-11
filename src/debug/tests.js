@@ -15,7 +15,7 @@ import { FxSystem } from '../fx/fx.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
-import { buildRoad, stageClimate, WEATHER } from '../world/road-spline.js';
+import { buildRoad, stageClimate, WEATHER, WIDTH_DEFAULT } from '../world/road-spline.js';
 import { solveGhost, powertrainCeiling, SURFACE_VMAX, GHOST_TUNE } from '../game/ghost.js';
 import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
@@ -25,9 +25,9 @@ import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/tou
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
-import { buildCarveIndex, prewarmArea } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
-import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain } from '../render/headlights.js';
+import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
@@ -1883,6 +1883,53 @@ function testNightHeadlightBeams() {
     + `| gaps=[${gaps.join(' ')}]`);
 }
 testNightHeadlightBeams();
+
+// T30 (docs/QUALITY-QUEUE.md P8, second half): T29 proved the beam exists; it said
+// nothing about the light under it. The SpotLight shipped as a 0.55 rad / 34 m cone,
+// which is not a headlight but a flood: marched over the road plane, one lamp lit a
+// 12.5 m-wide strip at 10 m out and 28 m at 25 m - the whole 10.5 m corridor
+// (road-spline WIDTH_DEFAULT + road-carve SHOULDER), both banks and the treeline -
+// 550 m2 of ground at up to 2x the night ambient, so a dusk stage never went dark and
+// the 4.7 m-wide shaft drew inside a glow twice its size. Pinned here: the pool is the
+// same object as the shaft (the cone is wider than the shaft's own fan, cut off a
+// little past its reach), it lands inside the road corridor, and the ground past the
+// shaft falls back to ambient.
+function testHeadlightPoolIsTheSizeOfItsShaft() {
+  const p = CARS.A;
+  const shape = { hx: p.hull.x, hz: p.hull.z, floor: -p.comY + 0.15 };
+  const gaps = [];
+
+  // the cone must contain the shaft it is supposed to be causing, and end near it
+  const shaftAng = shaftHalfAngle();
+  if (!(shaftAng <= BEAM.spot.angle)) gaps.push(`the shaft fans to ${(shaftAng * 57.3).toFixed(1)} deg inside a ${(BEAM.spot.angle * 57.3).toFixed(1)} deg cone`);
+  if (!(BEAM.spot.angle <= shaftAng * 2.2)) gaps.push(`a ${(BEAM.spot.angle * 57.3).toFixed(1)} deg cone is a flood lamp, not a headlight`);
+  if (!(BEAM.reach <= BEAM.spot.distance && BEAM.spot.distance <= BEAM.reach + 12)) gaps.push(`pool cut-off ${BEAM.spot.distance} m against a ${BEAM.reach} m shaft`);
+
+  // the footprint on the road plane, both lamps together
+  const fp = beamFootprint(shape, 0.25);
+  const corridor = 2 * (WIDTH_DEFAULT.gravel / 2 + SHOULDER);   // carriageway + shoulder
+  const nearRel = fp.near - shape.hx, farRel = fp.far - shape.hx;
+  if (!(fp.near > 0 && nearRel <= 6)) gaps.push(`pool starts ${nearRel.toFixed(1)} m ahead of the nose, a blind wedge under the car or light through it`);
+  if (!(farRel >= BEAM.reach)) gaps.push(`the light dies ${farRel.toFixed(1)} m ahead, short of the ${BEAM.reach} m shaft drawn over it`);
+  if (farRel > BEAM.spot.distance + 0.5) gaps.push(`pool reaches ${farRel.toFixed(1)} m ahead past its own ${BEAM.spot.distance} m cut-off`);
+  if (!(fp.area > 20 && fp.area <= 200)) gaps.push(`the two lamps light ${fp.area.toFixed(0)} m2 of ground`);
+  const mid = fp.spanAt(BEAM.reach * 0.5), end = fp.spanAt(BEAM.reach);
+  if (!(mid >= 3 && mid <= corridor)) gaps.push(`pool is ${mid.toFixed(1)} m across at ${BEAM.reach * 0.5} m`);
+  if (!(end >= 3 && end <= corridor)) gaps.push(`pool is ${end.toFixed(1)} m across at ${BEAM.reach} m, corridor is ${corridor.toFixed(1)} m`);
+
+  // brightness profile down the beam: reads at the end of the shaft, gone past it
+  const atEnd = poolIlluminance(shape, shape.hx + BEAM.reach * 0.8, 0);
+  const past = poolIlluminance(shape, shape.hx + BEAM.reach * 1.5, 0);
+  if (!(atEnd >= 0.8)) gaps.push(`only ${atEnd.toFixed(2)} of light at the end of the shaft (night ambient is 0.60-0.72)`);
+  if (!(past <= 0.6)) gaps.push(`${past.toFixed(2)} of light ${BEAM.reach * 1.5} m out: the frame stays lit past the beam`);
+
+  check('T30 the headlight pool is the size of the beam it draws: cone contains the shaft, ends with it, and never floods the corridor',
+    gaps.length === 0,
+    `cone ${(BEAM.spot.angle * 57.3).toFixed(1)} deg >= shaft ${(shaftAng * 57.3).toFixed(1)} deg, cut ${BEAM.spot.distance} m vs reach ${BEAM.reach} m `
+    + `| ground ${fp.area.toFixed(0)} m2, ${nearRel.toFixed(1)}..${farRel.toFixed(1)} m ahead of the nose, across ${mid.toFixed(1)} m @${BEAM.reach * 0.5} / ${end.toFixed(1)} m @${BEAM.reach} (corridor ${corridor.toFixed(1)} m) `
+    + `| pool ${atEnd.toFixed(2)} @${(BEAM.reach * 0.8).toFixed(0)} m -> ${past.toFixed(2)} @${(BEAM.reach * 1.5).toFixed(0)} m, peak ${fp.peak.toFixed(1)} | gaps=[${gaps.join(' ')}]`);
+}
+testHeadlightPoolIsTheSizeOfItsShaft();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

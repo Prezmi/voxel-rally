@@ -18,3 +18,5 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
 self-improve: agent leg timed out after 1500s
+To https://github.com/Prezmi/voxel-rally.git
+   3db5c71..099c8c4  main -> main
