@@ -14,6 +14,7 @@ import { formatTime, formatSplit } from '../src/game/timing.js';
 import { RallyHud } from '../src/game/hud-rally.js';
 import { solveGhost } from '../src/game/ghost.js';
 import { buildPaceNotes } from '../src/game/pace-notes.js';
+import { createPaceDriver, SLOW_PACE } from '../src/debug/pace-driver.js';
 
 const SEED = 12345, BIOME = 'FOREST', LEN = 4200, REF_SPEED = 15;
 const START = 12;
@@ -65,45 +66,21 @@ function drive(mode, refTime, refSectors = null) {
   const stage = new StageRun({ road, gates, seed: SEED, refTime, refSectors, emit: bus });
   // Gate numbers to skip: 'skip1' drops checkpoint 2, 'skip2' drops 2 and 4.
   const skipList = mode === 'skip1' ? [2] : (mode === 'skip2' ? [2, 4] : []);
-  const input = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
-
+  // The pace model + steering live in src/debug/pace-driver.js so that the reference
+  // calibration check in src/debug/tests.js (T25) drives with this exact driver.
   const slow = mode === 'slow';
+  const driver = createPaceDriver(road, slow ? SLOW_PACE : {});
   let nan = false, maxAir = 0, steps = 0, skipped = 0, teleports = 0, recoveries = 0, stuck = 0;
   let arcMax = 0, maxLat = 0;
   const maxSteps = Math.round(560 / DT);
   for (let i = 0; i < maxSteps; i++) {
     const idx = Math.max(0, road.nearest(car.body.pos.x, car.body.pos.z));
     const sp = Math.max(1, car.body.groundSpeed);
-    const ds = road.s[1] - road.s[0];
 
-    // ---- pace + steering: the smoke-test pure pursuit, given a rally pace model
-    // (v = sqrt(a_lat / kappa) at the tightest point ahead, braking distance folded
-    // in — the same offline plan docs/03 §6 step 2 describes). ----
-      const ALAT = slow ? 1.4 : 9, VMAX = slow ? 6 : 26, DECEL = slow ? 1.5 : 7;
-    let look = Math.max(12, Math.min(26, 10 + sp * 1.1));
-    let vLim = VMAX, kAhead = 1e-4;
-    for (let q = idx; q <= Math.min(road.n - 1, idx + 140); q++) {
-      const k = Math.abs(road.kappa[q]);
-      const vl = k > 1e-4 ? Math.min(VMAX, Math.sqrt(ALAT / k)) : VMAX;
-      const allowed = Math.sqrt(vl * vl + 2 * DECEL * (road.s[q] - road.s[idx]));
-      if (allowed < vLim) vLim = allowed;
-      if (k > kAhead) kAhead = k;
-    }
-    look = Math.min(look, Math.max(12, 0.45 / kAhead));   // hug a hairpin instead of cutting it
-    const j = Math.min(road.n - 1, idx + Math.max(1, Math.round(look / ds)));
-    const want = Math.atan2(road.z[j] - car.body.pos.z, road.x[j] - car.body.pos.x);
-    let dA = want - Math.atan2(car.body.forward.z, car.body.forward.x);
-    while (dA > Math.PI) dA -= 2 * Math.PI;
-    while (dA < -Math.PI) dA += 2 * Math.PI;
-    const target = Math.max(-1, Math.min(1, -Math.atan(2 * car.params.wheelbase * Math.sin(dA) / look) / car.params.steerMax));
-    input.steer += Math.sign(target - input.steer) * Math.min(Math.abs(target - input.steer), 6 * DT);
-    if (stage.state === STATE.PRE_START) {
-      input.throttle = 0; input.brake = 1;      // hold the car until GO (no jump start)
-    } else {
-      input.throttle = sp < vLim * 0.95 ? 0.85 : (sp < vLim * 1.08 ? 0.35 : 0.1);
-      input.brake = sp > vLim * 1.1 ? Math.min(0.85, (sp - vLim) * 0.07) : 0;
-    }
-    input.handbrake = 0;
+    // ---- pace + steering: pure pursuit with a rally pace model (v = sqrt(a_lat /
+    // kappa) at the tightest point ahead, braking distance folded in — the same
+    // offline plan docs/03 §6 step 2 describes). The driver holds the car until GO. ----
+    const input = driver.input(car, idx, sp, stage.state !== STATE.PRE_START);
 
     // ---- on-stage guards: the same two the player has (docs/06 §5 R / zakotwiczenie) ----
     const lat = Math.hypot(car.body.pos.x - road.x[idx], car.body.pos.z - road.z[idx]);

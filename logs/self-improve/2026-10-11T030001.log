@@ -17,3 +17,5 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T02:00:11.624Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+To https://github.com/Prezmi/voxel-rally.git
+   80a15a0..433c6a0  main -> main

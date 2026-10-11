@@ -12,17 +12,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P4 · the ghost *calibration* is stale after the P3 drag retune (pre-existing at
-      HEAD, confirmed by stashing): `tools/stagetest.mjs` **E3 and A6 are RED** — the
-      harness driver laps seed 12345 in 222.83 s while `referenceSpeedMargin 0.58` still
-      yields ref 268.16 s, so the reference is 20.3 % SLOWER than the driver it was tuned
-      to be 4.8 % quicker than, and the A6 split sanity band (|split| < 20 s) is at
-      -44.30 s; the stage limit (ref * 1.6) is consequently 28 % more generous than the
-      design intends. `src/game/ghost.js:94-98` now carries the measured numbers. Nothing
-      in `src/debug/tests.js` compares the reference with a driven lap, so the suite
-      stayed green over a red acceptance criterion — re-calibrate the margin (and if the
-      surface ceilings move, move `SURFACE_VMAX` with them per P18) and give T24 a sibling
-      check that pins ref-vs-driver inside the band
 - [ ] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
       setting); add a row in the same wood-banner style so mobile users can reach it
 - [ ] P6 · prop and glb materials export with `doubleSided` true from Blender
@@ -82,10 +71,60 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       asphalt (69.3) and stone (69.1), so any suspension or tyre-radius change puts the
       cap under the measured value and turns T24 red over a non-defect — derive it from
       the loaded radius, or compare against a measured column instead of a formula
+- [ ] P23 · `referenceSpeedMargin` is one scalar that scales straights *and* corners
+      together, so the calibration envelope is closing: the acceptance band from T25 /
+      stagetest E3+A6+E1 wants ref in 215-223 s (0.73 gives 218.21 s), while E2 caps the
+      corner envelope at ratio <= 1 and the tightest apexes sit at 0.721 of
+      `sqrt(mu_eff*g*R)` already. The next retune that needs a quicker reference pushes
+      the apexes into the friction circle instead of the straights — split it into a
+      straight margin and a corner margin (or drive the corners off `gripMargin`) and
+      re-pin T25
+- [ ] P24 · the E1 placeholder guard (`tools/stagetest.mjs:270` `Math.abs(ghost.refTime
+      - LEN / 20) > 5`) is a distance-from-a-fake-number test that ended up *bounding the
+      calibration*: at margin 0.75 the reference (213.18 s) landed 3.18 s from LEN/20 =
+      210 s and E1 went RED for a non-defect, a fully integrated profile that merely
+      happened to average 20 m/s. Judge the profile instead (ghost speed must vary with
+      curvature, sector refs must differ from `dist / const`), not the total
+- [ ] P25 · the lap the reference is now calibrated against is teleport-assisted: the
+      pace driver runs 23 recoveries (maxLat 6.1 m against the 6 m guard) over the
+      reference stage (`src/debug/tests.js` T25 detail, `tools/stagetest.mjs` clean run),
+      so part of the 222.83 s basis is the on-stage recovery rather than the driver; make
+      the driver hold the 7.5 m corridor (lookahead/hairpin term) and re-read
+      `referenceSpeedMargin` against the cleaner lap
 
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P4 · the ghost *calibration* is stale after the P3 drag retune: `tools/stagetest.mjs`
+      E3 and A6 are RED — the harness driver laps seed 12345 in 222.83 s while
+      `referenceSpeedMargin 0.58` still yields ref 268.16 s (20.3 % SLOWER than the driver
+      it was tuned to beat, a -44.30 s split, stage limit 28 % too generous), and nothing
+      in `src/debug/tests.js` compares the reference with a driven lap
+      · done — `referenceSpeedMargin` 0.58 -> **0.73** (`src/game/ghost.js:106`), which puts
+      the reference at **218.21 s (69.8 km/h avg, 24.4 m/s peak) = 2.1 % quicker than the
+      same driver's 222.83 s lap, a +5.45 s split, limit 05:49.13** — inside every envelope
+      the harness states (E3 quicker + within 25 %, A6 |split| < 20 s, E1 > 5 s off the
+      LEN/20 = 210 s placeholder, E2 apex ratio 0.573 -> 0.721 of `sqrt(mu g R)`, pacenote
+      A3 min note lead still 1.45 s because the note lead is time-scaled). `SURFACE_VMAX`
+      did not move: the surface rows and their measured terminals are unchanged, so P18
+      stays a separate item. The suite could not see the drift because the driven lap only
+      existed in `tools/`, so the pure-pursuit driver was lifted out of `drive()` into
+      `src/debug/pace-driver.js:52` (`PACE` table + `createPaceDriver()`, `SLOW_PACE` for the
+      DNF paths) and `tools/stagetest.mjs:72` now drives with it — proven bit-identical,
+      every step count, sector time, split and the B1 determinism line are unchanged versus
+      HEAD (only the two calibration criteria moved). New sibling check **T25**
+      (`src/debug/tests.js:1423`, check at `:1485`) drives that whole stage inside the suite
+      and pins ref in 0.75..1.00 of the lap, |split| <= 20 s, |ref - LEN/20| > 5 s, the lap
+      still inside its own `ref * 1.6` limit, and the lap FINISHED: retune the car or a
+      surface row and it fails until the margin follows. Calibration record rewritten with
+      the measured numbers (`src/game/ghost.js:85-105`, `SYSTEM-NOTES.md` §9 — the note there
+      still quoted 268.3 s / 281.8 s and stale sector refs). Proof: `node src/debug/tests.js`
+      **36/36 passed** (35 before, +1), `tools/stagetest.mjs` **ALL PASS** (was 2 FAILURES),
+      `tools/pacenote-test.mjs` ALL PASS, `tools/smoke.mjs` clean. Two envelope fragilities
+      this surfaced are filed as P23 (one scalar for straights and corners) and P24 (E1
+      judges the total against a placeholder), plus P25 (the calibration lap needs 23
+      recoveries)
 
 - [x] P4 · `src/game/ghost.js:30` still says top speed ~70 m/s, stale after the
       powertrain retune, and any ghost pace built on it is wrong

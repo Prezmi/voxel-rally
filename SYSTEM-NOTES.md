@@ -61,22 +61,30 @@ Draw calls, streamed mesh count and triangles are properties of `Streaming` + `R
   `mu·g`, power `P/v` with `P = maxTorque·peakRpm·π/30·efficiency` = 150 kW,
   rolling + aero drag) and a backward (braking) pass from `brakeMax / r_tyre` capped by
   `mu·g`. `t[i] = Σ ds / v` → `refTime`, `refSectors[]`, `ghostPath{x,z,t}`.
-- **The knob (`GHOST_TUNE.referenceSpeedMargin = 0.58`).** A friction-circle-perfect
-  solve on this stage is **170.7 s (89 km/h avg, max 33 m/s)** — it assumes a line that
-  uses the whole 7.5 m corridor, no sight-line limit and no mistakes. With `limit =
-  ref · 1.6` (`docs/03 §4`) that reference would make the *harness* driver (281.76 s)
-  DNF on the limit (1.6 · 170.7 = 273 s), i.e. the stage would be unfinishable for a
+- **The knob (`GHOST_TUNE.referenceSpeedMargin = 0.73`).** A friction-circle-perfect
+  solve on this stage is **168.97 s (90.1 km/h avg, max 33.5 m/s)** — it assumes a line
+  that uses the whole 7.5 m corridor, no sight-line limit and no mistakes. With `limit =
+  ref · 1.6` (`docs/03 §4`) that reference would make the *harness* driver (222.83 s)
+  DNF on the limit (1.6 · 168.97 = 270.4 s), i.e. the stage would be unfinishable for a
   reference the player is supposed to chase. The margin is a single, explicit
   speed-space scale of the envelope (never above 1, so no corner ever exceeds
-  `sqrt(mu_eff·g·R)`: measured worst ratio **0.573**). Calibrated on seed 12345 /
-  4200 m: **ghost 268.3 s (57 km/h avg) vs driver 281.8 s → 4.8 % quicker**, inside
-  the ±25 % band criterion C asks for.
-- **Measured.** solve **3.2–5.5 ms** for the whole 4.2 km (budget 200 ms), 4230 nodes,
-  5 sector refs `71.7 / 58.9 / 36.6 / 36.6 / 64.7 s`. Determinism: second solve over
+  `sqrt(mu_eff·g·R)`: measured worst ratio **0.721**). Calibrated on seed 12345 /
+  4200 m against a lap of the shared headless pace driver
+  (`src/debug/pace-driver.js`): **ghost 218.21 s (69.8 km/h avg) vs driver 222.83 s →
+  2.1 % quicker**, a +5.45 s split, limit 05:49.13. Re-read the number whenever the car
+  or a surface row is retuned: `src/debug/tests.js` T25 drives that lap inside the
+  suite and fails when the reference stops being quicker than the car, while
+  `tools/stagetest.mjs` E1/E3/A6 bound it to **ref in 215 s … 223 s** (quicker than the
+  lap and within 25 % of it, within 20 s of split, and > 5 s away from the
+  LEN/20 = 210 s constant-speed placeholder). `0.58` sat outside that envelope once the
+  loose-surface drag retune made the car ~21 % quicker: ref 268.16 s, 20.3 % *slower*
+  than the driver, a -44.30 s split, and a stage limit 28 % too generous.
+- **Measured.** solve **3.8–7.8 ms** for the whole 4.2 km (budget 200 ms), 4230 nodes,
+  5 sector refs `66.8 / 42.9 / 30.1 / 27.8 / 49.8 s`. Determinism: second solve over
   the same road → max |Δv| = 0, max |Δt| = 0 (`tools/pacenote-test.mjs` D1).
 - **Doubt the orchestrator should know about.** `docs/07 F4` criterion A assumes a
   4.2 km drive of 110–190 s (90–130 km/h avg). The harness driver tops out at 26 m/s
-  and averages 54 km/h *including* hairpins of R = 9–17 m, so it measures 281.8 s; the
+  and averages 68 km/h *including* hairpins of R = 9–17 m, so it measures 222.83 s; the
   ghost is calibrated to it rather than to that band. Making the drive 110–190 s is a
   driver/AI-task (the pursuit driver would have to follow the ghost speed plan), not a
   reference-time problem.

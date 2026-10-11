@@ -16,7 +16,7 @@ import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
 import { buildRoad } from '../world/road-spline.js';
-import { solveGhost, powertrainCeiling, SURFACE_VMAX } from '../game/ghost.js';
+import { solveGhost, powertrainCeiling, SURFACE_VMAX, GHOST_TUNE } from '../game/ghost.js';
 import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
@@ -25,7 +25,8 @@ import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/tou
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
-import { buildCarveIndex } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea } from '../world/road-carve.js';
+import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
 
@@ -1404,6 +1405,92 @@ function testGhostPowertrainCeilingIsReal() {
     + ` | gearing=${gearingOf(CARS.A).toFixed(1)}m/s carC=${powertrainCeiling(CARS.C, surface(SURF.GRAVEL)).toFixed(1)}m/s of ${gearingOf(CARS.C).toFixed(1)}m/s | gaps=[${gaps.join(' ')}]`);
 }
 testGhostPowertrainCeilingIsReal();
+
+// ---------------------------------------------------------------- test 25
+// The ghost *calibration*, i.e. the one number (GHOST_TUNE.referenceSpeedMargin) that
+// decides how hard the reference drives. T24 pins the ceiling it is built from, but
+// nothing here compared the reference with a driven lap, so when the loose-surface drag
+// retune made the car ~21 % quicker the reference stayed where it was and the stage
+// acceptance went red around a green suite: tools/stagetest.mjs E3 (the reference was
+// 20.3 % SLOWER than the driver it is supposed to beat) and A6 (a -44.30 s split), and
+// the stage limit ref * 1.6 was 28 % more generous than designed. So: drive the
+// reference stage with the same headless pace driver the harness drives with
+// (src/debug/pace-driver.js) and pin the reference inside the acceptance envelope that
+// harness states — quicker than that lap, no more than 25 % quicker, no more than 20 s
+// of split, not collapsed onto the LEN/20 constant-speed placeholder it must not be, and
+// still beatable inside its own ref * 1.6 limit. A car or surface retune that moves the
+// lap turns this red until the margin is re-read.
+function testGhostReferenceIsCalibratedToADrivenLap() {
+  const SEED = 12345, LEN = 4200, START = 12;
+  const world = new VoxelWorld(SEED);
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const gates = planGates(road, SEED);
+  const carveIndex = buildCarveIndex(road);
+  const ghost = solveGhost(road, { seed: SEED, gates, carId: 'A' });
+  prewarmArea(world, terrain, road, carveIndex, road.x[START], road.z[START], 150);
+  // Same floor() shim main.js installs, so the wheels read a real surface column.
+  const carWorld = Object.create(world);
+  carWorld.surfaceAt = (x, z) => world.surfaceAt(Math.floor(x), Math.floor(z));
+  carWorld.rutAt = (x, z) => world.rutAt(Math.floor(x), Math.floor(z));
+  const car = makeCar(carWorld, {});
+  car.placeAt(road.x[START], road.z[START], -road.heading[START], road.h[START]);
+  car.wheels.forEach((w) => { w.omega = 0; });
+  const stage = new StageRun({ road, gates, seed: SEED, refTime: ghost.refTime, refSectors: ghost.refSectors });
+  const driver = createPaceDriver(road);
+
+  let steps = 0, nan = false, recoveries = 0, stuck = 0;
+  const maxSteps = Math.round(560 / DT);           // the same 560 s budget the harness gives a lap
+  for (let i = 0; i < maxSteps; i++) {
+    const idx = Math.max(0, road.nearest(car.body.pos.x, car.body.pos.z));
+    const sp = Math.max(1, car.body.groundSpeed);
+    const cmd = driver.input(car, idx, sp, stage.state !== STATE.PRE_START);
+    // The two on-stage guards a player has (docs/06 §5 R / zakotwiczenie): a car in the
+    // trees or on its side is put back on the road, and one that stalls is nudged on.
+    const lat = Math.hypot(car.body.pos.x - road.x[idx], car.body.pos.z - road.z[idx]);
+    const roll = Math.abs(Math.asin(Math.max(-1, Math.min(1, -car.body.m[7]))) * 57.3);
+    if (lat > 6 || roll > 22) {
+      const k = Math.min(road.n - 2, idx + 2);
+      car.placeAt(road.x[k], road.z[k], -road.heading[k], road.h[k]);
+      car.wheels.forEach((w) => { w.omega = car.body.groundSpeed / w.rEff; });
+      recoveries++;
+    }
+    if (car.body.groundSpeed < 1.2) stuck++; else stuck = 0;
+    if (stuck > 150) {
+      const k = Math.min(road.n - 2, idx + 5);
+      car.placeAt(road.x[k], road.z[k], -road.heading[k], road.h[k]);
+      car.wheels.forEach((w) => { w.omega = 6; });
+      stuck = 0; recoveries++;
+    }
+    car.setInput(cmd);
+    car.step(DT);
+    stage.step(DT, car);
+    steps++;
+    if (!Number.isFinite(car.body.pos.y)) { nan = true; break; }
+    if (i % 240 === 0) prewarmArea(world, terrain, road, carveIndex, car.body.pos.x, car.body.pos.z, 90);
+    if (stage.state === STATE.FINISHED || stage.state === STATE.DNF) break;
+  }
+
+  const ref = ghost.refTime, driven = stage.result.total;
+  const gaps = [];
+  if (nan) gaps.push('NaN in the drive');
+  if (stage.state !== STATE.FINISHED) gaps.push(`lap ${stage.state}${stage.reason ? '/' + stage.reason : ''}`);
+  if (!(ref < driven)) gaps.push(`ref ${ref.toFixed(1)}s is not quicker than the ${driven.toFixed(1)}s lap`);
+  if (!(ref >= driven * 0.75)) gaps.push(`ref ${(100 * (1 - ref / driven)).toFixed(1)}% quicker: over the 25% band`);
+  if (!(driven - ref <= 20)) gaps.push(`split +${(driven - ref).toFixed(1)}s over the 20s band`);
+  if (Math.abs(ref - LEN / 20) <= 5 || Math.abs(ref - LEN / 15) <= 5) {
+    gaps.push(`ref ${ref.toFixed(1)}s on the constant-speed placeholder ${(LEN / 20).toFixed(1)}s`);
+  }
+  if (!(driven < ref * 1.6)) gaps.push('the driven lap cannot beat its own ref * 1.6 limit');
+  check('T25 the ghost reference is calibrated to a driven lap: quicker than the headless pace driver, inside the acceptance band, beatable at ref * 1.6',
+    gaps.length === 0, `ref ${ref.toFixed(2)}s (${(3.6 * ghost.avgSpeed).toFixed(1)} km/h avg, ${(3.6 * ghost.maxSpeed).toFixed(0)} km/h max) `
+    + `vs driven ${driven.toFixed(2)}s = ${(100 * (1 - ref / driven)).toFixed(1)} % quicker, split +${(driven - ref).toFixed(2)}s `
+    + ` | margin ${GHOST_TUNE.referenceSpeedMargin}, ghost peaks at ${ghost.maxSpeed.toFixed(1)} m/s under the ${SURFACE_VMAX.gravel} m/s gravel ceiling`
+    + ` | limit ${(ref * 1.6).toFixed(0)}s vs lap ${driven.toFixed(0)}s | band 0.75..1.00 of lap, split <=20s, |ref-${(LEN / 20).toFixed(0)}s|>5s `
+    + `| steps ${steps} rec ${recoveries} | gaps=[${gaps.join(' ')}]`);
+  return { ref, driven, gaps };
+}
+testGhostReferenceIsCalibratedToADrivenLap();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -70,8 +70,9 @@ export function powertrainCeiling(p, s) {
  * how much of the available envelope the reference driver uses. Measured against
  * the headless harness driver (tools/stagetest.mjs): the ghost ends up ~4 % quicker
  * than that driver, which is the intent — the harness driver lifts off early and
- * leaves the road (see SYSTEM-NOTES.md "ghost calibration"). That is the intent, not
- * the current state: see the measurement on referenceSpeedMargin below.
+ * leaves the road (see SYSTEM-NOTES.md "ghost calibration"). It is pinned rather than
+ * assumed now: src/debug/tests.js T25 drives that lap inside the suite and fails if the
+ * reference stops being quicker than it (see referenceSpeedMargin below).
  */
 export const GHOST_TUNE = {
   gripMargin: 0.98,     // fraction of the friction circle used at the apex
@@ -85,18 +86,24 @@ export const GHOST_TUNE = {
   // that uses the whole 7.5 m corridor, no cut risk, no sight-line limit and no
   // mistakes, and docs/03 §4 then makes the stage limit (ref * 1.6) unbeatable. The
   // reference is a club-level driver, so the whole envelope is scaled once here.
-  // Calibrated on the reference stage (seed 12345, 4229 m forest gravel): raw solve
-  // 170.7 s (89 km/h avg, max 33 m/s) -> with 0.58 the reference lands 268.3 s
-  // (57 km/h avg), 4.8 % quicker than the headless harness driver (281.8 s,
-  // tools/stagetest.mjs) and inside the +/-25 % band, while limit = ref * 1.6 =
-  // 07:09 stays beatable. Numbers re-measured by tools/pacenote-test.mjs.
-  // Numbers + the raw solve are printed by tools/pacenote-test.mjs; see SYSTEM-NOTES.md.
-  // STALE 2026-10-11: re-measured on the same stage the raw solve is 168.97 s and the
-  // reference 268.16 s (so the numbers above are within 1 %), but the harness driver has
-  // come down from 281.8 s to 222.83 s after the loose-surface drag retune, so this
-  // margin now makes the reference 20.3 % SLOWER than the driver, not 4.8 % quicker, and
-  // tools/stagetest.mjs E3 + A6 are red. Re-calibrating the margin is queue P4.
-  referenceSpeedMargin: 0.58,
+  // Calibrated against a real lap of the headless pace driver (the pure-pursuit driver
+  // in src/debug/pace-driver.js, driven by tools/stagetest.mjs) on the reference stage
+  // (seed 12345, 4229 m forest gravel), re-measured after the loose-surface drag
+  // retune, 2026-10-11: raw solve 168.97 s (90.1 km/h avg, 33.5 m/s max) -> at 0.73 the
+  // reference lands 217.43 s (70.0 km/h avg, 24.5 m/s max), 2.4 % quicker than that
+  // driver's 222.83 s lap (a +5.40 s split), while limit = ref * 1.6 = 05:47.89 stays
+  // beatable by 56 % for the same driver.
+  // Three acceptance criteria bound the knob and together leave it about eight seconds
+  // of room (tools/stagetest.mjs E1/E3/A6): the reference must be *quicker* than the
+  // driven lap and within 25 % of it (E3), within 20 s of it (A6, the split band), and
+  // far from LEN/20 = 210 s, the constant-speed placeholder a reference must never be
+  // mistaken for (E1) — i.e. ref in 215 s .. 223 s. Outside that envelope is what made
+  // 0.58 red after the drag retune moved the car: 268.16 s, 20.3 % *slower* than the
+  // driver and a -44.30 s split.
+  // Re-measure with tools/stagetest.mjs (driven lap) and tools/pacenote-test.mjs (raw
+  // solve, note lead). T25 in src/debug/tests.js drives the same lap inside the suite,
+  // so any retune that moves the car fails there until this number follows it.
+  referenceSpeedMargin: 0.73,
 };
 
 /** Corner speed limit pair for one node: [capability, friction-circle hard cap]. */
