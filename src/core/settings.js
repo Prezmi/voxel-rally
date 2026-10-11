@@ -125,7 +125,7 @@ export const LEGACY_SETTINGS_KEY = 'mc-rally.v1';   // the untagged docs/06 §2 
 const PERSISTED_KEYS = ['quality', 'shadows', 'post', 'bloom', 'grade', 'drawDistance', 'farDetail', 'vegFarDistance', 'blockTiles', 'fx', 'difficulty',
   'assists', 'keyboardAsPad', 'deadzone', 'invertSteer', 'cameraMode', 'hudMode',
   'showCoDriverArrows', 'touchOverlay', 'touchHandedness', 'lensDirt', 'audioEnabled', 'masterGain',
-  'language'];
+  'language', 'map'];
 const DEFAULTS = (() => {
   const d = {};
   for (const k of PERSISTED_KEYS) d[k] = settings[k];

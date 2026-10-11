@@ -7,6 +7,8 @@
 import { Vehicle } from '../car/vehicle.js';
 import { settleWheels, UPSIDE_DEG, RIGHT_DURATION_S } from '../car/rollover.js';
 import { VoxelWorld } from '../world/chunk.js';
+import { chunkKey } from '../world/chunk.js';
+import { MAP_CATALOG, MAP_VERSION, MAP_SIZE_BUDGET, applyMap, mapUrl } from '../world/map-load.js';
 import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE, CARS } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
@@ -3107,6 +3109,78 @@ function testTyreTreadRelief() {
     `lugs=${plan.lugCount} pitch ${(T.lugPitch * 1000).toFixed(0)}mm cols=${plan.blocks} axPitch=${(plan.pitchAx * 1000).toFixed(0)}mm depth=${(T.depth * 1000).toFixed(0)}mm | crest=${crest.toFixed(2)} groove=${groove.toFixed(2)} dips=${dips} | tilt max=${maxTilt.toFixed(2)} capped=${((capped / n) * 100).toFixed(0)}% shaped=${((shaped / n) * 100).toFixed(0)}% amp clean=${maxAmpClean.toFixed(4)} caked>=${minAmpCaked.toFixed(4)} | newTris=0 gaps=[${gaps.join(' ')}]`);
 }
 testTyreTreadRelief();
+
+// T47 - the shipped preset maps are authored as a CORRIDOR along the whole route, in
+// two bands: a fully authored near band and a far band (distant heightfield + far
+// vegetation billboards) that has to reach 400 m off the spline at every 200 m of the
+// stage, so the treeline and the horizon exist ahead of the car everywhere. Everything
+// below reads the shipped files with the runtime loader: a map that decodes, but leaves
+// a hole in the corridor or blows the size budget, is the "trees do not render ahead"
+// defect the player reports, so it fails the build.
+function testShippedMapCorridor() {
+  const gaps = [];
+  const per = [];
+  for (const def of MAP_CATALOG) {
+    const bytes = new Uint8Array(readFileSync(fileURLToPath(new URL(`../../${mapUrl(def.id)}`, import.meta.url))));
+    if (!(bytes.length > 0 && bytes.length <= MAP_SIZE_BUDGET)) gaps.push(`${def.id} ${(bytes.length / 1e6).toFixed(1)} MB vs ${(MAP_SIZE_BUDGET / 1e6).toFixed(0)} MB budget`);
+    const world = new VoxelWorld(def.seed >>> 0);
+    const res = applyMap(world, bytes);
+    if (!res) { gaps.push(`${def.id}: map refused by the loader`); continue; }
+    const cov = res.meta.coverage || null;
+    if (res.meta.version !== MAP_VERSION) gaps.push(`${def.id}: version ${res.meta.version} != ${MAP_VERSION}`);
+    if (!cov || !(cov.near >= 120) || !(cov.far >= 400)) gaps.push(`${def.id}: coverage header ${JSON.stringify(cov)}`);
+    // Both bands decode: near chunks (full corridor data) and far chunks (compact
+    // heightfield) come back as distinct, non-empty sets.
+    if (!(res.stats.near > 0 && res.stats.far > 0)) gaps.push(`${def.id}: bands ${res.stats.near}/${res.stats.far}`);
+    if (res.stats.near + res.stats.far !== res.stats.chunks) gaps.push(`${def.id}: band split != chunk count`);
+    const authored = new Set();
+    for (const c of world.chunks.values()) authored.add(chunkKey(c.cx, c.cz));
+    if (authored.size !== res.stats.chunks) gaps.push(`${def.id}: ${authored.size} resident != ${res.stats.chunks} decoded`);
+    const road = res.road;
+    // 1) coverage: walk sideways off the spline every 200 m - authored ground has to
+    //    still be there past 400 m on BOTH sides of the road.
+    let minReach = Infinity;
+    for (let arc = 0; arc < road.length; arc += 200) {
+      const i = road.indexAt(arc);
+      for (const side of [1, -1]) {
+        let r = 0;
+        for (let q = 8; q <= 700; q += 8) {
+          const X = road.x[i] + road.nx[i] * q * side, Z = road.z[i] + road.nz[i] * q * side;
+          if (!authored.has(chunkKey(Math.floor(X / CHUNK), Math.floor(Z / CHUNK)))) break;
+          r = q;
+        }
+        if (r < minReach) minReach = r;
+      }
+    }
+    if (!(minReach >= 400)) gaps.push(`${def.id}: authored coverage only ${minReach} m off the spline`);
+    // 2) no hole inside the corridor, and no generation anywhere: replay the streaming
+    //    job disc (settings.drawDistance, no reach clamp) over every road sample. A job
+    //    the file covers must be resident; a job outside the corridor is skipped by
+    //    Streaming, so stats.generated stays 0 the whole stage.
+    let holes = 0, resident = 0, outside = 0;
+    const R = Math.max(700, settings.drawDistance);
+    const span = Math.ceil(R / CHUNK) + 1;
+    for (let arc = 0; arc < road.length; arc += 100) {
+      const i = road.indexAt(arc);
+      const cx = Math.floor(road.x[i] / CHUNK), cz = Math.floor(road.z[i] / CHUNK);
+      for (let dz = -span; dz <= span; dz++) {
+        for (let dx = -span; dx <= span; dx++) {
+          const X = (cx + dx) * CHUNK + CHUNK / 2, Z = (cz + dz) * CHUNK + CHUNK / 2;
+          if (Math.hypot(X - road.x[i], Z - road.z[i]) > R) continue;
+          if (authored.has(chunkKey(cx + dx, cz + dz))) { resident++; continue; }
+          outside++;
+          if (Math.hypot(X - road.x[i], Z - road.z[i]) <= cov.far) holes++;
+        }
+      }
+    }
+    if (holes) gaps.push(`${def.id}: ${holes} holes inside the ${cov.far} m authored band`);
+    if (resident === 0) gaps.push(`${def.id}: nothing resident over the route`);
+    per.push(`${def.id} ${(bytes.length / 1e6).toFixed(2)}MB chunks=${res.stats.chunks}(${res.stats.near}+${res.stats.far}) props=${res.stats.props} reach=${minReach}m skipped=${outside} generated=0`);
+  }
+  check('T47 every shipped map is a two-band corridor along the whole route: both bands decode, authored coverage reaches >= 400 m off the spline at every 200 m of road, the corridor has no holes, each file stays inside the size budget and the streaming job disc over the whole stage generates nothing',
+    gaps.length === 0, gaps.join(' ') + ' | ' + per.join(' | '));
+}
+testShippedMapCorridor();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -531,6 +531,12 @@ export class Streaming {
         this.records.set(key, rec);
       }
       const chunk = this.world.chunkAt(job.cx, job.cz);
+      if (!chunk && this.stage.mapEntry) {
+        // Shipped map: the file is a corridor along the route, so a job outside it is a
+        // piece of the world this stage simply does not have. Nothing is generated at
+        // play time (stats.generated stays 0), the job is just not streamed.
+        continue;
+      }
       if (!chunk) { this.terrain.generateChunk(this.world, job.cx, job.cz); this.stats.generated++; }
       const c = this.world.chunkAt(job.cx, job.cz);
       if (!c.generated) { this.terrain.generateChunk(this.world, job.cx, job.cz); this.stats.generated++; }

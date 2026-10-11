@@ -127,6 +127,8 @@ export class RallyHud {
     this._bigTitle = '';
     this.stages = opts.stages || [];
     this.stageIdx = 0;
+    this.maps = opts.maps || [];        // shipped preset maps (src/world/map-load.js)
+    this.mapIdx = 0;
     this.touchInset = 0;        // CSS px the touch overlay reserves along the bottom
     this.menuItems = [];
     this._ensureMenuItems(MENU_ROW_POOL);
@@ -308,6 +310,7 @@ export class RallyHud {
     return n;
   }
   stageKey() { return this.stages.length ? this.stages[this.stageIdx].key : ''; }
+  mapKey() { return this.maps.length ? this.maps[this.mapIdx].key : ''; }
   rowIndex(act) { for (let i = 0; i < this._rows.length; i++) if (this._rows[i].act === act) return i; return -1; }
   refreshMenu() { const t = this.top(); if (MENU_SCREENS.indexOf(t) >= 0) this._rowsFor(t); }
   setTouchInset(px) { if (px === this.touchInset) return; this.touchInset = px; this._resize(); }
@@ -323,6 +326,8 @@ export class RallyHud {
       this._bigTitle = t('menu.title');
       rows.push({ label: t('menu.start'), act: 'start' });
       rows.push({ label: t('menu.stage', this.stages.length ? this.stages[this.stageIdx].label : '—'), act: 'stage' });
+      // MAP: the shipped stage, with its length + dominant surface on the row itself.
+      rows.push({ label: t('menu.map', this.maps.length ? this.maps[this.mapIdx].label : '—'), act: 'map' });
       rows.push({ label: t('menu.settings'), act: 'screen:settings' });
       rows.push({ label: t('menu.controls'), act: 'screen:controls' });
     } else if (name === 'settings') {
@@ -461,6 +466,12 @@ export class RallyHud {
       if (this.stages.length) this.stageIdx = (this.stageIdx + 1) % this.stages.length;
       this.refreshMenu();
       return null;
+    }
+    // MAP row: cycles the four shipped maps. Returns the row so main.js persists it.
+    if (act === 'map') {
+      if (this.maps.length) this.mapIdx = (this.mapIdx + 1) % this.maps.length;
+      this.refreshMenu();
+      return row;
     }
     if (act === 'noop') return null;
     if (act === 'start') { this.startStage(); return row; }

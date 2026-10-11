@@ -26,9 +26,34 @@ import { stageChunkList, PROP_REACH } from '../src/world/pregen.js';
 import { generateChunkProps } from '../src/world/props.js';
 import { chunkTiles, TILE_SURFACE_IDS } from '../src/world/block-tiles.js';
 import { planGates } from '../src/game/stage.js';
-import { encodeMap, applyMap, mapById, mapUrl, decodeMap, MAP_CATALOG, MAP_VERSION } from '../src/world/map-load.js';
+import { encodeMap, applyMap, mapById, mapUrl, decodeMap, MAP_CATALOG, MAP_VERSION, MAP_NEAR_DEFAULT, MAP_FAR_DEFAULT } from '../src/world/map-load.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * A phantom centreline `off` metres to `side` of the real road. props.js places its
+ * grove scatter relative to whatever road it is handed (`nearest`, `x/z`, `nx/nz`,
+ * `width`, `tx/tz`), so an offset copy of the real spline plants a stand of far
+ * vegetation along a line that does not exist - which is exactly the distant treeline
+ * the far band needs, authored offline and identical every load. The real `nearest`
+ * index is reused: a chain point sits on the road normal, so the arc-nearest sample of
+ * the road is the arc-nearest sample of the chain too.
+ */
+function offsetChain(road, off, side) {
+  const n = road.n;
+  const x = new Float32Array(n), z = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    x[i] = road.x[i] + road.nx[i] * off * side;
+    z[i] = road.z[i] + road.nz[i] * off * side;
+  }
+  return { n, x, z, length: road.length, s: road.s, tx: road.tx, tz: road.tz,
+    nx: road.nx, nz: road.nz, kappa: road.kappa, width: road.width,
+    nearest: (X, Z) => road.nearest(X, Z) };
+}
+
+// Phantom lines per side: their scatter reach (props.js: 64-124 m) tiles the far band
+// outward from the near band, so nothing between the corridor and 400 m is empty.
+const FAR_CHAINS = [215, 345];
 
 function bake(def) {
   const t0 = Date.now();
@@ -52,10 +77,15 @@ function bake(def) {
     return def.biome;
   };
 
-  const list = stageChunkList(road, def.radius);
+  const nearR = def.nearRadius ?? MAP_NEAR_DEFAULT;
+  const farR = def.farRadius ?? MAP_FAR_DEFAULT;
+  // The whole authored area is a CORRIDOR along the route, not a disc around the start:
+  // every chunk whose centre lies within `farR` of the spline, split into the fully
+  // authored near band and the far band (heightfield + billboard vegetation only).
+  const list = stageChunkList(road, farR);
   const propMap = new Map(), tileMap = new Map();
   const bandCount = new Map();
-  let props = 0, tiles = 0;
+  let props = 0, tiles = 0, nearChunks = 0, farChunks = 0;
   for (const { cx, cz, dist } of list) {
     const arc = road.s[road.nearest(cx * 16 + 8, cz * 16 + 8)];
     const biome = biomeAt(arc);
@@ -64,6 +94,8 @@ function bake(def) {
     const c = world.chunkAt(cx, cz);
     carveChunk(world, cx, cz, road, carveIndex, terrain);
     c.carved = true;
+    c.farBand = dist > nearR;                  // encoder: far band = the compact mode
+    if (c.farBand) farChunks++; else nearChunks++;
     bandCount.set(biome, (bandCount.get(biome) || 0) + 1);
     const key = chunkKey(cx, cz);
     if (dist <= PROP_REACH) {
@@ -82,6 +114,28 @@ function bake(def) {
     }
   }
 
+  // Far band vegetation: the real scatter cannot reach past ~124 m of the centreline
+  // (props.js `reach`), so the treeline ahead used to stop dead there. Each phantom
+  // chain scatters its own groves over the far band; chunks the real scatter already
+  // authored are left alone, so the corridor is untouched.
+  let farProps = 0;
+  for (const side of [1, -1]) {
+    for (const off of FAR_CHAINS) {
+      const chain = offsetChain(road, off, side);
+      for (const { cx, cz, dist } of stageChunkList(chain, 132)) {
+        if (dist > farR) continue;
+        const key = chunkKey(cx, cz);
+        if (propMap.has(key)) continue;
+        const arc = road.s[road.nearest(cx * 16 + 8, cz * 16 + 8)];
+        const terrain = terrainFor(biomeAt(arc));
+        const stage = { road: chain, terrain, seed, world, carveIndex, biome: biomeAt(arc), density: def.farDensity ?? 0.45 };
+        const p = generateChunkProps(cx, cz, stage);
+        if (p.length) { propMap.set(key, p); props += p.length; farProps += p.length; }
+        else propMap.set(key, p);
+      }
+    }
+  }
+
   // Dominant surface of the shipped road, for the menu line.
   const tally = new Map();
   for (let i = 0; i < road.n; i++) tally.set(road.surfaceId[i], (tally.get(road.surfaceId[i]) || 0) + 1);
@@ -91,9 +145,11 @@ function bake(def) {
     id: def.id, name: def.name, version: MAP_VERSION, seed, biome: def.biome,
     length: road.length, difficulty: def.difficulty, surface: def.surface,
     roadSurfaceTop: top, radius: def.radius, bands: def.bands,
+    coverage: { near: nearR, far: farR, chains: FAR_CHAINS, farDensity: def.farDensity ?? 0.45,
+      nearChunks, farChunks },
     climate: road.climate,
     gates: gates.map((g) => ({ arc: g.arc, kind: g.kind })),
-    counts: { chunks: list.length, propLists: propMap.size, props, tileLists: tileMap.size, tiles },
+    counts: { chunks: list.length, propLists: propMap.size, props, farProps, tileLists: tileMap.size, tiles },
     bandChunks: Object.fromEntries(bandCount),
     baked: new Date().toISOString(),
   };
@@ -105,22 +161,48 @@ function bake(def) {
   // Round trip: a shipped file the loader cannot read is worse than no file at all.
   const back = new VoxelWorld(seed);
   const a = decodeMap(bytes);
-  const applied = a && applyCheck(back, bytes);
+  const ok = a && applyCheck(world, back, bytes, propMap);
+  const applied = ok === true;
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`[bake] ${def.id.padEnd(19)} ${(road.length / 1000).toFixed(2)} km  `
     + `${list.length} chunks  ${props} props  ${tiles} tiles  `
     + `${(bytes.length / 1e6).toFixed(2)} MB  ${secs} s  bands=[${def.bands.map((b) => b.biome).join('>')}]`
-    + `  verify=${applied ? 'OK' : 'FAILED'}`);
+    + `  coverage=${nearR}/${farR} m (${nearChunks}+${farChunks} chunks)  far props=${farProps}`
+    + `  verify=${applied ? 'OK' : String(ok)}`);
+  if (!applied) console.error(`[bake] ${def.id}: ${ok}`);
   return applied ? 0 : 1;
 }
 
-/** Decode back with the runtime loader: a file the game cannot apply is no good. */
-function applyCheck(back, bytes) {
+/** Decode back with the runtime loader and compare EVERY voxel / column / prop / tile of
+ *  the baked world. A map the game cannot reproduce exactly is not shipped. */
+function applyCheck(src, back, bytes, propTables) {
   const r = applyMap(back, bytes);
-  if (!r) return false;
-  if (!r.road || typeof r.road.nearest !== 'function' || !r.gates.length) return false;
-  if (!r.propTables.size || !r.tileTables.size) return false;
-  return r.stats.chunks > 0;
+  if (!r) return 'decode rejected';
+  if (!r.road || typeof r.road.nearest !== 'function' || !r.gates.length) return 'road/gates missing';
+  if (!r.propTables.size || !r.tileTables.size) return 'prop/tile tables missing';
+  let bad = 0;
+  for (const c of src.chunks.values()) {
+    const d = back.chunkAt(c.cx, c.cz);
+    if (!d) { bad++; continue; }
+    for (let i = 0; i < c.blocks.length; i++) if (c.blocks[i] !== d.blocks[i]) { bad++; break; }
+    for (let i = 0; i < c.height.length; i++) {
+      if (c.height[i] !== d.height[i] || c.surface[i] !== d.surface[i]
+        || c.fine[i] !== d.fine[i] || c.rut[i] !== d.rut[i] || c.wear[i] !== d.wear[i]) { bad++; break; }
+    }
+  }
+  let pbad = 0;
+  for (const [k, list] of propTables) {
+    const q = r.propTables.get(k);
+    if (!q || q.length !== list.length) { pbad++; continue; }
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i], b = q[i];
+      if (a.prop !== b.prop || Math.abs(a.x - b.x) > 1e-4 || Math.abs(a.y - b.y) > 1e-4
+        || Math.abs(a.z - b.z) > 1e-4 || Math.abs(a.scale - b.scale) > 1e-4) { pbad++; break; }
+    }
+  }
+  if (bad) return `VOXEL MISMATCH in ${bad}/${src.chunks.size} chunks`;
+  if (pbad) return `PROP MISMATCH in ${pbad} lists`;
+  return r.stats.chunks > 0 ? true : 'no chunks';
 }
 
 const want = process.argv[2];

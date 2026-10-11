@@ -7,7 +7,7 @@ import { Renderer } from './render/renderer.js';
 import { ChaseCamera } from './render/camera.js';
 import { buildCarMesh, syncCarMesh } from './render/carMesh.js';
 import { Streaming } from './world/streaming.js';
-import { VoxelWorld } from './world/chunk.js';
+import { VoxelWorld, chunkKey } from './world/chunk.js';
 import { makeTerrain, BIOMES, BIOME_INFO } from './world/terrain-gen.js';
 import { buildRoad, planCheckpoints } from './world/road-spline.js';
 import { buildCarveIndex, prewarmArea } from './world/road-carve.js';
@@ -29,6 +29,7 @@ import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
 import { startPerfHarness } from './debug/perf-harness.js';
 import { pregenerateStage } from './world/pregen.js';
+import { MAP_CATALOG, MAP_SIZE_BUDGET, mapById, mapUrl, fetchMap, applyMap } from './world/map-load.js';
 import { loadStageCache } from './world/stage-cache.js';
 import { DT } from './core/time.js';
 import { showroomConfig, showroomRoute, showroomPose } from './debug/showroom.js';
@@ -120,6 +121,12 @@ function params() {
   else if (qName === 'HIGH') qualityPreset(QUALITY.HIGH);
   if (postFlag === '0') settings.post = false;
   else if (postFlag === '1') settings.post = true;
+  // MAP: the shipped preset stage (assets/maps/<id>.rmap, src/world/map-load.js). A
+  // ?map= flag wins over the persisted menu choice; an unknown id falls back to the
+  // first catalog entry. '' would keep the procedural boot.
+  const mapRaw = (q.get('map') || '').trim().toLowerCase();
+  const mapId = MAP_CATALOG.some((m) => m.id === mapRaw) ? mapRaw
+    : (MAP_CATALOG.some((m) => m.id === settings.map) ? settings.map : MAP_CATALOG[0].id);
   // ?menu=off / ?frames=N: the car drives off at boot. ?shot=1 only makes the boot
   // fast for the headless harness - the menu still owns the first screen, so nothing
   // drives until START.
@@ -127,12 +134,89 @@ function params() {
   const shotBoot = autoStart || q.get('shot') === '1';
   const menuScreen = q.get('menu') && q.get('menu') !== 'off' ? q.get('menu') : '';
   return {
-    seed, biome: BIOME_INFO[biome] ? biome : 'FOREST', carId, lengthTarget: len,
+    seed, biome: BIOME_INFO[biome] ? biome : 'FOREST', carId, lengthTarget: len, mapId,
     autoStart, shotBoot, menuScreen,
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
     surfaceKey, frames, rain, dirtSeed, cam, ref, tod, stats, perftest, steerForce,
     showroom: !!showroom, viewName: sheet.view, sheet,
+  };
+}
+
+/**
+ * Boot a shipped preset map: fetch assets/maps/<id>.rmap and let the loader fill the
+ * world (terrain data, road table, surfaces, prop placements, gates). Nothing is
+ * generated here - the file already holds all of it. null = the file is missing, over
+ * budget or failed its magic/version/checksum, and the caller falls back to the
+ * procedural boot (with a loud warning).
+ */
+async function loadMapStage(cfg, hud) {
+  const entry = mapById(cfg.mapId);
+  if (!entry) return null;
+  hud.boot(`VOXEL RALLY\n${entry.name}\n${t('boot.map')}`);
+  await nextFrame(cfg.shotBoot);
+  const t0 = performance.now();
+  const f = await fetchMap(cfg.mapId);
+  const loadMs = performance.now() - t0;
+  if (!f || !f.bytes || !f.bytes.length) {
+    console.warn(`[map] ${mapUrl(entry.id)} is not reachable: ${t('boot.mapFallback')}`);
+    hud.boot(`VOXEL RALLY\n${entry.name}\n${t('boot.mapFallback')}`);
+    return null;
+  }
+  if (f.bytes.length > MAP_SIZE_BUDGET) {
+    console.warn(`[map] ${mapUrl(entry.id)} is ${(f.bytes.length / 1e6).toFixed(1)} MB, over the `
+      + `${(MAP_SIZE_BUDGET / 1e6).toFixed(0)} MB budget: ${t('boot.mapFallback')}`);
+    hud.boot(`VOXEL RALLY\n${entry.name}\n${t('boot.mapFallback')}`);
+    return null;
+  }
+  const world = new VoxelWorld(entry.seed);
+  let lastPct = 0;
+  const res = applyMap(world, f.bytes, { onProgress: (done) => {
+    const pct = Math.round(done / (f.bytes.length / 1400));   // ~64 chunks per 1400 B
+    if (pct !== lastPct) {
+      lastPct = pct;
+      hud.boot(`VOXEL RALLY\n${entry.name}\n${t('boot.mapPct', done)}\n${Math.min(100, pct)} %`);
+    }
+  } });
+  if (!res) {
+    console.warn(`[map] ${mapUrl(entry.id)} failed magic/version/checksum: ${t('boot.mapFallback')}`);
+    hud.boot(`VOXEL RALLY\n${entry.name}\n${t('boot.mapFallback')}`);
+    return null;
+  }
+  await nextFrame(cfg.shotBoot);
+  const carveIndex = buildCarveIndex(res.road);
+  // Every chunk the file covers gets a prop list, even an empty one: past the bake's
+  // PROP_REACH the runtime scatter would otherwise re-plant props while driving, which
+  // is exactly the generation this path is meant to remove.
+  for (const c of world.chunks.values()) {
+    const k = chunkKey(c.cx, c.cz);
+    if (!res.propTables.has(k)) res.propTables.set(k, []);
+  }
+  const biome = res.meta.biome || entry.biome;
+  // The shipped file is a CORRIDOR along the whole route (near band fully authored, far
+  // band heightfield + far vegetation), not a disc around the start, so the streaming
+  // reach is no longer clamped to a bake radius: drawDistance and fog follow the
+  // settings again. Jobs that fall outside the authored corridor are skipped, never
+  // generated (src/world/streaming.js), so stream.stats.generated (perf `gen=`) stays 0.
+  const cov = res.meta.coverage || { near: entry.nearRadius, far: entry.farRadius };
+  console.log(`[map] ${entry.id} ${entry.name}: ${(f.bytes.length / 1e6).toFixed(2)} MB in `
+    + `${loadMs.toFixed(0)} ms · ${res.stats.chunks} chunks (${res.stats.near} near + ${res.stats.far} far) · `
+    + `${res.stats.props} props · `
+    + `${res.stats.tiles} tiles · road ${res.road.length.toFixed(0)} m · corridor ${cov.near}/${cov.far} m`);
+  return {
+    seed: entry.seed, biome, world, road: res.road, gates: res.gates, carveIndex,
+    roadLength: res.road.length, propTables: res.propTables, tileTables: res.tileTables,
+    preGen: true, mapEntry: entry, mapCoverage: cov,
+    mapStats: { chunks: res.stats.chunks, near: res.stats.near, far: res.stats.far, filled: 0, carved: 0, props: res.stats.propLists, tiles: res.stats.tileLists, bytes: f.bytes.length, loadMs },
+    // No terrain generator on this path: every chunk the loader filled is already
+    // `generated` + `carved`, so Streaming never asks for one. A call here would be a
+    // hole in the file, and it says so instead of quietly generating a second world.
+    terrain: {
+      seed: entry.seed, biome, heightAt: () => 0,
+      generateChunk: (w, cx, cz) => {
+        console.warn(`[map] ${entry.id}: chunk ${cx},${cz} is outside the baked coverage - not generated`);
+      },
+    },
   };
 }
 
@@ -170,11 +254,17 @@ const stageLabel = (b) => { const k = 'stage.' + String(b).toLowerCase(); const 
 async function main() {
   const hud = new Hud();
   const cfg = params();
-  const stage = await generateStage(cfg, hud);
+  // Preset map first: when one is selected the stage comes out of the file. A missing
+  // or corrupt file falls back to the procedural boot below, warning loudly.
+  let stage = cfg.showroom ? null : await loadMapStage(cfg, hud);
+  if (!stage) stage = await generateStage(cfg, hud);
+  const worldBiome = stage.biome || cfg.biome;
 
   const canvas = document.getElementById('c');
   const renderer = new Renderer(canvas);
-  renderer.setBiome(BIOME_INFO[cfg.biome], cfg.biome);
+  // No streaming reach clamp: the shipped map is authored as a corridor along the whole
+  // route, so drawDistance and fog are the player's settings at every metre of it.
+  renderer.setBiome(BIOME_INFO[worldBiome] || BIOME_INFO[cfg.biome], worldBiome);
   // Pora dnia i pogoda to feature of the stage (PLAN §10.2); ?tod= only overrides it
   // for art-direction shots.
   const climate = stage.road.climate || { tod: cfg.tod, wet: 0, haze: 1, weather: 0 };
@@ -195,12 +285,14 @@ async function main() {
   // ever builds and destroys render geometry, never terrain data.
   const loadT0 = performance.now();
   // Showroom: the world is never streamed, so it is never loaded or generated either.
-  const cached = cfg.showroom ? null : await loadStageCache(stage.world, cfg.seed, cfg.biome);
+  // A loaded map is already the whole stage: no cache read, no generation pass.
+  const cached = (cfg.showroom || stage.mapEntry) ? null : await loadStageCache(stage.world, cfg.seed, cfg.biome);
   hud.boot(cached
     ? `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n${t('boot.cached')}\n${(cached.bytes / 1e6).toFixed(1)} ${t('boot.megabytes')} · ${cached.chunks} ${t('boot.chunks')}`
     : `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n${t('boot.generate')}`);
   await nextFrame(cfg.shotBoot);
-  const pre = cfg.showroom ? { chunks: 0, filled: 0, carved: 0, props: 0, tiles: 0 }
+  const pre = stage.mapEntry ? stage.mapStats
+    : cfg.showroom ? { chunks: 0, filled: 0, carved: 0, props: 0, tiles: 0 }
     : await pregenerateStage(stream, settings.drawDistance, {
     yieldFn: () => nextFrame(cfg.shotBoot),
     onProgress: (p, done, total) => hud.boot(
@@ -210,7 +302,7 @@ async function main() {
     ),
   });
   const loadS = (performance.now() - loadT0) / 1000;
-  const loadLine = `[stage] ${cached ? `cache ${cached.url}` : 'generated'} · ${pre.chunks} chunks `
+  const loadLine = `[stage] ${stage.mapEntry ? `map ${stage.mapEntry.id} (${(stage.mapStats.bytes / 1e6).toFixed(2)} MB, ${stage.mapStats.loadMs.toFixed(0)} ms)` : cached ? `cache ${cached.url}` : 'generated'} · ${pre.chunks} chunks `
     + `(${pre.filled} terrain, ${pre.carved} carve) · ${pre.props} prop lists · ${pre.tiles} tile lists `
     + `· load ${loadS.toFixed(1)} s`;
   console.log(loadLine);
@@ -259,9 +351,16 @@ async function main() {
   // Pace notes from geometry + the ghost speed the note is timed against (docs/07 F4).
   const notes = buildPaceNotes(stage.road, ghost);
   const voice = new Voice({ notes: notes.notes, emit: bus });
-  const stageName = `${t('hud.stage')} ${stageLabel(cfg.biome).toUpperCase()} · ${t('hud.gravel')} · ${cfg.seed}`;
-  const rally = new RallyHud(document, { bus, stages: BIOMES.map((b) => ({ key: b, label: stageLabel(b) })) });
+  const stageName = `${t('hud.stage')} ${stageLabel(worldBiome).toUpperCase()} · ${t('hud.gravel')} · ${cfg.seed}`;
+  const rally = new RallyHud(document, {
+    bus,
+    stages: BIOMES.map((b) => ({ key: b, label: stageLabel(b) })),
+    // MAP row: the shipped stage plus its length and dominant surface, so the choice is
+    // readable without loading it first. One DOM hit box per row (touch) as always.
+    maps: MAP_CATALOG.map((m) => ({ key: m.id, label: `${m.name} · ${m.lengthTarget} m · ${m.surface}` })),
+  });
   rally.stageIdx = Math.max(0, BIOMES.indexOf(cfg.biome));
+  rally.mapIdx = Math.max(0, MAP_CATALOG.findIndex((m) => m.id === cfg.mapId));
   function restartRun() {
     // Rolled over: RESET rights the car where it lies instead of re-placing it at the
     // start line. The stage clock keeps running and the damage already taken stands, so
@@ -281,6 +380,9 @@ async function main() {
     if (!it) return;
     if (it.act === 'start') startRun();
     else if (it.act === 'restart') restartRun();
+    // MAP row: the cycle itself is the HUD's; the choice is persisted here and takes
+    // effect on START (which reloads with ?map=, same as the STAGE row).
+    else if (it.act === 'map') { settings.map = rally.mapKey(); saveSettings(); }
     else if (it.act === 'toggle:blockTiles') settings.blockTiles = !settings.blockTiles;
     // EFEKTY row: the particle field switch (src/fx). fx.step() emits and ages nothing
     // while disabled and render/fx-view.js hides the pools, so this is one flag.
@@ -335,6 +437,14 @@ async function main() {
   // land straight in the countdown; otherwise the frozen clock just starts running.
   function startRun() {
     const want = rally.stageKey();
+    const wantMap = rally.mapKey();
+    if (wantMap && wantMap !== cfg.mapId) {
+      const u = new URL(location.href);
+      u.searchParams.set('map', wantMap);
+      u.searchParams.delete('shot'); u.searchParams.delete('frames'); u.searchParams.delete('menu');
+      location.href = u.href;
+      return;
+    }
     if (want && want !== cfg.biome) {
       const u = new URL(location.href);
       u.searchParams.set('biome', want);
