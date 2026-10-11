@@ -14,6 +14,12 @@ export const VERGE = 1.7;                 // nominal m past carriageway+shoulder
 export const VERGE_SALT = 0x5177a1e3;
 export const BARE_SALT = 0x2be4c07d;
 export const PEBBLE_CHANCE = 0.18;        // share of the road-edge band that becomes small stones
+/** The carriageway is ONE continuous carved strip (src/world/road-carve.js RUT_DEPTH /
+ *  CROWN / EDGE_BREAK), never a lattice of 1 m block plates. The tile layer is a detail
+ *  layer only: it exists past the shoulder edge, where it breaks the verge line up with
+ *  dirt, pebbles and small stones. Standing plates on the lane is what read as paving
+ *  slabs with black gaps, so the carriageway band is skipped outright. */
+export const TILE_ON_CARRIAGEWAY = false;
 export const FLAG_PEBBLE = 0x80, FLAG_RUT = 0x40, FLAG_CROWN = 0x20, SURF_MASK = 0x1f;
 export const TILE_CAP_CHUNK = 192;
 /** Surface ids the renderer owns a block node for (streaming.js BLOCK_NODE). Listed here
@@ -51,6 +57,8 @@ export function chunkTiles(world, road, surfaces, cx, cz, stride = 1, cap = TILE
       if (lat > hw + SHOULDER + verge) continue;
       const sid = chunk.surface[c];                        // the id physics already has
       if (!sid || !surfaces.includes(sid)) continue;
+      // Detail layer only: the lane and the shoulder get no plate at all.
+      if (!TILE_ON_CARRIAGEWAY && lat <= hw + SHOULDER) continue;
       let flags = 0;
       if (lat > hw + SHOULDER * 0.4) {
         // Verge: bare dirt shows between the plates, and the dropout deepens outwards so

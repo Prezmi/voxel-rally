@@ -23,7 +23,10 @@ import { makeTerrain, BIOME_INFO } from '../src/world/terrain-gen.js';
 import { buildRoad } from '../src/world/road-spline.js';
 import { buildCarveIndex, carveChunk } from '../src/world/road-carve.js';
 import { stageChunkList, PROP_REACH } from '../src/world/pregen.js';
-import { generateChunkProps } from '../src/world/props.js';
+import { generateChunkProps, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE } from '../src/world/props.js';
+import { PROP, propFootprint, treeSpacingFor } from '../src/world/props.js';
+import { SHOULDER } from '../src/world/road-carve.js';
+const TREE_PROPS = new Set([PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.DEAD]);
 import { chunkTiles, TILE_SURFACE_IDS } from '../src/world/block-tiles.js';
 import { planGates } from '../src/game/stage.js';
 import { encodeMap, applyMap, mapById, mapUrl, decodeMap, MAP_CATALOG, MAP_VERSION, MAP_NEAR_DEFAULT, MAP_FAR_DEFAULT } from '../src/world/map-load.js';
@@ -136,6 +139,83 @@ function bake(def) {
     }
   }
 
+  // ---- global placement rules over the assembled map ----
+  // The chunk-local scatter cannot see its own far chains (they scatter against an offset
+  // phantom road, so a candidate on a chunk border is computed from two different
+  // centrelines and can come out twice), and a corridor rule is only worth what the
+  // shipped file obeys. So the assembled placement is filtered ONCE, in a fixed order:
+  //  * never a trunk inside carriageway + shoulder + TREE_CORRIDOR_HARD,
+  //  * the 8 m tree-free verge band keeps only ISOLATED single specimens (no other trunk
+  //    within SPECIMEN_ISOLATED m), which is what makes them verifiable from the file,
+  //  * minimum trunk-to-trunk spacing (TREE_MIN_SPACING, per species) across the map.
+  const SPECIMEN_ISOLATED = 12;
+  const kept = [];
+  const cells = new Map();
+  const cellKey = (x, z) => `${Math.floor(x / 6)},${Math.floor(z / 6)}`;
+  const nearAccepted = (x, z) => {
+    const cx = Math.floor(x / 6), cz = Math.floor(z / 6), out = [];
+    for (let a = cx - 2; a <= cx + 2; a++) for (let b2 = cz - 2; b2 <= cz + 2; b2++) {
+      const l = cells.get(`${a},${b2}`);
+      if (l) for (const q of l) out.push(q);
+    }
+    return out;
+  };
+  let dropped = 0, specimens = 0;
+  const treeKeys = [...propMap.keys()].sort((a, b) => a - b);
+  for (const key of treeKeys) {
+    const list = propMap.get(key);
+    const keep = [];
+    for (const p of list) {
+      if (!TREE_PROPS.has(p.prop)) { keep.push(p); continue; }
+      const i = road.nearest(p.x, p.z);
+      const toEdge = Math.abs((p.x - road.x[i]) * road.nx[i] + (p.z - road.z[i]) * road.nz[i])
+        - road.width[i] / 2 - SHOULDER;
+      if (toEdge < TREE_CORRIDOR_HARD) { dropped++; continue; }
+      const nb = nearAccepted(p.x, p.z);
+      if (toEdge < TREE_FREE) {
+        let lonely = true;
+        for (const q of nb) if (TREE_PROPS.has(q.prop) && Math.hypot(p.x - q.x, p.z - q.z) < SPECIMEN_ISOLATED) { lonely = false; break; }
+        if (!lonely) { dropped++; continue; }
+        p.specimen = 1; specimens++;
+      }
+      let clear = true;
+      for (const q of nb) {
+        if (!TREE_PROPS.has(q.prop)) continue;
+        if (Math.hypot(p.x - q.x, p.z - q.z) < treeSpacingFor(p.prop, p.scale, q.prop, q.scale)) { clear = false; break; }
+      }
+      if (!clear) { dropped++; continue; }
+      const k = cellKey(p.x, p.z);
+      const l = cells.get(k) || (cells.set(k, []), cells.get(k));
+      l.push(p);
+      kept.push(p);
+      keep.push(p);
+    }
+    propMap.set(key, keep);
+  }
+  let tMin = Infinity, tSum = 0, overlap = 0;
+  for (let a = 0; a < kept.length; a++) {
+    let best = Infinity;
+    for (const q of nearAccepted(kept[a].x, kept[a].z)) {
+      if (q === kept[a] || !TREE_PROPS.has(q.prop)) continue;
+      const d = Math.hypot(kept[a].x - q.x, kept[a].z - q.z);
+      if (d < best) best = d;
+    }
+    if (best < Infinity) { tSum += best; if (best < tMin) tMin = best; }
+  }
+  // crown overlaps, via the same spatial hash (a pair is seen from both ends, so /2)
+  for (const p of kept) {
+    if (!TREE_PROPS.has(p.prop)) continue;
+    for (const q of nearAccepted(p.x, p.z)) {
+      if (q === p || !TREE_PROPS.has(q.prop)) continue;
+      if (Math.hypot(p.x - q.x, p.z - q.z)
+        < propFootprint(p.prop, p.scale) + propFootprint(q.prop, q.scale)) overlap++;
+    }
+  }
+  overlap >>= 1;
+  props = kept.length;
+  const stats = { trees: kept.length, dropped, specimens, minTrunkSpacing: tMin === Infinity ? 0 : +tMin.toFixed(2),
+    meanTrunkSpacing: +(tSum / Math.max(1, kept.length)).toFixed(2), crownOverlaps: overlap };
+
   // Dominant surface of the shipped road, for the menu line.
   const tally = new Map();
   for (let i = 0; i < road.n; i++) tally.set(road.surfaceId[i], (tally.get(road.surfaceId[i]) || 0) + 1);
@@ -150,6 +230,7 @@ function bake(def) {
     climate: road.climate,
     gates: gates.map((g) => ({ arc: g.arc, kind: g.kind })),
     counts: { chunks: list.length, propLists: propMap.size, props, farProps, tileLists: tileMap.size, tiles },
+    veg: stats,
     bandChunks: Object.fromEntries(bandCount),
     baked: new Date().toISOString(),
   };
@@ -167,6 +248,7 @@ function bake(def) {
   console.log(`[bake] ${def.id.padEnd(19)} ${(road.length / 1000).toFixed(2)} km  `
     + `${list.length} chunks  ${props} props  ${tiles} tiles  `
     + `${(bytes.length / 1e6).toFixed(2)} MB  ${secs} s  bands=[${def.bands.map((b) => b.biome).join('>')}]`
+    + `  veg trees=${stats.trees} minNN=${stats.minTrunkSpacing} meanNN=${stats.meanTrunkSpacing} overlap=${stats.crownOverlaps} specimens=${stats.specimens} dropped=${stats.dropped}`
     + `  coverage=${nearR}/${farR} m (${nearChunks}+${farChunks} chunks)  far props=${farProps}`
     + `  verify=${applied ? 'OK' : String(ok)}`);
   if (!applied) console.error(`[bake] ${def.id}: ${ok}`);

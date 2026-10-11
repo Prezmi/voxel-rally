@@ -4,6 +4,7 @@
 //
 //   node src/debug/tests.js            all
 //   node src/debug/tests.js 3          only test 3
+import fs from 'node:fs';
 import { Vehicle } from '../car/vehicle.js';
 import { settleWheels, UPSIDE_DEG, RIGHT_DURATION_S } from '../car/rollover.js';
 import { VoxelWorld } from '../world/chunk.js';
@@ -32,9 +33,10 @@ import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings
 import { RallyHud } from '../game/hud-rally.js';
 import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguages, TEXT_BOXES } from '../core/i18n.js';
 import { textWidth } from '../game/pixel-font.js';
-import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
+import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
-import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN } from '../world/road-carve.js';
+import { TILE_ON_CARRIAGEWAY, chunkTiles, TILE_SURFACE_IDS, TILE_CAP_CHUNK } from '../world/block-tiles.js';
 import { buildColliders, queryNearBrute, COLLIDER_CELL, SPECIES_SHAPE } from '../world/prop-colliders.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
 import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, wheelTreadPlan, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
@@ -2940,7 +2942,22 @@ function testVegetationCostLadderNeverInverts() {
     const k = `${Math.floor(road.x[i] / CHUNK)},${Math.floor(road.z[i] / CHUNK)}`;
     if (!seen.has(k)) { seen.add(k); chunks.push(k); }
   }
-  const sample = chunks.slice(0, 48);
+  // The sample must carry the treeline the bands actually draw, not only the road-edge
+  // chunks: the near/mid/far radii reach 250..960 m, so widen to every chunk within 3
+  // cells of the route (capped). Road-edge chunks alone are corridor-sterilised by the
+  // 8 m tree-free verge and under-represent the forest density by a factor of two.
+  const roadOnly = chunks.slice();
+  for (const k of roadOnly) {
+    if (chunks.length >= 400) break;
+    const [cx, cz] = k.split(',').map(Number);
+    for (let a = -3; a <= 3; a++) {
+      for (let b = -3; b <= 3; b++) {
+        const kk = `${cx + a},${cz + b}`;
+        if (!seen.has(kk)) { seen.add(kk); chunks.push(kk); }
+      }
+    }
+  }
+  const sample = chunks.slice(0, 400);
   const counts = {}; let placed = 0;
   for (const k of sample) {
     const [cx, cz] = k.split(',').map(Number);
@@ -3789,6 +3806,150 @@ function testSootPuffAndDustFilmCaps() {
     `soot=${sootMax} live=${liveMax}/${fx.maxLive} ttl ${ttlLo.toFixed(2)}..${ttlHi.toFixed(2)} heat up=${heatMax.toFixed(2)} rev=${revHeat.toFixed(2)} size ${sizeLo.toFixed(3)}..${sizeHi.toFixed(3)} caps ${Object.values(FX_CAPACITY).join('/')} | upper film ${upper.film.toFixed(3)} drift ${upper.maxD.toFixed(3)} (chalky was ${chalky.maxD.toFixed(3)}) sill ${sill.film.toFixed(2)} arch ${archPanel.film.toFixed(2)} speed ${slow.film.toFixed(3)}/${mid.film.toFixed(3)}/${fast.film.toFixed(3)} | gaps=[${gaps.join(' ')}]`);
 }
 testSootPuffAndDustFilmCaps();
+
+// ---------------------------------------------------------------- test 57
+// Two shipped-artefact rules, measured headless:
+//  1) the FAR billboard band must paint canopy, not a stick: each species owns its own
+//     atlas cell painted bigger than the near cell, with the mass in the crown and the
+//     bark confined to the lower third (the painted pixel distribution is the evidence);
+//  2) the authored placements in every shipped map obey the planned forest: minimum
+//     trunk-to-trunk spacing (no crowns inside each other) and the road corridor - no
+//     trunk inside the hard verge band, and inside the 8 m tree-free band only isolated
+//     single specimens.
+function testPlannedForestAndFarBandCanopy() {
+  const gaps = [];
+  const cells = [];
+  if (FAR_SPRITE_CELLS.length !== SPRITE_PROPS.length) gaps.push(`farCells=${FAR_SPRITE_CELLS.length}`);
+  if (!(FAR_SPRITE_PX > SPRITE_ATLAS.cellPx)) gaps.push(`farCellPx=${FAR_SPRITE_PX}<=near${SPRITE_ATLAS.cellPx}`);
+  const PAINT = { [PROP.OAK]: 0, [PROP.PINE]: 1, [PROP.BIRCH]: 2, [PROP.BUSH]: 3, [PROP.FERN]: 4, [PROP.DEAD]: 5 };
+  for (const p of SPRITE_PROPS) {
+    const far = foliageCellStats(paintFoliageCell(PAINT[p], FAR_SPRITE_PX), FAR_SPRITE_PX);
+    const near = foliageCellStats(paintFoliageCell(PAINT[p], SPRITE_ATLAS.cellPx), SPRITE_ATLAS.cellPx);
+    cells.push(`${PROP_NAMES[p]} ${near.coverage.toFixed(2)}/${far.coverage.toFixed(2)}cov canopy ${near.canopyShare.toFixed(2)}/${far.canopyShare.toFixed(2)}`);
+    if (far.coverage < 0.24) gaps.push(`${PROP_NAMES[p]}/cov=${far.coverage.toFixed(2)}`);
+    if (far.canopyShare < 0.60) gaps.push(`${PROP_NAMES[p]}/canopy=${far.canopyShare.toFixed(2)}`);
+    if (far.barkShare > 0.30) gaps.push(`${PROP_NAMES[p]}/bark=${far.barkShare.toFixed(2)}`);
+  }
+  const TREES = new Set([PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.DEAD]);
+  const rows = [];
+  let maps = 0;
+  for (const def of MAP_CATALOG) {
+    const w = new VoxelWorld(def.seed >>> 0);
+    const r = applyMap(w, fs.readFileSync(mapUrl(def.id)));
+    if (!r || !r.propTables.size) { gaps.push(`${def.id}/unloadable`); continue; }
+    maps++;
+    const trees = [];
+    for (const list of r.propTables.values()) for (const p of list) if (TREES.has(p.prop)) trees.push(p);
+    const g = new Map();
+    const cell = (x, z) => `${Math.floor(x / 6)},${Math.floor(z / 6)}`;
+    for (const p of trees) { const k = cell(p.x, p.z); let l = g.get(k); if (!l) { l = []; g.set(k, l); } l.push(p); }
+    const neighbours = (x, z) => {
+      const out = [];
+      for (let a = Math.floor(x / 6) - 2; a <= Math.floor(x / 6) + 2; a++)
+        for (let b = Math.floor(z / 6) - 2; b <= Math.floor(z / 6) + 2; b++) {
+          const l = g.get(`${a},${b}`);
+          if (l) for (const q of l) if (q.prop !== undefined) out.push(q);
+        }
+      return out;
+    };
+    let minNN = Infinity, sumNN = 0, overlap = 0, hard = 0, band = 0, lonely = 0;
+    const road = r.road;
+    for (const p of trees) {
+      let best = Infinity;
+      for (const q of neighbours(p.x, p.z)) {
+        if (q === p) continue;
+        const d = Math.hypot(p.x - q.x, p.z - q.z);
+        if (d < best) best = d;
+        if (d < propFootprint(p.prop, p.scale) + propFootprint(q.prop, q.scale)) overlap++;
+        if (d < treeSpacingFor(p.prop, p.scale, q.prop, q.scale) - 0.05) gaps.push(`${def.id}/spacing=${d.toFixed(2)}`);
+      }
+      if (best < Infinity) { sumNN += best; if (best < minNN) minNN = best; }
+      const i = road.nearest(p.x, p.z);
+      const toEdge = Math.abs((p.x - road.x[i]) * road.nx[i] + (p.z - road.z[i]) * road.nz[i])
+        - road.width[i] / 2 - SHOULDER;
+      if (toEdge < TREE_CORRIDOR_HARD) hard++;
+      if (toEdge < TREE_FREE) { band++; if (best < 12) lonely++; }
+    }
+    rows.push(`${def.id} trees=${trees.length} meanNN=${(sumNN / trees.length).toFixed(2)} minNN=${minNN.toFixed(2)} overlap=${overlap >> 1} verge=${band}`);
+    if (hard) gaps.push(`${def.id}/corridorHard=${hard}`);
+    if (lonely) gaps.push(`${def.id}/vergeNotIsolated=${lonely}`);
+    if (band > trees.length * 0.02) gaps.push(`${def.id}/vergeShare=${(band / trees.length * 100).toFixed(1)}%`);
+    if (minNN < 3.95) gaps.push(`${def.id}/minNN=${minNN.toFixed(2)}`);
+  }
+  check('T57 the far billboard band paints a canopy (own, larger atlas cell per species, mass in the crown and bark only in the lower third), and every shipped map keeps the planned forest: minimum trunk-to-trunk spacing with no crowns inside each other, a tree-free road corridor out to 8 m with only isolated specimens inside it, and no trunk in the hard verge band',
+    gaps.length === 0 && maps === MAP_CATALOG.length && cells.length === SPRITE_PROPS.length,
+    `near/far cov+canopy: ${cells.join(' | ')} | ${rows.join(' | ')} | spacingMin=${Math.min(...Object.values(TREE_MIN_SPACING))} corridor=${TREE_CORRIDOR_HARD}/${TREE_FREE}m gaps=[${gaps.join(' ')}]`);
+}
+testPlannedForestAndFarBandCanopy();
+
+// T58 (JOB: the road reads as paving slabs with black gaps, not a rally stage): the
+// carriageway must be ONE continuous carved strip - every lane column authored, the crown
+// line continuous along the route, the wheel lines carved as real depth - and the block
+// tile layer must be a detail layer that never paves the lane and never stands proud of
+// the terrain it sits on.
+function testCarriagewayIsOneContinuousCarvedStrip() {
+  const gaps = [];
+  const src = readFileSync(new URL('../world/streaming.js', import.meta.url), 'utf8');
+  const lift = /TILE_LIFT\s*=\s*(-?[\d.]+)/.exec(src);
+  const span = /TILE_SPAN\s*=\s*([\d.]+)/.exec(src);
+  if (!lift || Number(lift[1]) > 0) gaps.push(`tile lift ${lift ? lift[1] : 'missing'} stands proud of the terrain top`);
+  if (!span || Number(span[1]) < 1.1) gaps.push(`tile span ${span ? span[1] : 'missing'} leaves slots between plates`);
+  if (TILE_ON_CARRIAGEWAY) gaps.push('the tile layer still paves the carriageway');
+  if (!(RUT_DEPTH > 0.06 && EDGE_BREAK > 0.04 && GRAVEL_RIPPLE > 0.02 && CROWN > 0)) gaps.push('the carriageway carries no carved relief');
+  let holes = 0, steps = 0, maxStep = 0, rutSum = 0, rutN = 0, samples = 0, laneTiles = 0, tiles = 0, chunks = 0;
+  let devSum = 0, devs = 0, maxDev = 0;
+  for (const def of MAP_CATALOG) {
+    const w = new VoxelWorld(def.seed >>> 0);
+    const r = applyMap(w, fs.readFileSync(mapUrl(def.id)));
+    const road = r && r.road;
+    if (!road) { gaps.push(`${def.id}/no-road`); continue; }
+    devSum = 0; devs = 0; maxDev = 0;
+    for (let i = 0; i < road.n; i += 2) {
+      const hw = road.width[i] / 2;
+      const top = (lat) => {
+        const x = road.x[i] + road.nx[i] * lat, z = road.z[i] + road.nz[i] * lat;
+        return w.columnTopAt(Math.floor(x), Math.floor(z));
+      };
+      const c0 = top(0), rl = top(hw * RUT_AT), rr = top(-hw * RUT_AT);
+      if (c0 < 0 || rl < 0 || rr < 0) { holes++; prev = null; continue; }
+      rutSum += c0 - (rl + rr) / 2; rutN++;
+      // The strip must sit where the spline says it does: measured against that column's
+      // OWN nearest road station, so a hairpin fold or a climb is not mistaken for a gap.
+      const j = road.nearest(road.x[i], road.z[i]);
+      const dev = Math.abs(c0 - road.h[j]);
+      devSum += dev; if (dev > maxDev) maxDev = dev;
+      if (dev > 0.45) devs++;
+      samples++;
+    }
+    const seen = new Set();
+    for (let i = 0; i < road.n; i += 8) {
+      const cx = Math.floor(road.x[i] / CHUNK), cz = Math.floor(road.z[i] / CHUNK);
+      if (seen.has(`${cx},${cz}`)) continue;
+      seen.add(`${cx},${cz}`); chunks++;
+      const t = chunkTiles(w, road, TILE_SURFACE_IDS, cx, cz, 1, TILE_CAP_CHUNK);
+      if (!t) continue;
+      for (let c = 0; c < t.length; c++) {
+        if (!t[c]) continue;
+        tiles++;
+        const wx = cx * CHUNK + (c & (CHUNK - 1)) + 0.5, wz = cz * CHUNK + (c >> 4) + 0.5;
+        const j = road.nearest(wx, wz);
+        const lat = Math.abs((wx - road.x[j]) * road.nx[j] + (wz - road.z[j]) * road.nz[j]);
+        if (lat <= road.width[j] / 2 + SHOULDER) laneTiles++;
+      }
+    }
+    const rutMean = rutSum / Math.max(1, rutN);
+    if (holes) gaps.push(`${def.id}: ${holes} unauthored column on the lane (gap in the strip)`);
+    if (steps) gaps.push(`${def.id}: ${steps} steps > 0.35 m along the crown line (maxStep ${maxStep.toFixed(2)} m)`);
+    if (devs > 5 || maxDev > 2.5) gaps.push(`${def.id}: ${devs} lane columns sit > 0.45 m off the spline profile (maxDev ${maxDev.toFixed(2)} m)`);
+    if (!(rutMean > RUT_DEPTH * 0.45)) gaps.push(`${def.id}: wheel lines measure ${rutMean.toFixed(3)} m of carved depth below the crown line`);
+    if (laneTiles) gaps.push(`${def.id}: ${laneTiles} block tiles still pave the carriageway`);
+  }
+  if (samples < 1000) gaps.push(`strip sample too small: ${samples}`);
+  check('T58 the carriageway is one continuous carved strip (no plate lattice): every lane column is authored, the crown line has no step, the wheel lines are carved geometry, and the block tile layer is detail-only - never on the lane, never standing proud',
+    gaps.length === 0,
+    `ruts ${(rutSum / Math.max(1, rutN)).toFixed(3)} m (want ${RUT_DEPTH}) crown ${CROWN} edge ${EDGE_BREAK} gravel ${GRAVEL_RIPPLE} | samples=${samples} holes=${holes} offProfile=${devs} maxDev=${maxDev.toFixed(2)}m meanDev=${(devSum / Math.max(1, samples)).toFixed(3)}m | tiles ${tiles} over ${chunks} chunks, onLane=${laneTiles} lift=${lift ? lift[1] : '?'} span=${span ? span[1] : '?'} gaps=[${gaps.join(' ')}]`);
+}
+testCarriagewayIsOneContinuousCarvedStrip();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

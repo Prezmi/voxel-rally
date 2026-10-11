@@ -11,7 +11,9 @@
 import { BLOCK, blockForSurface } from './palette.js';
 import { surface } from './surfaces.js';
 import { CHUNK, WORLD_HEIGHT, chunkKey, keyToCx, keyToCz } from './chunk.js';
-import { smoothstep } from './noise.js';
+import { smoothstep, hash01 } from './noise.js';
+const EDGE_SALT = 0x39d7a1c5;
+const GRIT_SALT = 0x6b2f8e51;
 
 // Cross-section of the corridor, metres out from the centreline (PLAN §10 "korytarz
 // z poboczem i skarpą", docs/03 §3):
@@ -24,6 +26,19 @@ export const BANK = 9.5;
 export const RAMP = SHOULDER + BANK;      // legacy name: full blend width
 export const CROWN = 0.035;              // cross-fall of a graded road (m per half-width)
 export const SHOULDER_RISE = 0.11;       // lip above the carriageway edge
+// ---- carriageway relief (JOB: the road is one continuous strip, not paving slabs) ----
+// The block tile layer used to pave the corridor column by column, so the carriageway was
+// a grid of 1 m plates with slots between them. The plates are now off the carriageway
+// entirely (src/world/block-tiles.js TILE_ON_CARRIAGEWAY) and the relief the corridor needs
+// is carved into the terrain sheet itself, which is one continuous surface already: two
+// compacted wheel-line ruts, the graded crown above, a broken edge line and a gravel
+// ripple so the carriageway has small stones in it. All of it is heightfield geometry in
+// the 1/16-block grid (6.25 cm resolution), so it self-shadows and catches the sun.
+export const RUT_DEPTH = 0.115;          // m a wheel line sits below the crown line
+export const RUT_AT = 0.55;             // wheel line at 55 % of half-width (matches wear band)
+export const RUT_WIDTH = 0.30;          // gaussian sigma, as a fraction of half-width
+export const EDGE_BREAK = 0.10;         // m of jitter on the carriageway edge (broken lip)
+export const GRAVEL_RIPPLE = 0.055;     // m of small-stone ripple across the strip
 
 /**
  * Surface key -> block id for a corridor column, with the biome guard: SNOW/ICE are
@@ -141,9 +156,16 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
     const hw = scratchHW[c], d = scratchD[c], absD = Math.abs(d);
     let blockId = scratchBlock[c], target;
     if (absD <= hw) {
-      // Graded carriageway: crown (centre high, edges low) + camber into the corner.
+      // Graded carriageway: crown (centre high, edges low) + camber into the corner, plus
+      // the wheel-line ruts, a broken edge and a gravel ripple (see RUT_DEPTH above). The
+      // ruts are continuous along the whole route because the carve samples the spline at
+      // 0.5 m; nothing here is per-column independent, so the strip has no seam.
       const u = absD / hw;
-      target = scratchH[c] - CROWN * hw * u * u;
+      const wl = Math.exp(-Math.pow((absD - hw * RUT_AT) / (hw * RUT_WIDTH), 2));
+      const edge = (hash01(colX, colZ, EDGE_SALT) - 0.5) * EDGE_BREAK
+        * Math.max(0, (u - 0.55) / 0.45);
+      const grit = (hash01(colX, colZ, GRIT_SALT) - 0.5) * GRAVEL_RIPPLE;
+      target = scratchH[c] - CROWN * hw * u * u - RUT_DEPTH * wl + edge + grit;
     } else if (absD <= hw + SHOULDER) {
       target = scratchH[c] + (absD - hw) * SHOULDER_RISE;
     } else {

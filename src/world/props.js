@@ -32,11 +32,16 @@ export const SPRITE_SPEC = {
   [PROP.DEAD]: { w: 2.10, h: 5.94, planes: 3 },
 };
 const SPR = { OAK: 0, PINE: 1, BIRCH: 2, BUSH: 3, FERN: 4, DEAD: 5 };
-const TEX_PX = 32;                       // 32x32, nearest neighbour (true pixel art)
+const TEX_PX = 32;                       // 32x32 near/mid cells, nearest neighbour
+// Far billboard cells are painted BIGGER (48x48) and DENSER than the near cells: at
+// 150..400 m a whole crown is a handful of texels, so the far band needs crown mass, not
+// the near cell's branch-by-branch detail (which read as bare brown sticks).
+export const FAR_SPRITE_PX = 48;
 // One canvas atlas, painted once at boot: every sprite species lives in its own
 // 32x32 cell of a single texture, so the whole forest is one texture and one shader
 // program (PLAN §10.2 "zero assetów": still fully procedural, still no file).
-const ATLAS = { cols: 4, w: TEX_PX * 4, h: TEX_PX * 2 };
+const ATLAS = { cols: 4, w: Math.max(TEX_PX * 4, FAR_SPRITE_PX * 4), h: TEX_PX * 2 + FAR_SPRITE_PX * 2 };
+const FAR_ATLAS = { cols: 4, x0: 0, y0: TEX_PX * 2 };   // lower half of the same canvas
 // Atlas cell painted for each sprite species. DERIVED from SPRITE_PROPS, because
 // buildSpriteGeometries/atlasRect address the cell by SPRITE_PROPS.indexOf(): a species
 // appended to one list and not the other would silently sample another species' foliage.
@@ -47,9 +52,23 @@ const SPR_CELL = SPRITE_PROPS.map((p) => SPR_PAINT[p]);
  *  a painted cell and that the atlas is not over-full. */
 export const SPRITE_ATLAS = { cellPx: TEX_PX, cols: ATLAS.cols, rows: ATLAS.h / TEX_PX,
   species: SPR_CELL.slice() };
+/** The far band's cells: same six species, painted separately at FAR_SPRITE_PX. */
+export const FAR_SPRITE_CELLS = SPR_CELL.slice();
 
 /** Atlas cell of one sprite species as [u0,v0,u1,v1], inset by half a texel so a
  *  neighbouring cell can never bleed in at the quad edge. */
+/** Far-band atlas cell of one species, in the lower half of the shared canvas. */
+export function farAtlasRect(sprIdx) {
+  const col = sprIdx % FAR_ATLAS.cols, row = Math.floor(sprIdx / FAR_ATLAS.cols);
+  const x = FAR_ATLAS.x0 + col * FAR_SPRITE_PX, y = FAR_ATLAS.y0 + row * FAR_SPRITE_PX;
+  return [
+    (x + 0.5) / ATLAS.w,
+    1 - (y + FAR_SPRITE_PX - 0.5) / ATLAS.h,
+    (x + FAR_SPRITE_PX - 0.5) / ATLAS.w,
+    1 - (y + 0.5) / ATLAS.h,
+  ];
+}
+
 export function atlasRect(sprIdx) {
   const col = sprIdx % ATLAS.cols, row = Math.floor(sprIdx / ATLAS.cols);
   return [
@@ -78,6 +97,32 @@ const POST_SALT = 0x99ab4d01;
 // spacing and the real point-to-segment distance decides.
 export const PROP_CORRIDOR_MARGIN = 1.2;     // m of shoulder past carriageway edge
 const CORRIDOR_SCAN = 20;                    // +/- samples (m) walked around the nearest one
+
+// ---- planned forest placement (authored maps) -------------------------------------
+// The old scatter was an independent 1-in-N coin flip per 1 m column, so trunks landed
+// on top of each other (measured 0.15 m minimum trunk-to-trunk over a shipped map) and
+// the forest read as one green wall. Trunk-to-trunk minimums, by species crown:
+export const TREE_MIN_SPACING = { [PROP.OAK]: 5.0, [PROP.PINE]: 4.0, [PROP.BIRCH]: 4.2,
+  [PROP.BUSH]: 1.6, [PROP.FERN]: 1.0, [PROP.DEAD]: 4.6 };
+/** Spacing two trunks must clear: the species minimum, or the sum of their crown radii
+ *  when a big pair needs more room than the flat per-species number. */
+export function treeSpacingFor(pa, sa, pb, sb) {
+  return Math.max(TREE_MIN_SPACING[pa], TREE_MIN_SPACING[pb],
+    propFootprint(pa, sa) + propFootprint(pb, sb));
+}
+
+export const TREE_GRID = 3.3;            // m, jittered-grid cell pitch (blue noise)
+export const TREE_JITTER = 1.3;          // m of sub-cell jitter on each axis
+export const TREE_CORRIDOR_HARD = 2.6;   // m past carriageway+shoulder: never a trunk
+/** A lone verge specimen must stand alone: nothing nearer than this, or the 8 m tree-free
+ *  verge turns into a second treeline and the road reads as a green tunnel. */
+export const SPEC_ISOLATION = 13.5;
+export const TREE_FREE = 8.0;            // m of tree-free verge beside the road
+export const TREE_FULL = 20.0;           // normal forest density beyond this
+const GROVE_CELL = 26;                   // m, grove / clearing field
+const ROUTE_CELL = 110;                  // m of arc, dense-vs-open stretch along the route
+const GRID_SALT = 0x2f6b1d07;
+const ROUTE_SALT = 0x71c4a9e3;
 
 /** Shortest distance from a world point to the road CENTRELINE polyline. */
 function roadAxisDistance(road, x, z) {
@@ -142,77 +187,47 @@ export function generateChunkProps(cx, cz, stage) {
   const seed = stage.seed;
   // Hard per-chunk cap: keeps the prop budget (and therefore the instance budget the
   // streaming layer can actually spend in front of the camera) predictable.
-  const TREE_CAP = 44;
-  const cands = [];
+  const TREE_CAP = 44;                   // verge-sprite guard below
+  const out2 = [];
+  const accepted = [];
 
-  // ---- trees / bushes: grove-field scatter per column ----
-  // A 7 m cell hash sets how wooded a patch is, so the stand clumps into groves with
-  // gaps between them instead of the even 1-in-6 lattice the old scatter produced
-  // (PLAN §10 "las przy drodze, nie siatka"). Species follows the grove, with a per-tree
-  // jitter, so a patch reads as one species rather than a chessboard.
-  for (let lz = 0; lz < CHUNK; lz++) {
-    for (let lx = 0; lx < CHUNK; lx++) {
-      const wx = x0 + lx, wz = z0 + lz;
-      const grove = hash01(Math.floor(wx / 7), Math.floor(wz / 7), CLUSTER_SALT ^ seed);
-      const h = hash01(wx, wz, TREE_SALT ^ seed);
-      const i = road.nearest(wx + 0.5, wz + 0.5);
-      const lat = (wx + 0.5 - road.x[i]) * road.nx[i] + (wz + 0.5 - road.z[i]) * road.nz[i];
-      const absLat = Math.abs(lat);
-      const edge = road.width[i] / 2 + SHOULDER;
-      if (absLat < edge + 4.2) continue;                  // keep corridor + verge open
-      // Forest budget goes to the corridor: the brief is "las przy drodze" (PLAN §10),
-      // and the deep-field trees behind the first stand are never seen. Grove field
-      // decides how far a stand reaches, so the edge is dense and the far ground thins.
-      // The stand stays *out of* the lane sightline: canopies are 3-4 m wide, so the
-      // stand begins past the shoulder instead of leaning over the carriageway.
-      const reach = 64 + 60 * grove * grove;
-      if (absLat > reach) continue;
-      const near = absLat < edge + 26 ? 1.15 : 1.0;       // denser right at the verge
-      // Forest EDGE, not a wall: past the first stand the acceptance odds fall off, so
-      // the deep field thins to singles instead of closing into one even horizon band
-      // (that band is what read as a distant city skyline in the driving frames).
-      const taper = Math.max(0.16, 1 - Math.max(0, absLat - (edge + 24))
-        / Math.max(1, reach - edge - 24));
-      if (h > density * near * taper * (0.06 + 0.34 * grove * grove)) continue;
-      const species = pickSpecies(grove * 0.6 + h * 0.4, stage.biome);
-      // Height/species variation from the seed: same species in a grove, different trees.
-      // Sub-cell jitter: on an exact 1 m grid every trunk sits on the same spacing, and
-      // at distance that picket regularity is half of the skyline read.
-      const jx = (hash01(wx, wz, TREE_SALT ^ (seed + 41)) - 0.5) * 0.86;
-      const jz = (hash01(wx, wz, TREE_SALT ^ (seed + 53)) - 0.5) * 0.86;
-      // Crown spread: a row of identical heights is the other half of it, so pines run
-      // 0.72..1.80 and broadleaves 0.60..1.68 instead of one narrow band.
-      const scale = (species === PROP.PINE ? 0.72 : 0.60)
-        + hash01(wx, wz, TREE_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 1.00 : 1.08);
-      // Corridor veto + RE-SCATTER: an offender is moved out past carriageway +
-      // shoulder + margin, never dropped, so the stand keeps its density.
-      const fit = resolveOffRoad(road, wx + 0.5 + jx, wz + 0.5 + jz,
-        propFootprint(species, scale) + PROP_CORRIDOR_MARGIN);
-      if (!fit) continue;
-      const px = fit.x, pz = fit.z;
-      const pcx = Math.floor(px), pcz = Math.floor(pz);
-      const surf = worldSurface(stage, pcx, pcz);
-      if (surf === SURF.ASPHALT || surf === SURF.ICE) continue;
-      if (terrain.slopeAt(px, pz) > 0.75) continue;
-      // Stand on the *carved* ground where the corridor bank exists: an analytic height
-      // leaves the trunk floating a block above a banked verge (the old shot's trees).
-      const carved = stage.world ? stage.world.columnTopAt(pcx, pcz) : -1;
-      const y = carved >= 0 ? carved : terrain.heightAt(px, pz);
-      cands.push({
-        prop: species, x: px, y, z: pz,
-        yaw: hash01(wx, wz, TREE_SALT ^ (seed + 13)) * Math.PI * 2,
-        scale, variant: Math.floor(hash01(wx, wz, TREE_SALT ^ (seed + 29)) * 3),
-      });
+  // ---- trees / bushes: PLANNED jittered-grid scatter, not dense random ----
+  // One candidate per TREE_GRID world cell, jittered inside its own cell (blue noise by
+  // construction: two trunks can never share a cell), then rejected when another already
+  // accepted trunk sits inside TREE_MIN_SPACING for either species. A candidate is a pure
+  // function of its world cell and every chunk recomputes the 2-cell ring around itself in
+  // the same (gz, gx) order, so a pair straddling a chunk border is rejected in both
+  // chunks and the spacing holds across the whole map, not just inside one chunk.
+  // Ring has to cover the largest rejection radius (SPEC_ISOLATION), not just the crown
+  // spacing, or a specimen and its neighbour straddling two chunks disagree about which
+  // one of them is too close and the cluster survives on the verge.
+  const ring = Math.ceil((SPEC_ISOLATION + 4) / TREE_GRID);
+  const gFrom = Math.floor((x0 - ring * TREE_GRID) / TREE_GRID);
+  const gTo = Math.floor((x0 + CHUNK + ring * TREE_GRID) / TREE_GRID);
+  const bFrom = Math.floor((z0 - ring * TREE_GRID) / TREE_GRID);
+  const bTo = Math.floor((z0 + CHUNK + ring * TREE_GRID) / TREE_GRID);
+  for (let gz = bFrom; gz <= bTo; gz++) {
+    for (let gx = gFrom; gx <= gTo; gx++) {
+      const c = treeCandidate(gx, gz, x0, z0, stage);
+      if (!c) continue;
+      let clear = true;
+      // A verge specimen is judged against EVERY other trunk, not just crown spacing:
+      // inside the 8 m verge band a tree is only allowed as an isolated singleton.
+      const specimen = c.specimen || 0;
+      for (const q of accepted) {
+        const need = (specimen || q.specimen)
+          ? Math.max(SPEC_ISOLATION, treeSpacingFor(c.prop, c.scale, q.prop, q.scale))
+          : treeSpacingFor(c.prop, c.scale, q.prop, q.scale);
+        if (Math.hypot(c.x - q.x, c.z - q.z) < need) { clear = false; break; }
+      }
+      if (!clear) continue;
+      accepted.push(c);
+      if (c.inChunk) out2.push(c);
     }
   }
-  // Spend the cap on a stride over the whole chunk, not on the first cells the scan
-  // reached: the old `break` parked a full stand in the low-lz half of every chunk, so
-  // the props arrived in blocks that lined up across chunk borders.
-  if (cands.length <= TREE_CAP) out.push(...cands);
-  else {
-    const step = cands.length / TREE_CAP;
-    for (let k = 0; k < TREE_CAP; k++) out.push(cands[Math.floor(k * step)]);
-  }
+  // Density varies along the route (ROUTE_CELL hash) and inside each grove, so a stage
+  // alternates dense woodland with open stands and bare clearings instead of one even wall.
+  out.push(...out2);
 
   // ---- spectators: groups beside the road ----
   const samples = stage.carveIndex.get(chunkKey(cx, cz)) || null;
@@ -272,8 +287,11 @@ export function generateChunkProps(cx, cz, stage) {
       let pz = road.z[i] + road.nz[i] * off * side + road.tz[i] * along;
       const kind = hash01(i, 13, FERN_SALT ^ seed) < 0.55 ? PROP.FERN : PROP.BUSH;
       // A few deliberately tall tufts (bracken over the verge) instead of one height.
-      const tall = hash01(i, 21, BUSH_SALT ^ (seed + 3)) > 0.74 ? 0.55 : 0;
-      const bScale = 0.85 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.55 + tall;
+      // Three tuft heights, not two: bracken over the verge, a middling bush and a low
+      // clump, so the verge line has a broken silhouette instead of one hedge height.
+      const tierHash = hash01(i, 21, BUSH_SALT ^ (seed + 3));
+      const tall = tierHash > 0.78 ? 0.60 : tierHash > 0.52 ? 0.24 : 0;
+      const bScale = 0.78 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.55 + tall;
       // Same veto as the trees: the sample normal is exact on a straight but folds on a
       // hairpin, and these are the props that ended up on the carriageway at the start.
       const bfit = resolveOffRoad(road, px, pz, propFootprint(kind, bScale) + PROP_CORRIDOR_MARGIN);
@@ -291,6 +309,71 @@ export function generateChunkProps(cx, cz, stage) {
   }
 
   return out;
+}
+
+/**
+ * One jittered-grid tree candidate, or null. Rejects: the road corridor (hard band, then
+ * the 8 m tree-free verge except for the odd lone specimen), the clearing / grove field,
+ * the route-density field, the reach limit, paved ground and steep slopes. Pure function
+ * of (gx, gz, stage), which is what makes the cross-chunk spacing filter sound.
+ */
+function treeCandidate(gx, gz, x0, z0, stage) {
+  const { road, terrain } = stage;
+  const seed = stage.seed >>> 0;
+  const jx = (hash01(gx, gz, GRID_SALT ^ seed) - 0.5) * (TREE_JITTER * 2);
+  const jz = (hash01(gx, gz, GRID_SALT ^ (seed + 23)) - 0.5) * (TREE_JITTER * 2);
+  let wx = gx * TREE_GRID + TREE_GRID * 0.5 + jx;
+  let wz = gz * TREE_GRID + TREE_GRID * 0.5 + jz;
+  let i = road.nearest(wx, wz);
+  if (i < 0) return null;
+  const edge = road.width[i] / 2 + SHOULDER;
+  let toEdge = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i]) - edge;
+  if (toEdge < TREE_CORRIDOR_HARD) return null;
+  const grove = hash01(Math.floor(wx / GROVE_CELL), Math.floor(wz / GROVE_CELL), CLUSTER_SALT ^ seed);
+  const route = hash01(Math.floor(road.s[i] / ROUTE_CELL), 7, ROUTE_SALT ^ seed);
+  const h = hash01(gx, gz, GRID_SALT ^ (seed + 61));
+  // a clearing: the grove drops out entirely on the open stretches
+  if (grove < 0.10 + 0.10 * (1 - route)) return null;
+  const species = pickSpecies(grove * 0.6 + h * 0.4, stage.biome);
+  const scale = (species === PROP.PINE ? 0.72 : 0.60)
+    + hash01(gx, gz, GRID_SALT ^ (seed + 7)) * (species === PROP.DEAD ? 1.00 : 1.08);
+  const reach = 60 + 58 * grove * grove;
+  let odds;
+  if (toEdge < TREE_FREE) {
+    // the odd lone specimen standing on the verge: a separate hash, so the specimen
+    // lottery does not cancel the acceptance odds below
+    if (hash01(gx, gz, GRID_SALT ^ (seed + 101)) < 0.88) return null;
+    odds = 0.34;
+  }
+  else if (toEdge <= TREE_FULL) {
+    odds = ((toEdge - TREE_FREE) / (TREE_FULL - TREE_FREE)) * (0.85 + 0.40 * route);
+  } else if (toEdge <= reach) {
+    const open = 1 - (toEdge - TREE_FULL) / (reach - TREE_FULL);
+    odds = (0.55 + 0.45 * route) * (0.42 + 0.58 * open) * (0.58 + 0.50 * grove);
+  } else odds = 0;
+  if (h > odds) return null;
+  // Corridor veto: pushed out past carriageway + shoulder + margin, never dropped, then
+  // re-checked against the hard band after the push.
+  const fit = resolveOffRoad(road, wx, wz, propFootprint(species, scale) + PROP_CORRIDOR_MARGIN);
+  if (!fit) return null;
+  wx = fit.x; wz = fit.z;
+  i = road.nearest(wx, wz);
+  toEdge = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i])
+    - (road.width[i] / 2 + SHOULDER);
+  if (toEdge < TREE_CORRIDOR_HARD) return null;
+  const pcx = Math.floor(wx), pcz = Math.floor(wz);
+  const surf = worldSurface(stage, pcx, pcz);
+  if (surf === SURF.ASPHALT || surf === SURF.ICE) return null;
+  if (terrain.slopeAt(wx, wz) > 0.75) return null;
+  const carved = stage.world ? stage.world.columnTopAt(pcx, pcz) : -1;
+  const y = carved >= 0 ? carved : terrain.heightAt(wx, wz);
+  return {
+    prop: species, x: wx, y, z: wz,
+    yaw: hash01(gx, gz, GRID_SALT ^ (seed + 13)) * Math.PI * 2, scale,
+    variant: Math.floor(hash01(gx, gz, GRID_SALT ^ (seed + 29)) * 3),
+    specimen: toEdge < TREE_FREE ? 1 : 0,
+    inChunk: pcx >= x0 && pcx < x0 + CHUNK && pcz >= z0 && pcz < z0 + CHUNK,
+  };
 }
 
 /**
@@ -315,6 +398,15 @@ export function buildFoliageTextures(THREE) {
     const col = i % ATLAS.cols, row = Math.floor(i / ATLAS.cols);
     ctx.drawImage(tmp, col * TEX_PX, row * TEX_PX);
   }
+  // far band: canopy mass at FAR_SPRITE_PX in the lower half of the same canvas
+  tmp.width = FAR_SPRITE_PX; tmp.height = FAR_SPRITE_PX;
+  for (let i = 0; i < FAR_SPRITE_CELLS.length; i++) {
+    const img = tctx.createImageData(FAR_SPRITE_PX, FAR_SPRITE_PX);
+    paintFarCanopy(FAR_SPRITE_CELLS[i], img.data, FAR_SPRITE_PX);
+    tctx.putImageData(img, 0, 0);
+    const col = i % FAR_ATLAS.cols, row = Math.floor(i / FAR_ATLAS.cols);
+    ctx.drawImage(tmp, FAR_ATLAS.x0 + col * FAR_SPRITE_PX, FAR_ATLAS.y0 + row * FAR_SPRITE_PX);
+  }
   const tex = new THREE.CanvasTexture(cv);
   tex.magFilter = THREE.NearestFilter;
   tex.minFilter = THREE.NearestFilter;
@@ -333,8 +425,9 @@ function ph(x, y, s) {
 }
 
 function px(data, x, y, r, g, b, a) {
-  if (x < 0 || y < 0 || x >= TEX_PX || y >= TEX_PX) return;
-  const k = (y * TEX_PX + x) * 4;
+  const n = Math.round(Math.sqrt(data.length / 4));
+  if (x < 0 || y < 0 || x >= n || y >= n) return;
+  const k = (y * n + x) * 4;
   data[k] = r; data[k + 1] = g; data[k + 2] = b; data[k + 3] = a;
 }
 
@@ -471,6 +564,118 @@ function paintFoliage(kind, data) {
 // A bare snag: no leaf mass, so the whole silhouette comes from the trunk and the
 // broken limbs (palette and trunk widths are the near voxel snag's, so the sprite and
 // the near build read as the same tree). Unchanged from the last pass.
+/** Paint one atlas cell headless (Uint8ClampedArray), at the near or the far size. */
+export function paintFoliageCell(kind, px = TEX_PX) {
+  const d = new Uint8ClampedArray(px * px * 4);
+  if (px > TEX_PX) paintFarCanopy(kind, d, px); else paintFoliage(kind, d);
+  return d;
+}
+
+/** How a painted cell splits: opaque coverage of the cell, how much of that mass is
+ *  canopy (upper part of the cell) and how much is bark in the lower third. A far cell
+ *  that is mostly trunk is the bug this measures. */
+export function foliageCellStats(d, n) {
+  const barkRow = Math.floor(n * 0.62);
+  let opaque = 0, canopy = 0, bark = 0;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const k = (y * n + x) * 4;
+    if (d[k + 3] <= 127) continue;
+    opaque++;
+    if (y < barkRow) canopy++;
+    else if (d[k + 1] < d[k]) bark++;              // g < r: brown bark, not leaf
+  }
+  const t = Math.max(1, opaque);
+  return { coverage: opaque / (n * n), canopyShare: canopy / t, barkShare: bark / t };
+}
+
+/** Far billboard cell: a dense clustered crown in the species tones, the trunk only in
+ *  the lower third, and a dithered base so the quad does not end in a hard cut-out edge.
+ *  The silhouette is filled - no daylight inside the crown, because at 150..400 m a
+ *  see-through crown reads as a stick. */
+function paintFarCanopy(kind, data, N) {
+  data.fill(0);
+  const T = SPR_TONES[kind] || SPR_TONES[SPR.OAK];
+  const mid = N * 0.5;
+  const blob = (x, y, s) => 0.62 * ph(x >> 1, y >> 1, s) + 0.38 * ph(x, y, s + 3);
+  const leaf = (x, y, s) => {
+    const v = blob(x, y, s);
+    const g = 1 - 0.50 * (y / (N - 1));
+    const c = (g < 0.50 || v < 0.20) ? T.shadow : (v > 0.58 && g > 0.58) ? T.sun
+      : (v > 0.38 && g > 0.72) ? T.sun : T.mid;
+    const tip = y <= N * 0.16 && ph(x, y, s + 23) > 0.60;
+    const cc = tip ? T.rim : c;
+    const t = 0.60 + 0.40 * g;
+    px(data, x, y, Math.min(255, cc[0] * t + (tip ? 8 : 0)), Math.min(255, cc[1] * t),
+      Math.min(255, cc[2] * t * 0.96), 255);
+  };
+  const wood = (x, y, c, s) => {
+    if (ph(x, y >> 2, s) < 0.06) return;
+    const t = 0.60 + 0.44 * ph(x, y >> 2, s + 7);
+    px(data, x, y, c[0] * t, c[1] * t * 0.97, c[2] * t * 0.92, 255);
+  };
+  const conifer = kind === SPR.PINE;
+  const snag = kind === SPR.DEAD;
+  const crownTop = Math.round(N * 0.04);
+  const crownBot = Math.round(N * (conifer ? 0.72 : 0.66));
+  const wide = snag ? 0.22 : conifer ? 0.30 : 0.34;
+  // 1) the envelope, filled solid: conifer cone, broadleaf lobed ellipse
+  for (let y = crownTop; y <= crownBot; y++) {
+    const u = (y - crownTop) / Math.max(1, crownBot - crownTop);
+    let half;
+    if (conifer || snag) half = wide * N * Math.pow(u, snag ? 0.9 : 1.25) + N * 0.03;
+    else half = wide * N * Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.40) / 0.64, 2)));
+    const h = Math.round(half);
+    for (let x = Math.round(mid - h); x <= Math.round(mid + h); x++) leaf(x, y, 5);
+  }
+  // 2) cluster lumps over the outline: a crown is a crowd of bunches, and the lumps
+  //    bulge past the envelope so the silhouette is ragged rather than a curve
+  const lumps = snag ? 7 : 15;
+  for (let k = 0; k < lumps; k++) {
+    const u = 0.10 + ph(k, 5, 73) * 0.86;
+    const env = (conifer || snag)
+      ? wide * N * Math.pow(u, snag ? 0.9 : 1.25) + N * 0.03
+      : wide * N * Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.40) / 0.64, 2)));
+    const side = ph(k, 9, 79) < 0.5 ? -1 : 1;
+    const cx1 = mid + side * env * (0.45 + ph(k, 11, 83) * 0.62);
+    const cy1 = crownTop + u * (crownBot - crownTop);
+    const r = N * (0.07 + ph(k, 13, 89) * (snag ? 0.05 : 0.09));
+    for (let y = Math.round(cy1 - r); y <= Math.round(cy1 + r); y++) {
+      const dy = (y - cy1) / Math.max(1, r);
+      const h = Math.round(r * Math.sqrt(Math.max(0, 1 - dy * dy)));
+      for (let x = Math.round(cx1 - h); x <= Math.round(cx1 + h); x++) {
+        if (snag && ph(x, y, k + 91) < 0.45) continue;      // snags stay open-worked
+        leaf(x, y, k);
+      }
+    }
+  }
+  // 3) trunk: lower third only, plus a base flare. The trunk never runs up the cell.
+  const trunkTop = Math.round(N * 0.66);
+  const tw = Math.max(1, Math.round(N * (snag ? 0.055 : 0.042)));
+  for (let y = snag ? Math.round(N * 0.18) : trunkTop; y < N; y++) {
+    const flare = y > N - 5 ? 1 : 0;
+    for (let dx = -(tw + flare); dx <= tw + flare; dx++) wood(Math.round(mid + dx), y, T.bark, 23);
+  }
+  if (snag) for (let k = 0; k < 5; k++) {                          // snag limbs
+    const y0 = Math.round(N * (0.20 + ph(k, 17, 97) * 0.5));
+    const sd = k % 2 ? 1 : -1;
+    for (let i = 1; i <= Math.round(N * 0.16); i++) wood(Math.round(mid + sd * i), y0 - i, T.bark, 29);
+  }
+  // 4) soft base: the last rows dither out, so the quad meets the ground as grass and
+  //    not as a cut-out card.
+  for (let y = N - 4; y < N; y++) {
+    const keep = 1.0 - (y - (N - 4)) * 0.26;
+    for (let x = 0; x < N; x++) {
+      if (ph(x, y, 111) > keep) { const k4 = (y * N + x) * 4; data[k4 + 3] = 0; }
+    }
+  }
+  if (kind === SPR.FERN || kind === SPR.BUSH) {                   // low clumps, no trunk
+    for (let y = Math.round(N * 0.62); y < N - 3; y++) {
+      const h = Math.round(N * 0.30 * Math.sqrt(Math.max(0, 1 - Math.pow((y - N * 0.9) / (N * 0.34), 2))));
+      for (let x = Math.round(mid - h); x <= Math.round(mid + h); x++) leaf(x, y, 7);
+    }
+  }
+}
+
 function paintSnag(data) {
   const pale = [106, 88, 67], mid = [91, 76, 57], dark = [76, 63, 46];
   const wood = (x, y, c, s) => {
@@ -693,8 +898,10 @@ export function buildBillboardGeometries(THREE) {
   const geos = {};
   for (const prop of SPRITE_PROPS) {
     const sp = SPRITE_SPEC[prop];
-    const wd = sp.w * 1.18, ht = sp.h * 1.02;
-    const [u0, v0, u1, v1] = atlasRect(SPRITE_PROPS.indexOf(prop));
+    // Crown mass comes from the 48x48 far cell, so the quad can be a touch wider: same
+    // 2 triangles, more canopy on screen at 150..400 m.
+    const wd = sp.w * 1.26, ht = sp.h * 1.04;
+    const [u0, v0, u1, v1] = farAtlasRect(SPRITE_PROPS.indexOf(prop));
     const pos = [], uv = [], nrm = [], idx = [];
     pos.push(-wd / 2, 0, 0, wd / 2, 0, 0, wd / 2, ht, 0, -wd / 2, ht, 0);
     uv.push(u0, v0, u1, v0, u1, v1, u0, v1);
