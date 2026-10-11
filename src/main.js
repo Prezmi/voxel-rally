@@ -18,6 +18,7 @@ import { StageRun, planGates, STATE } from './game/stage.js';
 import { RallyHud } from './game/hud-rally.js';
 import { solveGhost } from './game/ghost.js';
 import { buildPaceNotes } from './game/pace-notes.js';
+import { t } from './core/i18n.js';
 import { Voice } from './game/voice.js';
 import { bus } from './core/events.js';
 import { DirtSystem } from './dirt/dirt.js';
@@ -156,7 +157,10 @@ async function generateStage(cfg, hud) {
   return { seed: cfg.seed, biome: cfg.biome, world, terrain, road, gates, carveIndex, roadLength: road.length };
 }
 
-const STAGE_LABEL = { FOREST: 'Leśny', MOUNTAIN: 'Górski', SWAMP: 'Bagno', PLATEAU: 'Wyżyna', CANYON: 'Wąwóz' };
+// Stage names go through the translation layer (src/core/i18n.js): English default,
+// Polish one tap away. Resolved per call, so a LANGUAGE switch re-labels the menu and
+// the stage title on the next boot; an unknown biome falls back to its raw id.
+const stageLabel = (b) => { const k = 'stage.' + String(b).toLowerCase(); const s = t(k); return s === k ? String(b) : s; };
 
 async function main() {
   const hud = new Hud();
@@ -188,16 +192,16 @@ async function main() {
   // Showroom: the world is never streamed, so it is never loaded or generated either.
   const cached = cfg.showroom ? null : await loadStageCache(stage.world, cfg.seed, cfg.biome);
   hud.boot(cached
-    ? `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\nładowanie zapisanego etapu…\n${(cached.bytes / 1e6).toFixed(1)} MB · ${cached.chunks} chunków`
-    : `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\ngenerowanie całego etapu…`);
+    ? `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n${t('boot.cached')}\n${(cached.bytes / 1e6).toFixed(1)} ${t('boot.megabytes')} · ${cached.chunks} ${t('boot.chunks')}`
+    : `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n${t('boot.generate')}`);
   await nextFrame(cfg.shotBoot);
   const pre = cfg.showroom ? { chunks: 0, filled: 0, carved: 0, props: 0, tiles: 0 }
     : await pregenerateStage(stream, settings.drawDistance, {
     yieldFn: () => nextFrame(cfg.shotBoot),
     onProgress: (p, done, total) => hud.boot(
       `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n`
-      + `${cached ? 'wczytywanie' : 'generowanie'} etapu: ${Math.round(p * 100)}%\n`
-      + `${done} / ${total} chunków`,
+      + t(cached ? 'boot.cachedPct' : 'boot.generatePct', Math.round(p * 100)) + '\n'
+      + `${done} / ${total} ${t('boot.chunks')}`,
     ),
   });
   const loadS = (performance.now() - loadT0) / 1000;
@@ -249,8 +253,8 @@ async function main() {
   // Pace notes from geometry + the ghost speed the note is timed against (docs/07 F4).
   const notes = buildPaceNotes(stage.road, ghost);
   const voice = new Voice({ notes: notes.notes, emit: bus });
-  const stageName = `ODCINEK ${cfg.biome === 'FOREST' ? 'LEŚNY' : cfg.biome} · SZUTER · ${cfg.seed}`;
-  const rally = new RallyHud(document, { bus, stages: BIOMES.map((b) => ({ key: b, label: STAGE_LABEL[b] || b })) });
+  const stageName = `${t('hud.stage')} ${stageLabel(cfg.biome).toUpperCase()} · ${t('hud.gravel')} · ${cfg.seed}`;
+  const rally = new RallyHud(document, { bus, stages: BIOMES.map((b) => ({ key: b, label: stageLabel(b) })) });
   rally.stageIdx = Math.max(0, BIOMES.indexOf(cfg.biome));
   function restartRun() {
     // Rolled over: RESET rights the car where it lies instead of re-placing it at the
@@ -293,7 +297,7 @@ async function main() {
       // it is live; saveSettings() writes it explicitly so no stored payload can ever
       // hold it implicitly again.
       settings.invertSteer = !settings.invertSteer;
-      hud.boot(`kierownica: ${settings.invertSteer ? 'odwrotna' : 'normalna'}`);
+      hud.boot(t('toast.steer', t(settings.invertSteer ? 'val.steerInvert' : 'val.steerNormal')));
       setTimeout(() => hud.boot(null), 1800);
     } else if (it.act === 'cycle:drawDistance') {
       // 400 -> 700 -> 1000 -> 1600 -> wrap. setQuality() re-derives fog (from the new
@@ -468,13 +472,13 @@ async function main() {
     else if (code === 'KeyN') {
       // Gęstość HUD-u jak w opcjach CMR: pełny -> minimalny -> wyłączony (PLAN §10).
       const m = rally.cycleMode();
-      hud.boot(`HUD: ${{ FULL: 'pełny', MINIMAL: 'minimalny', OFF: 'wyłączony' }[m]}`);
+      hud.boot(t('toast.hud', t({ FULL: 'val.hudFull', MINIMAL: 'val.hudMinimal', OFF: 'val.hudOff' }[m])));
       setTimeout(() => hud.boot(null), 1600);
     }
     // M = pilot w/l (the co-driver channel, docs/05 §7).
     else if (code === 'KeyM') {
       voice.muted = !voice.muted;
-      hud.boot(voice.muted ? 'pilot wyciszony' : 'pilot: notatki na żywo');
+      hud.boot(t(voice.muted ? 'toast.notesOff' : 'toast.notesOn'));
       setTimeout(() => hud.boot(null), 1800);
     }
     else if (code === 'Tab') rally.moveFocus(1);
@@ -485,7 +489,7 @@ async function main() {
     else if (code === 'KeyE') input.tapShift(1);
     else if (code === 'KeyT') { hud.boot('tests: run `node src/debug/tests.js` in the project shell'); setTimeout(() => hud.boot(null), 2500); }
     // Brud: X = mycie auta, V = wycieraczka (docs/04 §4.2 "czyszczenie").
-    else if (code === 'KeyX') { dirt.washFull(1); hud.boot('auto umyte — guma na oponach zostaje'); setTimeout(() => hud.boot(null), 2000); }
+    else if (code === 'KeyX') { dirt.washFull(1); hud.boot(t('toast.wash')); setTimeout(() => hud.boot(null), 2000); }
     else if (code === 'KeyV') dirt.wipeLens();
     // Particle FX (src/fx) has no key: P above is the menu/pause key, and the FX branch
     // that used to sit here was a second `KeyP` in the same if-chain, i.e. dead code that
@@ -495,7 +499,7 @@ async function main() {
     else if (code === 'KeyL') {
       settings.lensDirt = settings.lensDirt === 0.45 ? 0 : (settings.lensDirt === 0 ? 1 : 0.45);
       dirt.lens.setAmount(settings.lensDirt);
-      hud.boot(`obiektyw: ${settings.lensDirt === 0 ? 'czysty' : settings.lensDirt === 1 ? 'pełny' : 'dyskretny'}`);
+      hud.boot(t('toast.lens', t(settings.lensDirt === 0 ? 'val.lensClean' : settings.lensDirt === 1 ? 'val.lensFull' : 'val.lensSoft')));
       setTimeout(() => hud.boot(null), 1800);
     }
     else if (code === 'KeyB') { dirt.rain(dirt.env.rain > 0 ? 0 : 0.7); }
@@ -623,7 +627,7 @@ async function main() {
     loop.time.paused = true;
   }
   if (cfg.frames > 0 && !cfg.perftest && !cfg.showroom) {
-    hud.boot(`tryb zrzutu: ${cfg.frames} kroków symulacji (1/120 s)\nnawierzchnia ${cfg.surfaceKey || cfg.biome}`);
+    hud.boot(`${t('toast.shot', cfg.frames)}\n${t('boot.surface')} ${cfg.surfaceKey || cfg.biome}`);
     const idle = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
     for (let i = 0; i < cfg.frames; i++) {
       car.setInput(pilot(i));

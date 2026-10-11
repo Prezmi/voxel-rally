@@ -13,6 +13,7 @@
 // are lifted above that band), and every offset carries an env(safe-area-*) term.
 import { drawText, textWidth } from './pixel-font.js';
 import { settings } from '../core/settings.js';
+import { t } from '../core/i18n.js';
 const MIN_HIT = 72;                 // px, WCAG 2.5.5 minimum target (tg-mini = exactly 72)
 
 export const STEER_DEADZONE = 0.08;  // 8 % of thumb travel is nothing (settings.deadzone)
@@ -141,25 +142,26 @@ function pixelLabel(host, spec, color) {
 }
 // The three utility pads are the 72 px minimum, so their words go at pixel scale 1:
 // a <button> clips its content, and 'KAMERA' at scale 2 (72 px) was cut to "AMER".
+// The words are i18n KEYS (src/core/i18n.js); pixelLabel gets them resolved at build.
 const LABELS = {
   throttle: { icon: 'up' }, brake: { icon: 'down' },
-  handbrake: { text: 'RĘCZNY' }, camera: { text: 'KAMERA', s: 1 }, restart: { text: 'RESET', s: 1 },
-  menu: { text: 'MENU', s: 1 },
+  handbrake: { text: 'touch.handbrake' }, camera: { text: 'touch.camera', s: 1 }, restart: { text: 'touch.restart', s: 1 },
+  menu: { text: 'touch.menu', s: 1 },
 };
 
-const TEMPLATE = `
+const TEMPLATE = () => `
 <div class="tg-box tg-steer" data-zone="skret">
   <div class="tg-track"><div class="tg-dz"></div><div class="tg-knob"></div></div>
 </div>
 <div class="tg-box tg-cluster">
-  <button class="tg-throttle" data-action="throttle" aria-label="Gaz"></button>
-  <button class="tg-brake" data-action="brake" aria-label="Hamulec"></button>
-  <button class="tg-hand" data-action="handbrake" aria-label="Hamulec ręczny"></button>
+  <button class="tg-throttle" data-action="throttle" aria-label="${t('touch.aGas')}"></button>
+  <button class="tg-brake" data-action="brake" aria-label="${t('touch.aBrake')}"></button>
+  <button class="tg-hand" data-action="handbrake" aria-label="${t('touch.aHand')}"></button>
 </div>
 <div class="tg-box tg-rail">
-  <button class="tg-mini tg-menu" data-action="menu" aria-label="Pauza i menu"></button>
-  <button class="tg-mini tg-camera" data-action="camera" aria-label="Zmień kamerę"></button>
-  <button class="tg-mini tg-restart" data-action="restart" aria-label="Restart odcinka"></button>
+  <button class="tg-mini tg-menu" data-action="menu" aria-label="${t('touch.aMenu')}"></button>
+  <button class="tg-mini tg-camera" data-action="camera" aria-label="${t('touch.aCam')}"></button>
+  <button class="tg-mini tg-restart" data-action="restart" aria-label="${t('touch.aRestart')}"></button>
 </div>
 `;
 
@@ -251,7 +253,7 @@ export function createTouchInput() {
       document.body.addEventListener('selectstart', swallowMenu, { passive: false });
       const root = document.createElement('div');
       root.id = 'touch-ui'; root.className = 'on';
-      root.innerHTML = TEMPLATE;
+      root.innerHTML = TEMPLATE();
       document.body.appendChild(root);
       this.root = root;
       // Labels are painted, not typeset: no system/mono font anywhere in the overlay.
@@ -262,9 +264,9 @@ export function createTouchInput() {
         btn.draggable = false; btn.setAttribute('unselectable', 'on');
         btn.addEventListener('contextmenu', (e) => e.preventDefault());
         const spec = LABELS[btn.dataset.action];
-        if (spec) pixelLabel(btn, spec, spec.icon ? '#1E1E1E' : '#1E1E1E');
+        if (spec) pixelLabel(btn, spec.text ? { ...spec, text: t(spec.text) } : spec, spec.icon ? '#1E1E1E' : '#1E1E1E');
       }
-      pixelLabel(root.querySelector('.tg-steer'), { text: 'SKRĘT' }, '#2A2118');
+      pixelLabel(root.querySelector('.tg-steer'), { text: t('touch.steer') }, '#2A2118');
       this._track = root.querySelector('.tg-track');
       this._knob = root.querySelector('.tg-knob');
       this.setHandedness(settings.touchHandedness);

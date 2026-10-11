@@ -26,6 +26,8 @@ import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings, qualityPreset, QUALITY, FAR_RADII, DRAW_DISTANCE_STEPS, cycleDrawDistance, cycleBloom, fogNearFor, fogFarFor } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
+import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguages, TEXT_BOXES } from '../core/i18n.js';
+import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
@@ -514,7 +516,19 @@ function testPaceNoteDisplay() {
       for (let j = Math.max(0, i - 6); j <= Math.min(road.n - 1, i + 6); j++) turn += road.kappa[j];
       if (Math.abs(turn) > 1e-3 && (turn > 0 ? 'R' : 'L') !== n.dir) dirMismatch++;
       const word = signWord(n);
-      if ((n.dir === 'L') !== word.includes('LEWO') || (n.dir === 'R') !== word.includes('PRAWO')) wordMismatch++;
+      // Asserted in BOTH languages (src/core/i18n.js): the board word always states the
+      // side of the bend, in Polish AND in the English call vocabulary.
+      let mismatch = 0;
+      for (const lang of ['pl', 'en']) {
+        setLang(lang);
+        const w = signWord(n);
+        const want = n.dir === 'L' ? tr('note.left') : tr('note.right');
+        const other = n.dir === 'L' ? tr('note.right') : tr('note.left');
+        if (!w.includes(want) || w.includes(other)) mismatch++;
+      }
+      setLang('en');
+      if (mismatch) wordMismatch++;
+      if (word.length === 0) wordMismatch++;
       const kind = bendKind(n.severity, n.hairpin, n.dir);
       if (!kind.endsWith(n.dir === 'L' ? 'Left' : 'Right')) glyphMismatch++;
     }
@@ -977,7 +991,17 @@ function testSteerSettingPersistence() {
   rally.focus = rally.rowIndex('screen:settings'); rally.activate();
   const rowIdx = rally.rowIndex('cycle:invertSteer');
   const labelOf = () => (rally._rows[rowIdx] ? rally._rows[rowIdx].label : '—');
-  const labelledNormal = rowIdx >= 0 && labelOf().includes('KIEROWNICA') && labelOf().includes('NORMALNA');
+  // The row is asserted in BOTH dictionaries: the label is rebuilt under each language,
+  // so neither the Polish wording nor the English one may go missing (src/core/i18n.js).
+  const labelIn = (lang) => {
+    setLang(lang); rally.refreshMenu();
+    const s = labelOf();
+    const ok = s.includes(tr('settings.steer'))
+      && s.includes(tr(settings.invertSteer ? 'val.steerInvert' : 'val.steerNormal'));
+    setLang('en'); rally.refreshMenu();
+    return ok;
+  };
+  const labelledNormal = rowIdx >= 0 && labelIn('en') && labelIn('pl');
   // Exactly what main.js activateMenu() does with the row the HUD hands back.
   const tapRow = (idx) => {
     rally.focus = idx;
@@ -988,10 +1012,10 @@ function testSteerSettingPersistence() {
   };
   settings.invertSteer = false;
   tapRow(rowIdx);
-  const toggledInvert = settings.invertSteer === true && labelOf().includes('ODWROTNA');
+  const toggledInvert = settings.invertSteer === true && labelIn('en') && labelIn('pl');
   const persisted = JSON.parse(store.store.get(SETTINGS_KEY)).invertSteer === true;
   tapRow(rowIdx);
-  const toggledBack = settings.invertSteer === false && labelOf().includes('NORMALNA');
+  const toggledBack = settings.invertSteer === false && labelIn('en') && labelIn('pl');
 
   // ---- 4. it reaches the car immediately (input.sample re-reads it) -----------
   const input = new Input();
@@ -1532,6 +1556,15 @@ function testFxSwitchIsReachableFromSettings() {
   rally.openScreen('settings');
   const idx = () => rally.rowIndex('toggle:fx');
   const labelOf = () => (rally._rows[idx()] ? rally._rows[idx()].label : '—');
+  // Rebuild the row under each language and match it against that language's own words,
+  // so the EFEKTY / Effects row is proven in both dictionaries (src/core/i18n.js).
+  const labelIn = (lang) => {
+    setLang(lang); rally.refreshMenu();
+    const s = labelOf();
+    const ok = s.includes(tr('settings.fx')) && s.includes(tr(settings.fx ? 'val.on' : 'val.off'));
+    setLang('en'); rally.refreshMenu();
+    return ok;
+  };
 
   const gaps = [];
   // Every screen, measured from a fresh boot (that is when the pool is its smallest):
@@ -1547,7 +1580,7 @@ function testFxSwitchIsReachableFromSettings() {
     if (focusable !== rows) gaps.push(`${name} focuses ${focusable} of ${rows} rows`);
   }
   settings.fx = true; rally.refreshMenu();
-  const labelled = idx() >= 0 && labelOf().includes('Efekty') && labelOf().includes('wł.');
+  const labelled = idx() >= 0 && labelIn('en') && labelIn('pl');
 
   // Exactly what main.js activateMenu() does with the row the HUD hands back.
   const tapRow = () => {
@@ -1562,10 +1595,10 @@ function testFxSwitchIsReachableFromSettings() {
     return it;
   };
   const rowAct = tapRow();
-  const flippedOff = settings.fx === false && fx.enabled === false && labelOf().includes('wył.');
+  const flippedOff = settings.fx === false && fx.enabled === false && labelIn('en') && labelIn('pl');
   const persisted = JSON.parse(store.store.get(SETTINGS_KEY)).fx === false;
   tapRow();
-  const flippedBack = settings.fx === true && fx.enabled === true && labelOf().includes('wł.');
+  const flippedBack = settings.fx === true && fx.enabled === true && labelIn('en') && labelIn('pl');
 
   // The flag is the whole switch: nothing is emitted while it is off. main.js re-arms
   // `fx.enabled` from settings.fx every rendered frame, so these two systems are what a
@@ -2201,7 +2234,8 @@ function testShowroomRoute() {
     && route.simFrozen && !route.streamWorld && !route.props && !route.pregen && !route.stageCache
     && route.hudMode === 'OFF'
     && near(side.dist, dSide) && near(rear.dist, dRear) && near(tq.dist, d3q)
-    && side.pos.z === dSide && side.pos.x === 0 && near(side.pos.y, 0.90)
+    && side.pos.z === dSide && side.pos.x === 0 && side.look.x === 0 && side.look.z === 0
+    && side.pos.y === (bbox.min.y + bbox.max.y) / 2 && side.look.y === side.pos.y   // side elevation: camera level with the car centre, zero vertical offset, on the car's lateral axis (x = cx, no tilt)
     && rear.pos.x === -dRear && near(rear.pos.y, 0.90)
     && near(tq.pos.x, d3q * 0.62) && near(tq.pos.z, d3q * 0.72) && near(tq.pos.y, 0.90 + d3q * 0.16)
     && near(tq.look.y, 4.2 * 0.30)   // aim = zmin + size*0.30, size = the max extent
@@ -2272,6 +2306,137 @@ function testRoundelClearsWheelsArchesGlass() {
     `archVerts=${archVerts} archMaskedBad=${archBad} glassUvInRect=${glassUvBad} rectsOutsideDoorWindow=${outside} | roundel ${diam.toFixed(3)}x${diamY.toFixed(3)} m (want ~0.35) bandTop y=${bandYTop.toFixed(3)} < glassY=${glassY.toFixed(3)} | wheelEdge x=${wheelEdge.toFixed(2)} sill=${sillTop.toFixed(2)} belt=${belt.toFixed(2)} | rects ${rects.map((r) => `${r[0]} x[${r[1].toFixed(2)}..${r[2].toFixed(2)}] y[${r[3].toFixed(2)}..${r[4].toFixed(2)}]`).join(' ')} | flank u[${FLANK_UV.u0}..${(FLANK_UV.u0 + FLANK_UV.uSpan).toFixed(2)}] mu=${M.mu.toFixed(5)}`);
 }
 testRoundelClearsWheelsArchesGlass();
+
+// ---------------------------------------------------------------------------
+// T39 i18n (src/core/i18n.js): English is the default and Polish the selectable option.
+// Walks the whole dictionary: both languages must define the same keys with non-empty
+// strings, no English label may be wider than the pixel box it is drawn into (measured
+// with the game's own font metrics at 1600x900 / 390x844 / 844x390, modal rows against
+// the real drawn row rect), and the LANGUAGE row must re-render the menu and the HUD
+// labels on the spot and persist settings.language.
+function testI18nDictionaryCoversEveryLabel() {
+  const gaps = [];
+  const wasLang = getLang(), wasSetting = settings.language, wasFx = settings.fx;
+  if (getLang() !== 'en') gaps.push(`default language is ${getLang()}, want en`);
+
+  // ---- 1. the two dictionaries carry the same keys, both non-empty --------------
+  const en = i18nTable('en'), pl = i18nTable('pl');
+  const keysEn = Object.keys(en), keysPl = Object.keys(pl);
+  for (const k of keysEn) if (!(k in pl)) gaps.push(`pl missing ${k}`);
+  for (const k of keysPl) if (!(k in en)) gaps.push(`en missing ${k}`);
+  for (const k of keysEn) {
+    if (typeof en[k] !== 'string' || !en[k].trim()) gaps.push(`en ${k} empty`);
+    if (typeof pl[k] !== 'string' || !pl[k].trim()) gaps.push(`pl ${k} empty`);
+    if (en[k] === k || pl[k] === k) gaps.push(`${k} resolves to its own key`);
+  }
+  setLang('de');
+  const fallback = tr('hud.engine');
+  if (fallback !== 'ENGINE') gaps.push(`unknown language does not fall back to English (${fallback})`);
+  if (tr('nope.not.a.key') !== 'nope.not.a.key') gaps.push('a missing key does not fall back to itself');
+  setLang('en');
+
+  // ---- 2. every fixed-size HUD / pad label fits its box in both languages ------
+  const boxCount = Object.keys(TEXT_BOXES).length;
+  for (const key of Object.keys(TEXT_BOXES)) {
+    const [boxW, scale] = TEXT_BOXES[key];
+    for (const lang of i18nLanguages()) {
+      setLang(lang);
+      const w = textWidth(tr(key), scale);
+      if (w > boxW) gaps.push(`${key}/${lang} "${tr(key)}" ${w}px > ${boxW}px box`);
+    }
+  }
+  setLang('en');
+
+  // ---- 3. modal rows at three viewports: each label inside the drawn row rect --
+  const sizes = [[1600, 900], [390, 844], [844, 390]];
+  globalThis.window = { innerWidth: sizes[0][0], innerHeight: sizes[0][1], addEventListener() {} };
+  const doc = new (class extends MenuStubDoc {
+    createElement(tag) {
+      const el = super.createElement(tag);
+      if (tag === 'canvas') el.getContext = () => new Proxy({}, {
+        get: (p, k) => (k in p ? p[k] : () => {}), set: (p, k, v) => { p[k] = v; return true; },
+      });
+      return el;
+    }
+  })();
+  let rowsChecked = 0;
+  for (const lang of ['en', 'pl']) {
+    for (const [w, h] of sizes) {
+      globalThis.window.innerWidth = w; globalThis.window.innerHeight = h;
+      setLang(lang);
+      const hud = new RallyHud(doc, { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+      hud.openMenu();
+      for (const screen of ['menu', 'settings', 'controls']) {
+        hud.openScreen(screen);
+        hud._drawModal({});
+        const TS = (hud.uiScale || 1) >= 2 ? 1 : 2;
+        for (let i = 0; i < hud._rows.length; i++) {
+          const rect = hud._menuRect[i];
+          rowsChecked++;
+          if (!rect || !rect[2]) { gaps.push(`${lang} ${w}x${h} ${screen} row ${i} has no drawn rect`); continue; }
+          const tw = textWidth(hud._rows[i].label, TS);
+          if (tw > rect[2] - 6) gaps.push(`${lang} ${w}x${h} ${screen} "${hud._rows[i].label}" ${tw}px > ${rect[2] - 6}px row`);
+        }
+      }
+    }
+  }
+  setLang('en');
+
+  // ---- 4. the LANGUAGE row re-renders menu + HUD labels, and persists ---------
+  const menu = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  menu.openMenu(); menu.openScreen('settings');
+  const langRow = menu.rowIndex('cycle:language');
+  if (langRow < 0) gaps.push('the settings screen has no cycle:language row');
+  const enRows = menu._rows.map((r) => r.label).join('|');
+  if (!enRows.includes('Draw distance') || !enRows.includes('Language')) gaps.push(`menu is not English (${enRows.slice(0, 60)})`);
+  settings.fx = true;
+  menu.focus = langRow;
+  const acted = menu.activate();
+  const plRows = menu._rows.map((r) => r.label).join('|');
+  const switched = getLang() === 'pl' && settings.language === 'pl';
+  if (!acted || acted.act !== 'cycle:language') gaps.push('the row did not come back for main.js to save');
+  if (!switched) gaps.push(`the row did not switch language (lang=${getLang()} setting=${settings.language})`);
+  if (!plRows.includes('Zasięg rysowania') || !plRows.includes('Język')) gaps.push(`menu did not re-render in Polish (${plRows.slice(0, 60)})`);
+  const store = (() => { const m = new Map(); return {
+    store: m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v), removeItem: (k) => m.delete(k),
+  }; })();
+  saveSettings(settings, store);
+  const persisted = JSON.parse(store.store.get(SETTINGS_KEY)).language === 'pl';
+  if (!persisted) gaps.push('settings.language is not persisted');
+  menu.focus = langRow; menu.activate();
+  const backEn = getLang() === 'en' && settings.language === 'en'
+    && menu._rows.map((r) => r.label).join('|').includes('Draw distance');
+  if (!backEn) gaps.push('the row did not switch back to English');
+
+  // HUD labels: the wheel-condition strip re-labels on the same pass it is switched on.
+  const SEED = 99, LEN = 900;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: LEN, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const run = new StageRun({ road, gates: planGates(road, SEED), seed: SEED, refTime: 90 });
+  const wheelStub = () => ({ alpha: 0, kappa: 0, N: 20000, slipEnergy: 0, airborneFrames: 0 });
+  const car = { body: { pos: { x: road.x[12], z: road.z[12] }, groundSpeed: 14 }, wheels: [wheelStub(), wheelStub(), wheelStub(), wheelStub()] };
+  const hudCtx = { car, stage: run, notes: [], stageName: 'STAGE 99' };
+  globalThis.window.innerWidth = 1600; globalThis.window.innerHeight = 900;
+  const hud = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  hud._drawWheels(hudCtx);
+  setLang('en'); hud._drawWheels(hudCtx);
+  const wheelEn = hud.gauges[0].val.textContent;
+  setLang('pl'); hud._drawWheels(hudCtx);
+  const wheelPl = hud.gauges[0].val.textContent;
+  setLang('en'); hud._drawWheels(hudCtx);
+  if (!wheelEn.includes('GRIP') || !wheelPl.includes('CZEPNE') || wheelEn === wheelPl) {
+    gaps.push(`HUD wheel strip does not re-label (${wheelEn} / ${wheelPl})`);
+  }
+  setLang('en'); settings.language = 'en';
+  delete globalThis.window;
+  settings.fx = wasFx; setLang(wasLang); settings.language = wasSetting;
+
+  check('T39 the i18n dictionary is complete in both languages, every label fits its pixel box at 1600x900 / 390x844 / 844x390, and the LANGUAGE row re-renders menu + HUD and persists',
+    gaps.length === 0 && keysEn.length >= 90 && keysEn.length === keysPl.length && boxCount >= 20 && rowsChecked >= 120,
+    `keys en=${keysEn.length} pl=${keysPl.length} boxes=${boxCount} rowsChecked=${rowsChecked} languageRow=${langRow} `
+    + `switched=${switched} persisted=${persisted} wheelEn="${wheelEn}" wheelPl="${wheelPl}" | gaps=[${gaps.join(' ')}]`);
+}
+testI18nDictionaryCoversEveryLabel();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

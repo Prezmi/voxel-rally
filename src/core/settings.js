@@ -66,6 +66,9 @@ export const settings = {
 
   // HUD (PLAN.md §10: CMR "Game Displays: Full / Minimal / Off")
   hudMode: 'FULL',             // FULL | MINIMAL | OFF, cycled with N
+  // Build language (src/core/i18n.js): 'en' default, 'pl' selectable on the Ustawienia
+  // screen. Persisted like every other preference, applied by the HUD at boot.
+  language: 'en',
   showCoDriverArrows: true,    // CMR options: co-driver arrows On/Off
   // Nakładka sterowania dotykowego (skills/game-ui-ux #7): 'auto' = pokaż przy
   // coarse pointerze / ?touch=on, 'on' | 'off' ustawia menu USTAWIENIA.
@@ -110,7 +113,8 @@ export const LEGACY_SETTINGS_KEY = 'mc-rally.v1';   // the untagged docs/06 §2 
 
 const PERSISTED_KEYS = ['quality', 'shadows', 'post', 'bloom', 'grade', 'drawDistance', 'farDetail', 'vegFarDistance', 'blockTiles', 'fx', 'difficulty',
   'assists', 'keyboardAsPad', 'deadzone', 'invertSteer', 'cameraMode', 'hudMode',
-  'showCoDriverArrows', 'touchOverlay', 'touchHandedness', 'lensDirt', 'audioEnabled', 'masterGain'];
+  'showCoDriverArrows', 'touchOverlay', 'touchHandedness', 'lensDirt', 'audioEnabled', 'masterGain',
+  'language'];
 const DEFAULTS = (() => {
   const d = {};
   for (const k of PERSISTED_KEYS) d[k] = settings[k];

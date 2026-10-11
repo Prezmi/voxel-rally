@@ -155,15 +155,28 @@ export function drawSignBoard(ctx, x, y, spec) {
 
 const GRAIN = [[6, 0], [12, 3], [19, 5], [26, 1]];
 
-/** Polish word for a note: LEWO / PRAWO / OSTRO LEWO / SZYBKI PRAWO / feature words. */
+import { t } from '../core/i18n.js';
+import { FEATURE } from '../world/road-spline.js';
+
+// Feature word keys (src/core/i18n.js): EN CREST / DIP / JUMP / WATER / BRIDGE,
+// PL the words the game shipped with (GARB / DOŁ / SKOK / WODA / MOST).
+const FEATURE_WORD = {
+  [FEATURE.CREST]: 'note.crest', [FEATURE.DIP]: 'note.dip', [FEATURE.JUMP]: 'note.jump',
+  [FEATURE.WATER]: 'note.water', [FEATURE.BRIDGE]: 'note.bridge',
+};
+
+/** Polish word for a note: LEWO / PRAWO / OSTRO LEWO / SZYBKI PRAWO / feature words.
+ *  English uses the same call structure in idiomatic rally vocabulary: LEFT / RIGHT /
+ *  SHARP LEFT / EASY RIGHT / DON'T CUT LEFT. The side is always stated, in both. */
 export function signWord(note) {
   if (note.kind !== 'corner') {
-    if (note.text === 'HANT') return 'HANT';
-    return note.text.split(' ')[0];              // SKOK / GARB / DOŁ / WODA / MOST
+    if (note.text === 'HANT' || note.kind === 'straight') return t('note.hant');
+    if (FEATURE_WORD[note.featureId]) return t(FEATURE_WORD[note.featureId]);
+    return note.text.split(' ')[0];              // the build-time word already on the note
   }
-  const side = note.dir === 'L' ? 'LEWO' : 'PRAWO';   // LEWO = left, PRAWO = right
-  if (note.hairpin) return 'ZAWRÓT ' + side;
-  if (note.severity <= 3) return 'OSTRO ' + side;
-  if (note.severity >= 5) return 'SZYBKI ' + side;
-  return side;
+  const sideKey = note.dir === 'L' ? 'note.left' : 'note.right';   // LEWO / LEFT
+  if (note.hairpin) return `${t('note.dontCut')} ${t(sideKey)}`;
+  if (note.severity <= 3) return t(note.dir === 'L' ? 'note.sharpLeft' : 'note.sharpRight');
+  if (note.severity >= 5) return t(note.dir === 'L' ? 'note.easyLeft' : 'note.easyRight');
+  return t(sideKey);
 }

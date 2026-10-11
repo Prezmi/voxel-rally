@@ -20,8 +20,12 @@ export const SHEET_PAD = 60;         // ground plane the sheet renders (size=90 
 //   front cam.location = (cx + dist, cy, EYE)
 //   rear  cam.location = (cx - dist, cy, EYE)
 //   3q    cam.location = (cx + dist*0.62, cy - dist*0.72, EYE + dist*0.16)
+// `midEye` is the game-side correction for the side shot: the eye sits on the car's
+// own vertical centre instead of the sheet's zmin + 0.90, so the frame is a true
+// elevation (top faces never show, no three-quarter look) with zero vertical offset
+// between camera and aim. dx 0 / dz 0 keep it on the car's lateral axis.
 export const SHEET_VIEWS = {
-  side: { dx: 0, dy: -1, dz: 0, eyeAdd: 0, fill: 0.70, seen: 'len', tilt: false },
+  side: { dx: 0, dy: -1, dz: 0, eyeAdd: 0, fill: 0.70, seen: 'len', tilt: false, midEye: true },
   front: { dx: 1, dy: 0, dz: 0, eyeAdd: 0, fill: 0.55, seen: 'wide', tilt: false },
   rear: { dx: -1, dy: 0, dz: 0, eyeAdd: 0, fill: 0.55, seen: 'wide', tilt: false },
   'three-quarter': { dx: 0.62, dy: -0.72, dz: 0, eyeAdd: 0.16, fill: 0.55, seen: 'size', tilt: true },
@@ -68,7 +72,7 @@ export function showroomPose(view, bbox, aspect = 16 / 9) {
   const dist = Math.max(seen / (v.fill * fw), tall / ((v.fill + 0.10) * fh));
   const cx = (bbox.min.x + bbox.max.x) / 2;
   const cz = (bbox.min.z + bbox.max.z) / 2;
-  const eye = bbox.min.y + SHEET_EYE;
+  const eye = v.midEye ? (bbox.min.y + bbox.max.y) / 2 : bbox.min.y + SHEET_EYE;
   const target = v.tilt
     ? { x: cx, y: bbox.min.y + size * 0.30, z: cz }
     : { x: cx, y: eye, z: cz };

@@ -18,6 +18,7 @@
 import { FEATURE } from '../world/road-spline.js';
 import { effectiveMu, surface } from '../world/surfaces.js';
 import { G } from '../car/car-params.js';
+import { t, getLang } from '../core/i18n.js';
 
 export const FLAT_RADIUS = 200;      // m: curvature flatter than this needs no note
 export const LEAD_MIN = 1.2;         // s, docs/07 F4 hard requirement
@@ -30,14 +31,13 @@ export const KIND = { CORNER: 'corner', FEATURE: 'feature', STRAIGHT: 'straight'
 export const PRIORITY = { LOW: 1, NORMAL: 2, HIGH: 3 };   // docs/05 §7: CAUTION preempts
 
 const SEVERITY_R = [18, 28, 42, 65, 105, FLAT_RADIUS];     // radius (m) -> class 1..6
-// Feature words stay in rally notation, everything else is Polish (PLAN §10).
-const FEATURE_TEXT = {
-  [FEATURE.CREST]: 'GARB',
-  [FEATURE.DIP]: 'DOŁ',
-  [FEATURE.JUMP]: 'SKOK',
-  [FEATURE.WATER]: 'WODA',
-  [FEATURE.BRIDGE]: 'MOST',
+// Feature words go through src/core/i18n.js: EN CREST / DIP / JUMP / WATER / BRIDGE,
+// PL GARB / DOŁ / SKOK / WODA / MOST. The rest of the call set is the same table.
+const FEATURE_KEYS = {
+  [FEATURE.CREST]: 'note.crest', [FEATURE.DIP]: 'note.dip', [FEATURE.JUMP]: 'note.jump',
+  [FEATURE.WATER]: 'note.water', [FEATURE.BRIDGE]: 'note.bridge',
 };
+const featureWord = (f) => (FEATURE_KEYS[f] ? t(FEATURE_KEYS[f]) : '');
 
 /** Moving-average smoothing of the curvature: kills 1-2 m sampling noise, keeps corners. */
 export function smoothCurvature(road, w = 3) {
@@ -145,20 +145,26 @@ export function buildPaceNotes(road, ghost, opts = {}) {
     g.dir = (Math.abs(turn) > 1e-3 ? turn : (road.kappa[apexIndex] || g.kappa)) > 0 ? 'R' : 'L';
     const hairpin = road.feature[apexIndex] === FEATURE.HAIRPIN || angle >= 150 * Math.PI / 180;
     // Feature inside the corner group (docs/03 §3 markFeatures): crest/dip/jump/water/bridge.
-    const feats = [];
+    const feats = [], featIds = [];
     for (let i = Math.max(0, g.startIndex - 25); i <= Math.min(n - 1, g.endIndex + 12); i++) {
       const f = road.feature[i];
-      if (FEATURE_TEXT[f] && feats.indexOf(FEATURE_TEXT[f]) < 0) feats.push(FEATURE_TEXT[f]);
+      const fw = featureWord(f);
+      if (fw && feats.indexOf(fw) < 0) { feats.push(fw); featIds.push(f); }
     }
     const graded = Math.abs(road.grade[apexIndex]) > 0.05;
     const cambered = Math.abs(road.camber[apexIndex]) > 0.035;
     let text = '';
-    if (sev === 1) text += 'UWAGA ';                       // docs "Caution": the slowest class
-    text += `${sev}${g.dir}`;
-    if (hairpin) text += ' DON’T CUT';                      // cutting a >150 deg hairpin leaves the corridor
-    if (cambered) text += g.kappa > 0 ? ' PÓŁTORA' : ' NEGATYW';
+    if (sev === 1) text += t('note.caution') + ' ';             // docs "Caution": the slowest class
+    // ENGLISH calls the class as a word (ONE..FIVE) and the side as a word; the Polish
+    // build keeps the compact numeric notation (1L) it always spoke.
+    text += getLang() === 'en'
+      ? `${t('note.sev' + Math.min(5, sev))} ${t(g.dir === 'L' ? 'note.left' : 'note.right')}`
+      : `${sev}${g.dir}`;
+    if (hairpin) text += ' ' + t('note.dontCut');               // cutting a >150 deg hairpin leaves the corridor
+    if (cambered) text += ' ' + t(g.kappa > 0 ? 'note.horn' : 'note.dissa');
     if (feats.length) text += ' ' + feats.join(' ');
-    const priority = (sev === 1 || hairpin || feats.indexOf('SKOK') >= 0 || feats.indexOf('WODA') >= 0)
+    const priority = (sev === 1 || hairpin
+      || featIds.indexOf(FEATURE.JUMP) >= 0 || featIds.indexOf(FEATURE.WATER) >= 0)
       ? PRIORITY.HIGH : (sev >= 5 ? PRIORITY.LOW : PRIORITY.NORMAL);
     // Speed the note is timed against: what the ghost carries at the apex.
     const v = Math.max(4, ghost.speedAt(apexArc));
@@ -180,7 +186,7 @@ export function buildPaceNotes(road, ghost, opts = {}) {
   // ---- 2. feature-only notes: a crest/jump/bridge where the road is otherwise flat ----
   for (let i = 1; i < n - 1; i++) {
     const f = road.feature[i];
-    const word = FEATURE_TEXT[f];
+    const word = featureWord(f);
     if (!word) continue;
     if (Math.abs(k[i]) > 1 / flat) continue;              // already inside a corner note
     let near = false;

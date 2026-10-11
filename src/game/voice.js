@@ -2,7 +2,9 @@
 //
 // Two output paths, one queue:
 //   A. window.speechSynthesis when the browser has voices (rate 1.35 / pitch 0.95,
-//      docs/05 §7) — the text is always the Polish rally notation.
+//      docs/05 §7) — the text follows the selected language (src/core/i18n.js) and so
+//      does the voice picked for it: English notes on an English voice, Polish notes on
+//      a Polish one. The audio engine below is untouched.
 //   B. deterministic fallback: a short pre-allocated click (band-passed burst) plus
 //      the written note in the HUD. The queue and its timings are identical either
 //      way, so the note scheduling is testable headless and never depends on a
@@ -14,6 +16,7 @@
 // No nodes are created in the frame: the click graph is built once, lazily, at the
 // first note (docs/05 "graf węzłów jest budowany raz").
 import { PRIORITY } from './pace-notes.js';
+import { getLang } from '../core/i18n.js';
 
 const MAX_QUEUE = 8;             // a stage never needs more notes "in the air" than this
 const CLICK_POOL = 3;            // pre-allocated burst chains (docs/05 §10: <= 60 nodes)
@@ -57,17 +60,27 @@ export class Voice {
     this.clock = 0;
   }
 
+  /** The voice follows the selected language, so the mic matches the note text. */
   _pickVoice() {
+    this._prefLang = getLang();
     const apply = () => {
       const vs = this.synth.getVoices ? this.synth.getVoices() : [];
       if (!vs.length) return;
-      const pref = vs.find((v) => /^pl/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || vs[0];
-      this.voice = pref;
+      this.voices = vs;
+      this.voice = this._prefer(vs);
     };
     apply();
     if (!this.voice && this.synth.onvoiceschanged !== undefined) {
       try { this.synth.onvoiceschanged = apply; } catch { /* no voice list yet */ }
     }
+  }
+
+  /** Preferred voice for the current language, then the other one, then anything. */
+  _prefer(vs) {
+    const list = vs || this.voices || [];
+    const want = getLang() === 'pl' ? /^pl/i : /^en/i;
+    const alt = getLang() === 'pl' ? /^en/i : /^pl/i;
+    return list.find((v) => want.test(v.lang)) || list.find((v) => alt.test(v.lang)) || list[0] || null;
   }
 
   reset() {
@@ -181,13 +194,19 @@ export class Voice {
     if (this.emit) this.emit.emit('pace-note-spoken', note);
   }
 
-  /** Variant A (docs/05 §7). */
+  /** Variant A (docs/05 §7): the utterance language = the language the notes are in. */
   _say(text) {
     try {
+      const lang = getLang();
+      if (this._prefLang !== lang) {                 // LANGUAGE row switched mid-stage
+        this._prefLang = lang;
+        const vs = this.synth.getVoices ? this.synth.getVoices() : [];
+        if (vs.length) { this.voices = vs; this.voice = this._prefer(vs); }
+      }
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1.35; u.pitch = 0.95; u.volume = 0.9;
       if (this.voice) u.voice = this.voice;
-      if (this.voice && this.voice.lang) u.lang = this.voice.lang;
+      u.lang = (this.voice && this.voice.lang) || (lang === 'pl' ? 'pl-PL' : 'en-GB');
       this.synth.speak(u);
     } catch { this._click(this.speaking && this.speaking.note); }
   }

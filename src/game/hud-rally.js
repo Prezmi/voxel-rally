@@ -24,14 +24,14 @@ import { bus } from '../core/events.js';
 import { formatSplit, formatTime } from './timing.js';
 import { STATE } from './stage.js';
 import { settings } from '../core/settings.js';
-import { t } from '../core/i18n.js';
+import { t, setLang, getLang } from '../core/i18n.js';
 import { drawText, textWidth } from './pixel-font.js';
 import { drawSignBoard, signMetrics, bendKind, signWord } from './sign-board.js';
 import { selectNotes } from './pace-notes.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DIAL_MAX = 200;          // km/h at the end of the dial sweep (face labels i*10)
-const WHEEL_LABELS = ['PRZ L', 'PRZ P', 'TYŁ L', 'TYŁ P'];
+const WHEEL_LABELS = ['hud.wheelFL', 'hud.wheelFR', 'hud.wheelRL', 'hud.wheelRR'];
 const MODES = ['FULL', 'MINIMAL', 'OFF'];
 
 // Vanilla GUI palette (PLAN.md §10.1): grey family + three state accents + wood.
@@ -40,10 +40,11 @@ const C = {
   LIGHT: '#FDFDFD', DARK: '#555555', TEXT: '#1E1E1E', WHITE: '#FDFDFD',
   GREEN: '#2E8B2E', RED: '#B4382E', ORANGE: '#C77B2A', BLUE: '#4C6EA0',
 };
-const MODE_LABEL = { FULL: 'pełny', MINIMAL: 'minimalny', OFF: 'wyłączony' };
-const QUAL_LABEL = { 0: 'niska', 1: 'średnia', 2: 'wysoka' };
-const BLOOM_LABEL = { LOW: 'niski', MEDIUM: 'średni', HIGH: 'wysoki' };
-const TOUCH_LABEL = { auto: 'auto', on: 'włączone', off: 'wyłączone' };
+// The label tables hold i18n KEYS (src/core/i18n.js); every draw site resolves with t().
+const MODE_LABEL = { FULL: 'val.hudFull', MINIMAL: 'val.hudMinimal', OFF: 'val.hudOff' };
+const QUAL_LABEL = { 0: 'val.qualLow', 1: 'val.qualMedium', 2: 'val.qualHigh' };
+const BLOOM_LABEL = { LOW: 'val.bloomLow', MEDIUM: 'val.bloomMedium', HIGH: 'val.bloomHigh' };
+const TOUCH_LABEL = { auto: 'val.auto', on: 'val.on', off: 'val.off' };
 // Ekrany menu (modalne). Górny ekran stosu decyduje, czy zegar odcinka w ogóle
 // idzie - patrz RallyHud.driving(), dzięki temu auto nie jedzie przed STARTem.
 const MENU_SCREENS = ['menu', 'settings', 'controls'];
@@ -56,6 +57,15 @@ const WOOD = '#9C7E4E', WOOD_LIGHT = '#B4915C', WOOD_DARK = '#7A6138';
 // Width of the oak band that frames every modal screen (menu, ustawienia, sterowanie,
 // countdown, wynik) - same plank language as the pace-note boards.
 const MODAL_FRAME = 6;
+
+/** Board distance: the English call is a rally word (TEN / TWENTY / FIFTY), Polish keeps
+ *  the metres figure it always showed. Both stay inside the carved distance plate. */
+function signDistance(m) {
+  const n = Math.max(0, Math.round(m / 5) * 5);
+  const w = t('note.d' + n);
+  if (getLang() === 'en' && w !== 'note.d' + n) return w;
+  return `${n} ${t('hud.metres')}`;
+}
 
 /** 1 px near-black outline + 3 px raised bevel (light top/left, dark bottom/right). */
 function frameRect(g, x, y, w, h, body, raised) {
@@ -94,6 +104,7 @@ export class RallyHud {
   constructor(doc, opts = {}) {
     this.doc = doc;
     this.bus = opts.bus || bus;
+    setLang(settings.language || 'en');   // the persisted LANGUAGE row wins over the default
     this.mode = settings.hudMode || 'FULL';
     this.arrows = settings.showCoDriverArrows !== false;
     this._root = doc.getElementById('rally') || doc.createElement('div');
@@ -180,8 +191,8 @@ export class RallyHud {
     this.M = M;
     const wide = W >= 560;
     this.L = {
-      meta: { x: M.x, y: M.y, w: Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 10), h: 13 },
-      signs: { x: M.x + Math.min(200, textWidth(this._stageName || 'ODCINEK', 1) + 14), y: M.y, w: 0, h: 34 },
+      meta: { x: M.x, y: M.y, w: Math.min(200, textWidth(this._stageName || t('hud.stage'), 1) + 10), h: 13 },
+      signs: { x: M.x + Math.min(200, textWidth(this._stageName || t('hud.stage'), 1) + 14), y: M.y, w: 0, h: 34 },
       time: { x: M.x, y: M.y + 40, w: 96, h: 33 },
       prog: { x: M.x, y: M.y + 92, w: Math.min(230, Math.max(120, Math.round(W * 0.32))), h: 30 },
       dial: { x: M.r - 72, y: M.b - 4 - 22 - 4 - 72, w: 72, h: 72 },
@@ -262,20 +273,20 @@ export class RallyHud {
   }
 
   _showResult(r) {
-    const title = r.result === STATE.FINISHED ? 'META' : 'DNF';
+    const title = r.result === STATE.FINISHED ? t('result.finish') : t('result.dnf');
     const why = r.result === STATE.FINISHED ? ''
-      : ({ limit: 'limit czasu', gates: 'dwa brakujące checkpointy', stuck: 'auto stanęło' }[r.reason] || r.reason);
+      : ({ limit: t('result.whyLimit'), gates: t('result.whyGates'), stuck: t('result.whyStuck') }[r.reason] || r.reason);
     this._modalText[0] = `${title}  ${formatTime(r.total)}`;
-    let rows = `CZAS ${formatTime(r.total)}  SPLIT ${formatSplit(r.split)}  LIMIT ${formatTime(r.limit)}`;
+    let rows = `${t('hud.time')} ${formatTime(r.total)}  ${t('hud.split')} ${formatSplit(r.split)}  ${t('hud.limit')} ${formatTime(r.limit)}`;
     for (const s of r.sectors) rows += `\nS${s.index}  ${s.time >= 0 ? formatTime(s.time) : '—'}  ${formatSplit(s.split)}`;
-    for (const p of r.penalties) rows += `\nKARA +${p.seconds}s  ${p.label}`;
+    for (const p of r.penalties) rows += `\n${t('result.penalty')} +${p.seconds}s  ${p.label}`;
     if (why) rows += `\n${why.toUpperCase()}`;
     this._modalText[1] = rows;
     this._bigTitle = '';
     this._info = [];
     this._buildMenu([
-      { label: 'Restart odcinka  (enter)', act: 'restart' },
-      { label: 'Wróć do gry  (esc)', act: 'back' },
+      { label: `${t('result.restart')}`, act: 'restart' },
+      { label: `${t('result.resume')}`, act: 'back' },
     ]);
     this._pushStack('result');
   }
@@ -302,58 +313,61 @@ export class RallyHud {
   setTouchInset(px) { if (px === this.touchInset) return; this.touchInset = px; this._resize(); }
   /** Rows of one screen. Every row carries an `act` the state machine resolves. */
   _rowsFor(name) {
-    const on = (v) => (v ? 'wł.' : 'wył.');
+    const on = (v) => t(v ? 'val.on' : 'val.off');
     const rows = [];
     this._bigTitle = '';
     this._info = [];
-    this._modalText[0] = name === 'menu' ? 'Menu główne' : (name === 'settings' ? 'Ustawienia' : 'Sterowanie');
+    this._modalText[0] = name === 'menu' ? t('menu.heading') : (name === 'settings' ? t('settings.heading') : t('controls.heading'));
     this._modalText[1] = '';
     if (name === 'menu') {
-      this._bigTitle = 'VOXEL RALLY';
-      rows.push({ label: 'Start  (enter)', act: 'start' });
-      rows.push({ label: `Etap: ${this.stages.length ? this.stages[this.stageIdx].label : '—'}`, act: 'stage' });
-      rows.push({ label: 'Ustawienia', act: 'screen:settings' });
-      rows.push({ label: 'Sterowanie', act: 'screen:controls' });
+      this._bigTitle = t('menu.title');
+      rows.push({ label: t('menu.start'), act: 'start' });
+      rows.push({ label: t('menu.stage', this.stages.length ? this.stages[this.stageIdx].label : '—'), act: 'stage' });
+      rows.push({ label: t('menu.settings'), act: 'screen:settings' });
+      rows.push({ label: t('menu.controls'), act: 'screen:controls' });
     } else if (name === 'settings') {
-      rows.push({ label: `Bloki nawierzchni: ${on(settings.blockTiles)}`, act: 'toggle:blockTiles' });
-      rows.push({ label: `Sterowanie dotykiem: ${TOUCH_LABEL[settings.touchOverlay] || 'auto'}`, act: 'cycle:touchOverlay' });
-      rows.push({ label: `Kciuk sterujący: ${settings.touchHandedness === 'left' ? 'lewy' : 'prawy'}`, act: 'cycle:touchHandedness' });
-      rows.push({ label: `Strzałki pilota: ${on(settings.showCoDriverArrows)}`, act: 'toggle:showCoDriverArrows' });
+      rows.push({ label: `${t('settings.blockTiles')}: ${on(settings.blockTiles)}`, act: 'toggle:blockTiles' });
+      rows.push({ label: `${t('settings.touch')}: ${t(TOUCH_LABEL[settings.touchOverlay] || 'val.auto')}`, act: 'cycle:touchOverlay' });
+      rows.push({ label: `${t('settings.handedness')}: ${t(settings.touchHandedness === 'left' ? 'val.left' : 'val.right')}`, act: 'cycle:touchHandedness' });
+      rows.push({ label: `${t('settings.coDriver')}: ${on(settings.showCoDriverArrows)}`, act: 'toggle:showCoDriverArrows' });
       // KIEROWNICA: the only place a steer sign may flip (src/game/input.js). Explicit
       // in the UI and in the save, so a stale stored payload can never invert it silently.
-      rows.push({ label: `KIEROWNICA: ${settings.invertSteer ? 'ODWROTNA' : 'NORMALNA'}`, act: 'cycle:invertSteer' });
-      rows.push({ label: `HUD: ${MODE_LABEL[this.mode]}`, act: 'hudmode' });
+      rows.push({ label: `${t('settings.steer')}: ${settings.invertSteer ? t('val.steerInvert') : t('val.steerNormal')}`, act: 'cycle:invertSteer' });
+      rows.push({ label: `${t('settings.hud')}: ${t(MODE_LABEL[this.mode])}`, act: 'hudmode' });
       // Efekty: the one switch for the whole particle field (src/fx) — the weak-device
       // lever. It sits next to JAKOŚĆ because both are render cost, and it has to sit
       // here at all because a phone has no keyboard for it: the `KeyP` FX branch in
       // main.js sat behind the menu's KeyP in the same if-chain and never ran, so the
       // saved `settings.fx` was the only other writer.
-      rows.push({ label: `Efekty: ${on(settings.fx)}`, act: 'toggle:fx' });
-      rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });
+      rows.push({ label: `${t('settings.fx')}: ${on(settings.fx)}`, act: 'toggle:fx' });
+      rows.push({ label: `${t('settings.quality')}: ${t(QUAL_LABEL[settings.quality] || 'val.qualLow')}`, act: 'quality' });
       // POST / BLOOM / GRADE (src/render/post/composer.js): one composite stack, its
       // cheap half and its colour half. POST off is the exact pre-post render, so the
       // row is also the emergency switch on a driver the composer gates itself off on.
-      rows.push({ label: `Post: ${on(settings.post)}`, act: 'toggle:post' });
-      rows.push({ label: `Bloom: ${BLOOM_LABEL[settings.bloom] || '—'}`, act: 'cycle:bloom' });
-      rows.push({ label: `Grade: ${on(settings.grade)}`, act: 'toggle:grade' });
+      rows.push({ label: `${t('settings.post')}: ${on(settings.post)}`, act: 'toggle:post' });
+      rows.push({ label: `${t('settings.bloom')}: ${t(BLOOM_LABEL[settings.bloom] || 'val.bloomMedium')}`, act: 'cycle:bloom' });
+      rows.push({ label: `${t('settings.grade')}: ${on(settings.grade)}`, act: 'toggle:grade' });
       // ZASIĘG RYSOWANIA + DALEKI DETAL (src/core/i18n.js is only wired for these two):
       // the view distance is the player-facing knob, FAR DETAIL is the frame-rate trade
       // for it - off drops the 16 m hill band and shortens the far billboard band, the
       // near and mid bands never change.
       rows.push({ label: `${t('settings.drawDistance')}: ${settings.drawDistance} m`, act: 'cycle:drawDistance' });
       rows.push({ label: `${t('settings.farDetail')}: ${on(settings.farDetail)}`, act: 'toggle:farDetail' });
-      rows.push({ label: 'Wróć  (esc)', act: 'back' });
+      // LANGUAGE: the one row that re-labels every other row on the spot. It returns the
+      // row to main.js, whose `cycle:*` save branch persists settings.language.
+      rows.push({ label: `${t('settings.language')}: ${getLang() === 'pl' ? t('val.pl') : t('val.en')}`, act: 'cycle:language' });
+      rows.push({ label: t('settings.back'), act: 'back' });
     } else if (name === 'controls') {
       // Two columns of KLAWISZ + AKCJA drawn at the same readable scale as the menu rows
       // (the row list is only the one focusable WRÓĆ target: keyboard/gamepad focus,
       // the table itself is information, not a control).
       this._info = [
-        ['W', 'gaz'], ['S', 'hamulec'], ['A/D', 'skręt'], ['SPC', 'ręczny'],
-        ['Q/E', 'bieg'], ['R', 'reset'], ['ENTER', 'start'], ['ESC', 'wróć'],
-        ['C', 'kamera'], ['N', 'hud'], ['M', 'pilot'], ['P', 'pauza'],
-        ['H', 'DEV panel'], ['L2/R2', 'pad gaz'], ['LEWA', 'skręt'], ['PRAWA', 'gaz, ham'],
+        ['W', t('controls.throttle')], ['S', t('controls.brake')], ['A/D', t('controls.steer')], ['SPC', t('controls.handbrake')],
+        ['Q/E', t('controls.gear')], ['R', t('controls.reset')], ['ENTER', t('controls.start')], ['ESC', t('controls.back')],
+        ['C', t('controls.camera')], ['N', t('controls.hud')], ['M', t('controls.notes')], ['P', t('controls.pause')],
+        ['H', t('controls.dev')], ['L2/R2', t('controls.padGas')], [t('controls.left'), t('controls.steer')], [t('controls.right'), t('controls.gasBrake')],
       ];
-      rows.push({ label: 'Wróć  (esc)', act: 'back' });
+      rows.push({ label: t('settings.back'), act: 'back' });
     }
     this._buildMenu(rows);
   }
@@ -432,6 +446,17 @@ export class RallyHud {
     if (act === 'back') { this.back(); return null; }
     if (act === 'hudmode') { this.cycleMode(); this.refreshMenu(); return null; }
     if (act.indexOf('screen:') === 0) { this.openScreen(act.slice(7)); return null; }
+    if (act === 'cycle:language') {
+      // Immediate switch: every label is re-resolved from the table and every cached
+      // panel value is invalidated so the HUD re-draws the same frame it is tapped on.
+      const next = getLang() === 'pl' ? 'en' : 'pl';
+      setLang(next);
+      settings.language = next;
+      for (const k in this._keys) this._keys[k] = '';
+      this._dirtyAll = true;
+      this.refreshMenu();
+      return row;                        // main.js saves every cycle:* row
+    }
     if (act === 'stage') {
       if (this.stages.length) this.stageIdx = (this.stageIdx + 1) % this.stages.length;
       this.refreshMenu();
@@ -487,7 +512,7 @@ export class RallyHud {
     // frame: the countdown is a modal screen, not a panel, so it used to survive
     // hudMode OFF and put "START ZA 3.0 s" across the showroom shot.
     if (st.state === STATE.PRE_START && this.top() === 'hud' && this.mode !== 'OFF') {
-      this._modalText[0] = `START ZA ${Math.max(0, st.countdown).toFixed(1)} s`;
+      this._modalText[0] = t('hud.countdown', Math.max(0, st.countdown).toFixed(1));
       this._modalText[1] = '';
       this._info = [];
       this._buildMenu([]);
@@ -496,7 +521,7 @@ export class RallyHud {
     // Ekran menu zajmuje caly viewport: zadnych paneli HUD pod nim, zeby modal nie
     // fights the 8/12/20 Hz panel redraws for the same pixels.
     if (MENU_SCREENS.indexOf(this.top()) >= 0) {
-      this._stageName = ctx.stageName || 'ODCINEK';
+      this._stageName = ctx.stageName || t('hud.stage');
       this._pollMenu();
       this._drawModal(ctx);
       return;
@@ -531,7 +556,7 @@ export class RallyHud {
       if (this.top() !== 'hud') { this._drawModal(ctx); this._pollMenu(); }
       return;
     }
-    this._stageName = ctx.stageName || 'ODCINEK';
+    this._stageName = ctx.stageName || t('hud.stage');
     this._acc += dt;
     this._accGauge += dt;
     if (this._acc >= 1 / 30) {
@@ -571,8 +596,8 @@ export class RallyHud {
   // ---------- 1. meta strip (stage / sector) ----------
   _drawMeta(ctx) {
     if (!this.g || this._keys.boards === 'hidden') return;
-    const t = ctx.stage.timing, sec = t.activeSector;
-    const line = `${this._stageName}  ·  SEKTOR ${sec ? sec.index : t.sectors.length}/${t.sectors.length}`;
+    const tm = ctx.stage.timing, sec = tm.activeSector;
+    const line = `${this._stageName}  ·  ${t('hud.sector')} ${sec ? sec.index : tm.sectors.length}/${tm.sectors.length}`;
     const r = this.L.meta;
     r.w = Math.min(this.W - 8, textWidth(line, 1) + 10);
     // The note row begins after this panel, so its x is recomputed on EVERY update, not
@@ -642,7 +667,7 @@ export class RallyHud {
         kind: a.kind === 'corner' ? bendKind(a.severity, a.hairpin, a.dir) : 'straight',
         dir: a.dir, sev: a.severity, big: picks[i].big, dim: !picks[i].big,
         word: signWord(a),
-        dist: `${Math.max(0, Math.round(picks[i].d / 5) * 5)} M`,
+        dist: signDistance(picks[i].d),
         eta: `${picks[i].eta.toFixed(1)} s`,
         spoken: !!spoken && a.text === spoken, pop: this._popFrames[i],
       };
@@ -692,7 +717,7 @@ export class RallyHud {
         this._clear(S);
         frameRect(G2, S.x, S.y, S.w, S.h, C.PANEL, true);
         drawText(G2, String(kmh), S.x + S.w - 5 - textWidth(String(kmh), 3), S.y + 4, 3, C.TEXT);
-        drawText(G2, 'KM/H', S.x + 5, S.y + S.h - 11, 1, C.TEXT);
+        drawText(G2, t('hud.kmh'), S.x + 5, S.y + S.h - 11, 1, C.TEXT);
         const gx = S.x - 24, gy = S.y + S.h - 22;
         slotRect(G2, gx, gy, 20, 20);
         drawText(G2, gl, gx + 8, gy + 3, 2, gl === 'N' ? C.TEXT : (gl === '6' ? C.RED : C.TEXT));
@@ -714,7 +739,7 @@ export class RallyHud {
     const R = this.L.revs;
     this._clear({ x: R.x - 2, y: R.y - 10, w: 202, h: 28 });
     frameRect(this.g, R.x - 2, R.y - 10, 202, 28, C.PANEL, true);
-    drawText(this.g, 'OBROTY', R.x, R.y - 8, 1, C.TEXT);
+    drawText(this.g, t('hud.revs'), R.x, R.y - 8, 1, C.TEXT);
     for (let i = 0; i < 10; i++) {
       const x = R.x + i * 13, frac = Math.max(0, Math.min(1, f * 10 - i));
       slotRect(this.g, x, R.y, 12, 14);
@@ -729,7 +754,7 @@ export class RallyHud {
     const gx = R.x + 10 * 13 + 4;
     slotRect(this.g, gx, R.y, 12, 14);
     if (maxThr) { this.g.fillStyle = C.WHITE; this.g.fillRect(gx + 2, R.y + 2, 8, 10); }
-    drawText(this.g, 'MAX GAZ', gx + 16, R.y + 4, 1, maxThr ? C.TEXT : C.DARK);
+    drawText(this.g, t('hud.maxGas'), gx + 16, R.y + 4, 1, maxThr ? C.TEXT : C.DARK);
   }
 
   /** State gauges as item slots (CMR water / oil / turbo -> what this game simulates). */
@@ -737,9 +762,9 @@ export class RallyHud {
     if (!this.g) return;
     const dm = ctx.car.damage;
     const vals = [
-      ['SILNIK', dm ? dm.enginePowerScale : 1],
-      ['PRZÓD', dm ? (dm.susp[0] + dm.susp[1]) * 0.5 : 1],
-      ['TYŁ', dm ? (dm.susp[2] + dm.susp[3]) * 0.5 : 1],
+      [t('hud.engine'), dm ? dm.enginePowerScale : 1],
+      [t('hud.front'), dm ? (dm.susp[0] + dm.susp[1]) * 0.5 : 1],
+      [t('hud.rear'), dm ? (dm.susp[2] + dm.susp[3]) * 0.5 : 1],
     ];
     let key = '';
     for (const v of vals) key += v[1].toFixed(2) + '|';
@@ -766,44 +791,44 @@ export class RallyHud {
     const D = this.L.damage;
     this._clear({ x: D.x - 2, y: D.y - 2, w: 121, h: 34 });
     frameRect(this.g, D.x - 2, D.y - 2, 121, 34, C.PANEL, true);
-    drawText(this.g, 'USZKODZENIA', D.x, D.y, 1, C.TEXT);
+    drawText(this.g, t('hud.damage'), D.x, D.y, 1, C.TEXT);
     for (let i = 0; i < 4; i++) {
       const x = D.x + i * 33, v = dm ? Math.max(0, Math.min(1, dm.susp[i])) : 1;
       slotRect(this.g, x, D.y + 9, 18, 13);
       slotFill(this.g, x, D.y + 9, 18, 13, v, v > 0.94 ? C.GREEN : (v > 0.8 ? C.ORANGE : C.RED), v < 0.94);
-      drawText(this.g, WHEEL_LABELS[i], x, D.y + 23, 1, C.TEXT);
+      drawText(this.g, t(WHEEL_LABELS[i]), x, D.y + 23, 1, C.TEXT);
     }
   }
 
   // ---------- 4. time cluster: stone panel, pixel digits ----------
   _drawTime(ctx) {
     if (this._keys.boards === 'hidden') return;
-    const t = ctx.stage.timing;
-    const rem = t.limitRemaining;
-    const warn = t.limit > 0 && rem < 15;
-    const split = t.liveSplit;
-    const pen = t.penaltyTotal ? `  KARY +${t.penaltyTotal}s` : '';
-    const key = `${t.total.toFixed(2)}|${split.toFixed(2)}|${rem.toFixed(1)}|${warn}|${pen}`;
+    const tm = ctx.stage.timing;
+    const rem = tm.limitRemaining;
+    const warn = tm.limit > 0 && rem < 15;
+    const split = tm.liveSplit;
+    const pen = tm.penaltyTotal ? `  ${t('hud.penalty')} +${tm.penaltyTotal}s` : '';
+    const key = `${tm.total.toFixed(2)}|${split.toFixed(2)}|${rem.toFixed(1)}|${warn}|${pen}`;
     if (!this._key('time', key)) return;
     if (!this.g) return;
     const R = this.L.time;
     this._clear(R);
     frameRect(this.g, R.x, R.y, R.w, R.h, C.PANEL, true);
     const g = this.g;
-    drawText(g, `CZAS ${formatTime(t.total)}`, R.x + 5, R.y + 3, 1, C.TEXT);
-    drawText(g, `SPLIT ${formatSplit(split)}`, R.x + 5, R.y + 13, 1, split <= 0 ? C.GREEN : C.RED);
-    drawText(g, `LIMIT ${t.limit > 0 ? (rem >= 0 ? formatTime(rem) : '00:00.00') : '—'}${warn ? ' !' : ''}${pen}`,
+    drawText(g, `${t('hud.time')} ${formatTime(tm.total)}`, R.x + 5, R.y + 3, 1, C.TEXT);
+    drawText(g, `${t('hud.split')} ${formatSplit(split)}`, R.x + 5, R.y + 13, 1, split <= 0 ? C.GREEN : C.RED);
+    drawText(g, `${t('hud.limit')} ${tm.limit > 0 ? (rem >= 0 ? formatTime(rem) : '00:00.00') : '—'}${warn ? ' !' : ''}${pen}`,
       R.x + 5, R.y + 23, 1, warn ? C.RED : C.TEXT);
   }
 
   // ---------- 5. stage progress as a locator bar ----------
   _drawProg(ctx) {
     if (!this.g || this._keys.boards === 'hidden') return;
-    const st = ctx.stage, t = st.timing;
+    const st = ctx.stage, tm = st.timing;
     const gates = st.gates || [];
     const total = gates.length ? (gates[gates.length - 1].arc || 1) : 1;
     const pos = Math.max(0, Math.min(1, st.furthest / total));
-    const sec = t.activeSector;
+    const sec = tm.activeSector;
     // Sector stores fromArc / toArc (docs/03 §4) — the arcs the locator bar is scaled on.
     const sFrom = sec ? sec.fromArc : 0, sTo = sec ? sec.toArc : 0;
     let key = `${pos.toFixed(4)}|${sec ? sec.index : 0}|${sFrom.toFixed(0)}|${sTo.toFixed(0)}`;
@@ -814,8 +839,8 @@ export class RallyHud {
     // the checkpoint blocks and the car tick are drawn from by-4/-6: they cut straight
     // through the glyph bottoms, so the sector strip read as clipped text over a line.
     // It now owns a backing row and the bar starts below the glyphs.
-    const label = sec ? `SEKTOR ${sec.index}/${t.sectors.length}  ${Math.round(st.furthest)} M`
-      : `POSTĘP ${Math.round(pos * 100)}%`;
+    const label = sec ? `${t('hud.sector')} ${sec.index}/${tm.sectors.length}  ${Math.round(st.furthest)} ${t('hud.metres')}`
+      : `${t('hud.progress')} ${Math.round(pos * 100)}%`;
     const lw = Math.max(96, textWidth(label, 1) + 8);
     const bw = Math.max(R.w, lw);
     // The two rows the strip is made of, published for the layout test (T18): the label
@@ -858,11 +883,11 @@ export class RallyHud {
       const air = (w.airborneFrames || 0) > 0 || w.airborne;
       const alphaDeg = w.alpha * RAD2DEG;
       let s;
-      if (air) s = { label: 'POWIETRZE', color: C.BLUE };
-      else if (w.kappa <= -0.85) s = { label: 'BLOKADA', color: C.RED };
-      else if (Math.abs(alphaDeg) > 9 || w.slipEnergy > 12000) s = { label: 'UŚLIZG', color: C.ORANGE };
-      else if (w.kappa >= 0.7) s = { label: 'NAPĘD', color: C.GREEN };
-      else s = { label: 'CZEPNE', color: C.GREEN };
+      if (air) s = { label: t('hud.wheelAir'), color: C.BLUE };
+      else if (w.kappa <= -0.85) s = { label: t('hud.wheelLock'), color: C.RED };
+      else if (Math.abs(alphaDeg) > 9 || w.slipEnergy > 12000) s = { label: t('hud.wheelSlip'), color: C.ORANGE };
+      else if (w.kappa >= 0.7) s = { label: t('hud.wheelDrive'), color: C.GREEN };
+      else s = { label: t('hud.wheelGrip'), color: C.GREEN };
       const num = air ? ''
         : s.label === 'BLOKADA' || s.label === 'NAPĘD' ? `K${w.kappa.toFixed(2)}`
         : Math.abs(alphaDeg) > 9 ? `${Math.abs(alphaDeg).toFixed(0)}°` : `${(w.N / 1000).toFixed(1)}KN`;
@@ -877,7 +902,7 @@ export class RallyHud {
     const W = this.L.wheels;
     this._clear({ x: W.x - 2, y: W.y - 2, w: 121, h: 26 });
     frameRect(this.g, W.x - 2, W.y - 2, 121, 26, C.PANEL, true);
-    drawText(this.g, 'KOŁA', W.x, W.y, 1, C.TEXT);
+    drawText(this.g, t('hud.wheels'), W.x, W.y, 1, C.TEXT);
     for (let i = 0; i < 4; i++) {
       const x = W.x + i * 33;
       slotRect(this.g, x, W.y + 9, 18, 13);
