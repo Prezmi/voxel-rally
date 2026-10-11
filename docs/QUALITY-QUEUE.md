@@ -12,9 +12,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P3 · mud, sand and peat still carry the old heavy sink values in
-      `src/world/surfaces.js` after the gravel retune, so those surfaces are far slower
-      than intended; retune to a consistent band
 - [ ] P4 · `src/game/ghost.js:30` still says top speed ~70 m/s, stale after the
       powertrain retune, and any ghost pace built on it is wrong
 - [ ] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
@@ -50,10 +47,40 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 - [ ] P17 · two checks share the id T21 (the fx pool check in `src/debug/tests.js:562`
       and the gate board check at `:1255`), so the id cannot address one of them; renumber
       the gate check to its place in the sequence (the new vegetation band check is T22)
+- [ ] P18 · `SURFACE_VMAX` (`src/game/ghost.js:32`) is a second per-surface speed table
+      (mud 24 m/s, peat 22 m/s) that nothing cross-checks against what the car can
+      actually reach; after the drag retune the physics terminal on peat is 24.9 m/s, so
+      the reference ceiling now sits only ~13 % under capability and a further retune can
+      put it above the physics limit — derive it from the T23 band or pin the margin
+- [ ] P19 · the `unknown` fallback row (`src/world/surfaces.js:36`) still carries the
+      pre-retune drag scale (crr 0.070 / sink 0.030) under grass-like grip (mu 0.70), so
+      an unmapped surface id runs like sand; put it on the band (or alias it to gravel)
+      and bring it inside T23
+- [ ] P20 · loose-layer churn for dirt is derived from the drag columns
+      (`src/dirt/emitters.js:276` `crr * 0.9 + sink * 2.2`), so fitting those for terminal
+      speed also cut the mud/sand/peat plumes by a third (mud 0.247 -> 0.168, peat 0.278
+      -> 0.187); churn should follow `plough`/looseness, not the speed-fit columns
 
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P3 · mud, sand and peat still carry the old heavy sink values in
+      `src/world/surfaces.js` after the gravel retune, so those surfaces are far slower
+      than intended; retune to a consistent band
+      · done — `crr`/`sink` only re-fitted on the gravel basis (terminal speed of car 'A'
+      on the flat straight), `mu`/`plough` untouched so cornering, drift and handbrake are
+      unchanged: mud 0.115/0.065 -> 0.084/0.042 (`src/world/surfaces.js:65`), snow
+      0.095/0.045 -> 0.050/0.022 (`:74`), grass 0.075/0.030 -> 0.045/0.017 (`:83`), sand
+      0.130/0.055 -> 0.070/0.030 (`:91`), peat 0.125/0.075 -> 0.086/0.050 (`:108`), dirt
+      0.090/0.040 -> 0.048/0.020 (`:125`) — the whole loose family had to follow or the
+      band would not be monotone (mud would have out-run dirt and grass). Measured
+      terminal is now a taper instead of a cliff: gravel 186 > grass 150 > dirt 141 >
+      snow 132 > sand 122 > mud 103 > peat 90 kph (was 186/123/109/92/92/81/68), with the
+      band note at `src/world/surfaces.js:7-15`. T23 (`src/debug/tests.js:1312`) pins the
+      band, the monotone drag columns and a max 40 kph step down. Proof: 34/34 checks
+      (33 before, +1); T4 still holds mud 0-60 at 4.73 s, T20 gravel unchanged at
+      4.61 s / 185.6 kph, and `tools/pacenote-test.mjs` (ghost calibration) still ALL PASS
 
 - [x] P2 · dead/bare trees have no billboard band so they pop out at ~90 m while pines
       and oaks reach 320 m; add a sprite entry in `src/world/props.js` (`SPRITE_PROPS`)

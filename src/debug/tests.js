@@ -1301,6 +1301,55 @@ function testVegetationOwnsEveryLodBand() {
 }
 testVegetationOwnsEveryLodBand();
 
+// ---------------------------------------------------------------- test 23
+// The loose-surface drag band. Gravel was re-fitted against a modern rally car's terminal
+// speed (~190 kph) but the rest of the family kept the old, far heavier scale, so the
+// taper turned into a cliff: mud bottomed out at 81 kph, sand at 92 and peat at 68 while
+// gravel ran 186. Terminal speed is the outcome the two drag columns produce, so this
+// measures it on the flat straight and pins the whole ladder: every loose surface inside
+// its band, the drag columns rising monotonically with softness, terminal speed falling
+// monotonically with it, and no step down larger than one gear's worth of speed.
+function testLooseSurfaceDragBand() {
+  // Softness order: hardest loose surface first, bog last. Bands are the terminal speeds
+  // each row's crr/sink pair was fitted to (+/-6 kph of play for future retunes).
+  const LADDER = ['gravel', 'grass', 'dirt', 'snow', 'sand', 'mud', 'peat'];
+  const BAND = { gravel: [180, 200], grass: [144, 157], dirt: [134, 147], snow: [126, 139], sand: [116, 128], mud: [97, 109], peat: [83, 96] };
+  const rows = [], gaps = [];
+  const term = {};
+  for (const key of LADDER) {
+    const s = SURFACES.find((x) => x.key === key);
+    const w = new FlatWorld(s.id);
+    const car = makeCar(w, {});
+    car.placeAt(0, 0, 0);
+    let vtop = 0;
+    for (let i = 0; i < Math.round(150 / DT); i++) {
+      car.setInput({ throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+      car.step(DT);
+      vtop = Math.max(vtop, car.body.groundSpeed);
+    }
+    const kph = vtop * 3.6;
+    term[key] = kph;
+    rows.push(`${key}=${kph.toFixed(0)}kph`);
+    const [lo, hi] = BAND[key];
+    if (kph < lo || kph > hi) gaps.push(`${key}=${kph.toFixed(0)} outside ${lo}-${hi}`);
+  }
+  for (let i = 1; i < LADDER.length; i++) {
+    const a = SURFACES.find((x) => x.key === LADDER[i - 1]);
+    const b = SURFACES.find((x) => x.key === LADDER[i]);
+    if (!(b.crr > a.crr)) gaps.push(`crr ${LADDER[i]}=${b.crr}<=${a.crr}`);
+    if (!(b.sink > a.sink)) gaps.push(`sink ${LADDER[i]}=${b.sink}<=${a.sink}`);
+    const step = term[LADDER[i - 1]] - term[LADDER[i]];
+    if (!(step >= 3)) gaps.push(`step ${LADDER[i - 1]}->${LADDER[i]}=${step.toFixed(0)}kph too flat`);
+    if (step > 40) gaps.push(`step ${LADDER[i - 1]}->${LADDER[i]}=${step.toFixed(0)}kph cliff`);
+  }
+  // The retune is drag-only by contract: mu/plough carry cornering, drift and handbrake.
+  const grip = SURFACES.filter((s) => LADDER.includes(s.key)).map((s) => `${s.key}:mu${s.mu}/pl${s.plough}`).join(' ');
+  check('T23 loose-surface drag band: terminal speed tapers monotonically from gravel to peat, no surface is a wall',
+    gaps.length === 0, rows.join(' ') + ` | steps=${(term.gravel - term.peat).toFixed(0)}kph total | drag=${LADDER.map((k) => { const s = SURFACES.find((x) => x.key === k); return `${k}:${s.crr}/${s.sink}`; }).join(' ')} | gaps=[${gaps.join(' ')}]`);
+  return { term, gaps, grip };
+}
+testLooseSurfaceDragBand();
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) process.exitCode = 1;

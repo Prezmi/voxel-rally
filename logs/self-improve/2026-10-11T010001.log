@@ -17,3 +17,25 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T00:00:08.221Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen:** `P2 · dead/bare trees have no billboard band so they pop out at ~90 m while pines and oaks reach 320 m; add a sprite entry in \`src/world/props.js\` (\`SPRITE_PROPS\`)` — the lowest open P that was not already code-complete. (P1 was already fixed in `307e14a` by the previous, timed-out run but never recorded; I back-filled it in the Done section rather than re-doing it.)
+
+**Changes**
+- `src/world/props.js:20` — `PROP.DEAD` joins `SPRITE_PROPS`, so snags get the mid crossed-quad band and the far camera-facing billboard instead of being dropped at the hard 90 m prop limit (`streaming.js:782,802` put every non-sprite species on `nearRHard` = 90 m with no far band).
+- `src/world/props.js:32` — `SPRITE_SPEC[PROP.DEAD] = { w: 2.10, h: 5.94, planes: 3 }`, the same outer envelope as the near LOD snag (its voxel limbs span 2.14 m) so the near→mid handover does not move the skyline.
+- `src/world/props.js:43-49` — atlas paint cells now *derived* from `SPRITE_PROPS` (`SPR_PAINT` + exported `SPRITE_ATLAS`); `buildSpriteGeometries`/`atlasRect` address cells by `SPRITE_PROPS.indexOf()`, so a species appended to one list and not the other used to silently sample another species' foliage.
+- `src/world/props.js:419-451` — the 6th procedural atlas cell painted as a bare snag: 0.4 m trunk that never tapers below 2 texels (1 texel = 6 cm is sub-pixel past 150 m), snapped crown, three broken limbs starting inside the trunk, nubs for a ragged silhouette. Palette taken from the voxel snag so sprite and voxel read as one tree.
+- `src/debug/tests.js:27` imports, `src/debug/tests.js:1269-1301` — new check **T22**: every tree species owns the mid quad, the far billboard and its own distinct painted atlas cell, and sprite species keep a solid near build.
+- `docs/QUALITY-QUEUE.md` — P2 recorded done, P1 back-filled, three new defects added: P15 floating verge fern/bush sprites over the terraced verge, P16 `pickSpecies` gives `PROP.DEAD` 55-70 % in SWAMP/CANYON so the biome is one brown bristle, P17 two checks share the id T21 (`src/debug/tests.js:562` and `:1255`).
+
+**Visual pass (one, opened with my read tool):** `shots/quality-snags.png` (`?biome=CANYON&frames=2600`, headless Chrome/swiftshader) — bare snags now carry to the horizon instead of stopping short; I also read back the snag atlas cell (`/tmp/dead-cell3.png`) and, judging it, widened the trunk floor to 2 texels and lengthened the limbs to fill the 2.10 m envelope. The same frame is what surfaced the P15/P16 defects.
+
+Suite green, checks 32 → 33, no test weakened, `PLAN.md` untouched, no new library/asset, and the frame budget improves (snag voxel geometry now only within 24 m instead of 90 m; far band is 2 tris/tree).
+
+Committed locally as `6d8fd86 quality loop: snags get the mid sprite and far billboard bands (queue P2)` — not pushed.
+
+Verbatim test line:
+```
+33/33 passed
+```
+To https://github.com/Prezmi/voxel-rally.git
+   307e14a..6d8fd86  main -> main
