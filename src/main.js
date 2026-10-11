@@ -30,7 +30,7 @@ import { startPerfHarness } from './debug/perf-harness.js';
 import { pregenerateStage } from './world/pregen.js';
 import { loadStageCache } from './world/stage-cache.js';
 import { DT } from './core/time.js';
-import { settings, applyDifficulty, qualityPreset, QUALITY, loadSettings, saveSettings } from './core/settings.js';
+import { settings, applyDifficulty, qualityPreset, cycleDrawDistance, cycleBloom, QUALITY, loadSettings, saveSettings } from './core/settings.js';
 
 // Boot-time yield: the loading steps hand the frame back to the browser so the
 // boot text updates. In shot mode (--frames) a headless browser barely ticks
@@ -277,6 +277,24 @@ async function main() {
       settings.invertSteer = !settings.invertSteer;
       hud.boot(`kierownica: ${settings.invertSteer ? 'odwrotna' : 'normalna'}`);
       setTimeout(() => hud.boot(null), 1800);
+    } else if (it.act === 'cycle:drawDistance') {
+      // 400 -> 700 -> 1000 -> 1600 -> wrap. setQuality() re-derives fog (from the new
+      // drawDistance) and the camera far plane; Streaming re-rings the chunks by itself
+      // on the next update, remeshing only what changes band.
+      cycleDrawDistance();
+      renderer.setQuality(settings.quality);
+    } else if (it.act === 'toggle:farDetail') {
+      settings.farDetail = !settings.farDetail;
+      renderer.setQuality(settings.quality);
+    } else if (it.act === 'toggle:post') {
+      settings.post = !settings.post;
+      renderer.setQuality(settings.quality);
+    } else if (it.act === 'cycle:bloom') {
+      cycleBloom();
+      renderer.setQuality(settings.quality);
+    } else if (it.act === 'toggle:grade') {
+      settings.grade = !settings.grade;
+      renderer.setQuality(settings.quality);
     } else if (it.act === 'quality') {
       const q = (settings.quality + 1) % 3;
       qualityPreset(q);

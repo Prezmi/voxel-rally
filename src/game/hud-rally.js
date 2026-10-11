@@ -24,6 +24,7 @@ import { bus } from '../core/events.js';
 import { formatSplit, formatTime } from './timing.js';
 import { STATE } from './stage.js';
 import { settings } from '../core/settings.js';
+import { t } from '../core/i18n.js';
 import { drawText, textWidth } from './pixel-font.js';
 import { drawSignBoard, signMetrics, bendKind, signWord } from './sign-board.js';
 import { selectNotes } from './pace-notes.js';
@@ -41,6 +42,7 @@ const C = {
 };
 const MODE_LABEL = { FULL: 'pełny', MINIMAL: 'minimalny', OFF: 'wyłączony' };
 const QUAL_LABEL = { 0: 'niska', 1: 'średnia', 2: 'wysoka' };
+const BLOOM_LABEL = { LOW: 'niski', MEDIUM: 'średni', HIGH: 'wysoki' };
 const TOUCH_LABEL = { auto: 'auto', on: 'włączone', off: 'wyłączone' };
 // Ekrany menu (modalne). Górny ekran stosu decyduje, czy zegar odcinka w ogóle
 // idzie - patrz RallyHud.driving(), dzięki temu auto nie jedzie przed STARTem.
@@ -328,6 +330,18 @@ export class RallyHud {
       // saved `settings.fx` was the only other writer.
       rows.push({ label: `Efekty: ${on(settings.fx)}`, act: 'toggle:fx' });
       rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });
+      // POST / BLOOM / GRADE (src/render/post/composer.js): one composite stack, its
+      // cheap half and its colour half. POST off is the exact pre-post render, so the
+      // row is also the emergency switch on a driver the composer gates itself off on.
+      rows.push({ label: `Post: ${on(settings.post)}`, act: 'toggle:post' });
+      rows.push({ label: `Bloom: ${BLOOM_LABEL[settings.bloom] || '—'}`, act: 'cycle:bloom' });
+      rows.push({ label: `Grade: ${on(settings.grade)}`, act: 'toggle:grade' });
+      // ZASIĘG RYSOWANIA + DALEKI DETAL (src/core/i18n.js is only wired for these two):
+      // the view distance is the player-facing knob, FAR DETAIL is the frame-rate trade
+      // for it - off drops the 16 m hill band and shortens the far billboard band, the
+      // near and mid bands never change.
+      rows.push({ label: `${t('settings.drawDistance')}: ${settings.drawDistance} m`, act: 'cycle:drawDistance' });
+      rows.push({ label: `${t('settings.farDetail')}: ${on(settings.farDetail)}`, act: 'toggle:farDetail' });
       rows.push({ label: 'Wróć  (esc)', act: 'back' });
     } else if (name === 'controls') {
       // Two columns of KLAWISZ + AKCJA drawn at the same readable scale as the menu rows

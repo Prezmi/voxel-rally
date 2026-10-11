@@ -74,8 +74,15 @@ const TILE_CAP_RING = [192, 96];   // per-chunk instance cap on that ring
 // Distance + frustum culling for the tiles (perf run: 6.3 M tris/frame at LOW).
 // A tile beyond TILE_FAR, or outside the camera frustum, is never instanced.
 const TILE_FAR = [130, 130, 0, 0];  // index = ring
-// ring 2 -> ring 3 (8 m silhouette) switch point: outer half of the silhouette band
-const farRingRadius = () => settings.simpleRadius + (settings.drawDistance - settings.simpleRadius) * 0.5;
+// Band switch points. The outer bands are 8 m and 16 m cell silhouettes, so growing the
+// radius costs triangles linearly in area at a fixed, tiny per-chunk price - it is the
+// near/mid bands that carry the frame, and those radii are unchanged.
+const bandRadius = (f) => settings.simpleRadius + (settings.drawDistance - settings.simpleRadius) * f;
+// ring 2 (4 m) -> ring 3 (8 m silhouette) switch point
+export const farRingRadius = () => bandRadius(0.28);
+// ring 3 (8 m) -> ring 4 (16 m distant hill band) switch point; with FAR DETAIL off the
+// 8 m band simply runs out to the draw distance and the 16 m hill band is never built.
+export const hillFarRadius = () => (settings.farDetail ? bandRadius(0.62) : settings.drawDistance);
 const TILE_FAR_ABS = 150;          // m from the car, hard cut regardless of ring
 const TILE_FAR_ABS_LOW = 90;       // LOW: the tiles are 0.18 m slabs, they read to ~90 m
 // A baked block-tile node above this triangle count is replaced by a shared unit box:
@@ -426,7 +433,10 @@ export class Streaming {
     // than 200 m. The outer half of that band now gets lod 3 (8 m cells) - 4x fewer
     // cells per chunk - which flattens the far-field triangle growth.
     if (dist <= farRingRadius()) return 2;
-    if (dist <= settings.drawDistance) return 3;
+    if (dist <= hillFarRadius()) return 3;
+    // Ring 4: the 16 m distant hill band. It exists only while FAR DETAIL is on, and it
+    // is what puts a ridge on the horizon instead of sky at 700-1600 m.
+    if (dist <= settings.drawDistance && settings.farDetail) return 4;
     return -1;
   }
 
@@ -767,9 +777,12 @@ export class Streaming {
     // is the cheap axis and the INSTANCE CAP is what bounds the cost (the old 135 m far
     // ring faded the forest out inside a short radius: the drive read as a clearing).
     // `settings.vegFarDistance` is the knob; drawDistance clamps it, because a prop only
-    // exists in a chunk that was actually streamed in.
-    const vegFar = Math.max(240, Math.min(420, settings.vegFarDistance || 320));
-    const farR = Math.min(low ? vegFar : (high ? vegFar + 40 : vegFar), settings.drawDistance);
+    // exists in a chunk that was actually streamed in, and FAR DETAIL off pulls the band
+    // back hard - that is the frame-rate half of the row.
+    const vegFar = Math.max(240, Math.min(1200, settings.vegFarDistance || 620));
+    const farR = Math.min(settings.farDetail
+      ? (low ? vegFar : (high ? vegFar + 200 : vegFar + 80))
+      : vegFar * 0.55, settings.drawDistance);
     // Posts and spectators have no sprite/billboard variant (they are too small to
     // billboard) but they are ~100 tris each, so they keep a longer single band: corner
     // markers have to be readable early or the corner reads as empty air.
@@ -780,7 +793,7 @@ export class Streaming {
     // distance-prioritised, so a cut always drops the far edge of a species, not a
     // random hole in the middle of the stand.
     const midCapMul = low ? 0.45 : (high ? 0.9 : 0.7);
-    const farCapMul = low ? 0.5 : (high ? 0.95 : 0.8);
+    const farCapMul = !settings.farDetail ? 0.45 : (low ? 0.5 : (high ? 0.95 : 0.8));
     const nearRHard = low ? 70 : (high ? 110 : 90);
     const cam = this.renderer.camera;
     this._projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);

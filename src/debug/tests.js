@@ -22,11 +22,12 @@ import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
-import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings } from '../core/settings.js';
+import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings, qualityPreset, QUALITY, FAR_RADII, DRAW_DISTANCE_STEPS, cycleDrawDistance, cycleBloom, fogNearFor, fogFarFor } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
+import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode } from '../render/post/tune.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
@@ -1930,6 +1931,157 @@ function testHeadlightPoolIsTheSizeOfItsShaft() {
     + `| pool ${atEnd.toFixed(2)} @${(BEAM.reach * 0.8).toFixed(0)} m -> ${past.toFixed(2)} @${(BEAM.reach * 1.5).toFixed(0)} m, peak ${fp.peak.toFixed(1)} | gaps=[${gaps.join(' ')}]`);
 }
 testHeadlightPoolIsTheSizeOfItsShaft();
+
+// ------------------------------------------------ far draw distance (fog + radii)
+// The player's complaint is a short view. Two invariants: the fog can never land a hard
+// wall inside the streamed disc, and every quality preset actually reaches its target
+// radius (LOW >= 700 m, HIGH >= 1200 m) with the near/mid bands untouched.
+function testFarDrawDistance() {
+  const gaps = [];
+  for (const dd of DRAW_DISTANCE_STEPS) {
+    if (fogFarFor(dd) < dd) gaps.push(`fog far ${fogFarFor(dd)} < drawDistance ${dd}: hard wall inside the disc`);
+    if (fogNearFor(dd) > 520) gaps.push(`fog near ${fogNearFor(dd)} at ${dd} m hazes the mid-distance ground`);
+  }
+  if (!(fogFarFor(1600) > fogFarFor(400))) gaps.push('fog far does not follow the draw distance setting');
+  const before = { full: settings.fullRadius, simple: settings.simpleRadius };
+  qualityPreset(QUALITY.LOW);
+  const low = { dd: settings.drawDistance, veg: settings.vegFarDistance, full: settings.fullRadius, simple: settings.simpleRadius, farDetail: settings.farDetail };
+  qualityPreset(QUALITY.MED);
+  const med = { dd: settings.drawDistance, veg: settings.vegFarDistance, full: settings.fullRadius, simple: settings.simpleRadius };
+  qualityPreset(QUALITY.HIGH);
+  const high = { dd: settings.drawDistance, veg: settings.vegFarDistance, full: settings.fullRadius, simple: settings.simpleRadius, farDetail: settings.farDetail };
+  if (low.dd < 700) gaps.push(`LOW reaches only ${low.dd} m (target >= 700)`);
+  if (high.dd < 1200) gaps.push(`HIGH reaches only ${high.dd} m (target ~1200)`);
+  for (const [n, r] of [['LOW', low], ['MED', med], ['HIGH', high]]) {
+    if (r.veg > r.dd) gaps.push(`${n}: vegFarDistance ${r.veg} past drawDistance ${r.dd} - the far band has no chunks to draw in`);
+    if (r.veg < r.dd * 0.5) gaps.push(`${n}: vegFarDistance ${r.veg} fades the treeline at half the view`);
+  }
+  if (!(high.dd > med.dd && med.dd > low.dd)) gaps.push('presets do not step the draw distance up');
+  if (high.full < before.full || high.simple < before.simple) gaps.push('near/mid streaming bands were shrunk instead of the far bands grown');
+  if (cycleDrawDistance() !== 1600) gaps.push('the menu row does not step up to 1600 m');
+  if (cycleDrawDistance() !== DRAW_DISTANCE_STEPS[0]) gaps.push('the menu row does not wrap back to 400 m');
+  qualityPreset(QUALITY.MED);
+  check('T31 the view reaches far: fog far follows the draw distance and every preset hits its target radii',
+    gaps.length === 0,
+    `LOW ${low.dd} m (veg ${low.veg}, far detail ${low.farDetail}) MED ${med.dd} m (veg ${med.veg}) HIGH ${high.dd} m (veg ${high.veg}, far detail ${high.farDetail}) `
+    + `| near/mid ${high.full}/${high.simple} m | fog 400->${fogFarFor(400)} m, 1600->${fogFarFor(1600)} m | gaps=[${gaps.join(' ')}]`);
+}
+testFarDrawDistance();
+
+// ---------------------------------------------------------------------------
+// T32/T33/T34 post-composite stack (src/render/post/composer.js). Headless: the
+// pass graph and the dial table are pure data, no WebGL context needed.
+const POST_RANGES = {
+  exposure: [0.4, 2.2],
+  'bloom.threshold': [0.05, 4.0], 'bloom.knee': [0.05, 2.0], 'bloom.intensity': [0, 2.0],
+  'bloom.radius': [0.5, 4.0], 'bloom.taps': [1, 8], 'bloom.sigma': [0.5, 3.0], 'bloom.mips': [1, 2],
+  'grade.contrast': [0, 0.8], 'grade.shadowLift': [0, 0.12], 'grade.warmAmt': [0, 1], 'grade.coolAmt': [0, 1],
+  'grade.satGreen': [0, 0.5], 'grade.satBrown': [0, 0.5], 'grade.vignette': [0, 0.6],
+  'grade.grain': [0, 0.05], 'grade.grainSpeed': [1, 60],
+};
+
+function testPostPassGraph() {
+  const gaps = [];
+  const per = {};
+  for (const [qName, q] of [['LOW', QUALITY.LOW], ['MED', QUALITY.MED], ['HIGH', QUALITY.HIGH]]) {
+    qualityPreset(q);
+    const g = passGraph({ post: settings.post, bloom: settings.bloom });
+    per[qName] = { bloom: settings.bloom, n: g.length, off: g.filter((p) => p.res !== 'canvas').length, names: g.map((p) => p.name) };
+    if (g.length < 3) gaps.push(`${qName}: graph has only ${g.length} passes`);
+    // "at most four extra passes": the four offscreen quads, plus the one composite
+    // that writes the canvas.
+    if (per[qName].off > 4) gaps.push(`${qName}: ${per[qName].off} offscreen passes > 4`);
+    if (g[g.length - 1].name !== 'composite') gaps.push(`${qName}: last pass is not the canvas composite`);
+    const bright = g.filter((p) => p.kind === 'bright').length;
+    const blurV = g.filter((p) => p.kind === 'blurV').length;
+    if (bright !== blurV) gaps.push(`${qName}: separable blur unbalanced (${bright} H vs ${blurV} V)`);
+    if (qName === 'LOW' && settings.bloom !== 'LOW') gaps.push('LOW preset does not run the cheapest bloom row');
+    if (qName === 'LOW' && g.length !== 3) gaps.push(`LOW cheapest path is not 1 mip (got ${g.length})`);
+    if (qName !== 'LOW') {
+      const mips = new Set(g.filter((p) => p.res !== 'canvas').map((p) => p.res));
+      if (mips.size < 2 || !mips.has('quarter') || !mips.has('eighth')) gaps.push(`${qName}: bright/blur mips [${[...mips]}] < 2 (quarter+eighth expected)`);
+      if (g.length < 5) gaps.push(`${qName}: expected 5 passes, got ${g.length}`);
+    }
+  }
+  // BLOOM row cycles and stays inside the table.
+  const vendor = readFileSync(new URL('../../vendor/three.module.js', import.meta.url), 'utf8');
+  const vendored = /export \{[^}]*\bAgXToneMapping\b/.test(vendor);
+  const tone = resolveToneMode(vendored ? { AgXToneMapping: 6, ACESFilmicToneMapping: 4 } : { ACESFilmicToneMapping: 4 });
+  if (vendored && tone.name !== 'AgX') gaps.push('r169 exports AgXToneMapping but the composer did not pick AgX');
+  if (!vendored && tone.name !== 'ACESFilmic') gaps.push('no AgXToneMapping in the vendor build and ACES was not picked either');
+  const cycled = [cycleBloom(), cycleBloom(), cycleBloom(), cycleBloom()];
+  if (cycled.some((v) => !BLOOM_LEVELS.includes(v))) gaps.push(`cycleBloom left the table: ${cycled}`);
+  if (cycled[3] !== cycled[0]) gaps.push('cycleBloom does not wrap');
+  qualityPreset(QUALITY.MED);
+  check('T32 pass graph is built per quality preset: 1 mip + composite at LOW, quarter+eighth separable gaussian at MED/HIGH, <= 4 extra passes',
+    gaps.length === 0,
+    `LOW ${per.LOW.n} [${per.LOW.names}] | MED ${per.MED.n} [${per.MED.names}] | HIGH ${per.HIGH.n} [${per.HIGH.names}] | bloom row ${settings.bloom} | tone ${tone.name} | gaps=[${gaps.join(' ')}]`);
+}
+testPostPassGraph();
+
+function testPostTunablesFinite() {
+  const gaps = [];
+  const vendored = /export \{[^}]*\bAgXToneMapping\b/.test(readFileSync(new URL('../../vendor/three.module.js', import.meta.url), 'utf8'));
+  const tone = resolveToneMode(vendored ? { AgXToneMapping: 6, ACESFilmicToneMapping: 4 } : { ACESFilmicToneMapping: 4 });
+  const walk = (obj, path) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const p = (path === 'bloom' && BLOOM_LEVELS.includes(k)) ? path : (path ? `${path}.${k}` : k);
+      if (p === 'bloom') { walk(v, p); continue; }
+      if (Array.isArray(v)) {
+        if (v.length !== 3 || v.some((n) => !Number.isFinite(n) || n < 0.5 || n > 1.3)) gaps.push(`${p} tint out of 0.5..1.3: ${v}`);
+      } else if (typeof v === 'number') {
+        if (!Number.isFinite(v)) { gaps.push(`${p} is not finite (${v})`); continue; }
+        const r = POST_RANGES[p];
+        if (!r) gaps.push(`${p} has no pinned range`);
+        else if (v < r[0] || v > r[1]) gaps.push(`${p}=${v} outside ${r[0]}..${r[1]}`);
+      } else if (v && typeof v === 'object') walk(v, p);
+      else gaps.push(`${p} is not a number (${v})`);
+    }
+  };
+  walk(POST_TUNE, '');
+  for (const lvl of BLOOM_LEVELS) {
+    const b = POST_TUNE.bloom[lvl];
+    if (!Number.isInteger(b.taps) || b.taps < 3 || b.taps > 7) gaps.push(`bloom.${lvl}.taps=${b.taps} outside 3..7`);
+  }
+  // bloom rows must step up monotonically or the row is a lie
+  const I = BLOOM_LEVELS.map((l) => POST_TUNE.bloom[l].intensity);
+  const R = BLOOM_LEVELS.map((l) => POST_TUNE.bloom[l].radius);
+  if (!(I[0] < I[1] && I[1] < I[2])) gaps.push(`bloom intensity does not step up: ${I}`);
+  if (!(R[0] < R[1] && R[1] < R[2])) gaps.push(`bloom radius does not step up: ${R}`);
+  if (typeof tone.mode !== 'number' || tone.mode <= 0) gaps.push(`tone mode is not a real THREE mode (${tone.mode})`);
+  check('T33 every post tunable is finite and inside its pinned range (one dial table)',
+    gaps.length === 0,
+    `exposure ${POST_TUNE.exposure} | bloom ${BLOOM_LEVELS.map((l) => `${l} t${POST_TUNE.bloom[l].threshold} i${POST_TUNE.bloom[l].intensity} r${POST_TUNE.bloom[l].radius} k${POST_TUNE.bloom[l].taps}`).join(' ')} | grade contrast ${POST_TUNE.grade.contrast} satG ${POST_TUNE.grade.satGreen} satB ${POST_TUNE.grade.satBrown} vig ${POST_TUNE.grade.vignette} grain ${POST_TUNE.grade.grain} | tone ${tone.name} | gaps=[${gaps.join(' ')}]`);
+}
+testPostTunablesFinite();
+
+function testPostFallback() {
+  const gaps = [];
+  const storage = { m: new Map(), getItem(k) { return this.m.has(k) ? this.m.get(k) : null; }, setItem(k, v) { this.m.set(k, String(v)); } };
+  for (const q of [QUALITY.LOW, QUALITY.MED, QUALITY.HIGH]) {
+    qualityPreset(q);
+    settings.post = false;
+    const g = passGraph({ post: false, bloom: settings.bloom });
+    if (g.length !== 0) gaps.push(`quality ${q}: POST off still builds ${g.length} composer passes`);
+  }
+  // the three rows persist and migrate back, so a reload keeps the look
+  qualityPreset(QUALITY.HIGH);
+  settings.post = false; settings.bloom = 'LOW'; settings.grade = false;
+  saveSettings(settings, storage);
+  settings.post = true; settings.bloom = 'HIGH'; settings.grade = true;
+  loadSettings(storage);
+  if (settings.post !== false) gaps.push('POST row did not persist');
+  if (settings.bloom !== 'LOW') gaps.push(`BLOOM row did not persist (${settings.bloom})`);
+  if (settings.grade !== false) gaps.push('GRADE row did not persist');
+  // a legacy payload with no opinion keeps the current defaults, never a half-state
+  const m = migrateSettings({ quality: 1 });
+  if (typeof m.post !== 'boolean' || !BLOOM_LEVELS.includes(m.bloom) || typeof m.grade !== 'boolean') gaps.push('migrateSettings left the post rows implicit');
+  qualityPreset(QUALITY.MED);
+  check('T34 POST off builds zero composer passes (pre-post render is the fallback) and POST/BLOOM/GRADE persist',
+    gaps.length === 0,
+    `off passes ${passGraph({ post: false, bloom: 'HIGH' }).length} | rows persisted post=${settings.post} bloom=${settings.bloom} grade=${settings.grade} | gaps=[${gaps.join(' ')}]`);
+}
+testPostFallback();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

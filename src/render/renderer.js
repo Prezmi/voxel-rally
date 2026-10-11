@@ -3,9 +3,9 @@
 // Lighting + tone decisions follow docs/04 §1 and PLAN.md §10 (Colin McRae Rally:
 // warm key, cool sky fill, long shadows, saturated-but-earthly palette).
 import * as THREE from 'three';
-import { QUALITY, settings } from '../core/settings.js';
+import { QUALITY, settings, fogNearFor, fogFarFor } from '../core/settings.js';
 import { createLightRig, lightingFor } from './lighting.js';
-import { PostChain } from './post.js';
+import { PostComposer, POST_TUNE, TONE_MODE } from './post/composer.js';
 import { surfaceTones } from '../world/palette.js';
 import { ROAD_TONE, RUT_GLOSS } from './road-skin.js';
 
@@ -24,8 +24,8 @@ export class Renderer {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMapping = TONE_MODE;
+    this.renderer.toneMappingExposure = POST_TUNE.exposure;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -66,15 +66,15 @@ export class Renderer {
     this.biomeSky = new THREE.Color(0x8fb4cc);
     this.biomeFog = new THREE.Color(0x9db4c4);
     this.scene.background = this.skyColor;
-    this.scene.fog = new THREE.Fog(this.fogColor, 130, settings.drawDistance * 1.5);
+    this.scene.fog = new THREE.Fog(this.fogColor, fogNearFor(settings.drawDistance), fogFarFor(settings.drawDistance));
 
     this.terrainMaterial = null;
     this.propMaterial = null;
     this.carMaterial = null;
     this._buildMaterials();
 
-    this.post = new PostChain(this.renderer);
-    this.post.shafts = true;
+    this.post = new PostComposer(this.renderer);
+    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, exposure: POST_TUNE.exposure });
 
     this.info = { calls: 0, tris: 0 };
     this._time = 0;
@@ -330,21 +330,22 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.scene.fog.color.copy(this.fogColor);
     const far = settings.drawDistance;
     // Fog is short by design (PLAN §10.2 "teren jasny, tylko horyzont mglisty"):
-    // mid-distance terrain must stay crisp, only the outer silhouette ring hazes.
-    this.scene.fog.near = Math.max(120, far * (0.70 - 0.12 * rig.hazeMul) / this.hazeBias);
-    this.scene.fog.far = far * (1.05 + 0.30 * rig.hazeMul);
+    // mid-distance terrain must stay crisp, only the outer silhouette ring hazes. Both
+    // edges follow the draw distance setting (settings.fogNearFor/fogFarFor), so the
+    // horizon never shows a hard wall however far the row is set.
+    this.scene.fog.near = Math.min(520, Math.max(120, fogNearFor(far) * (1 - 0.18 * rig.hazeMul) / this.hazeBias));
+    this.scene.fog.far = fogFarFor(far) * (0.96 + 0.14 * rig.hazeMul);
 
-    // Built-in ACES only when the composite is off: with post on, the scene lands
-    // in a linear render target and the composite grades it (docs/04 §6).
-    this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-    // The composite is gated off on this driver, so the built-in ACES carries the whole
-    // grade: a small pull-back so low-sun key light does not blow the frame to grey.
-    const exposure = rig.exposure * (this.post.enabled ? 1 : 1.02);
+    // Built-in tone mapping only when the composite is off: with post on, the scene
+    // lands in a linear half-float target and the composite tone maps + grades it
+    // (docs/04 §6). Same curve either way (AgX in both, composer.js mirrors it).
+    this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : TONE_MODE;
+    // Post off: the built-in curve carries the whole grade, so AgX gets the same
+    // small pull-back the old ACES path had. Post on: the composite owns exposure.
+    const exposure = rig.exposure * (this.post.enabled ? 1 : (TONE_MODE === THREE.AgXToneMapping ? POST_TUNE.exposure : 1.02));
     this.renderer.toneMappingExposure = exposure;
-    this.post.compositeMat.uniforms.uExposure.value = exposure;
-    this.post.compositeMat.uniforms.uWarm.value = 0.35 + 0.65 * rig.warmth;
-    this.post.compositeMat.uniforms.uBloom.value = 0.35 + 0.35 * rig.warmth;
-    this.post.shafts = settings.quality !== QUALITY.LOW;
+    this.post.exposure = POST_TUNE.exposure;
+    this.post.setRig(rig);
     // Late shader compile: the wetness uniform only exists once the program is built.
     const shT = this.terrainMaterial.userData && this.terrainMaterial.userData.shader;
     if (shT && shT.uniforms.uWet) shT.uniforms.uWet.value = this.wet;
@@ -366,15 +367,15 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.sun.shadow.camera.top = s; this.sun.shadow.camera.bottom = -s;
     this.sun.shadow.camera.far = p.dist + 190;
     this.sun.shadow.camera.updateProjectionMatrix();
-    this.camera.far = q === QUALITY.LOW ? 420 : 900;
+    // The camera far plane has to clear the whole streamed disc or the far hill band is
+    // clipped away and the horizon is a hard cut again.
+    this.camera.far = Math.max(q === QUALITY.LOW ? 420 : 900, settings.drawDistance * 1.1);
     this.camera.updateProjectionMatrix();
 
-    // Post composite: on at MED/HIGH, off at LOW (docs/07 §Budżety).
-    this.post.enabled = settings.post && q !== QUALITY.LOW;
-    this.post.shafts = q !== QUALITY.LOW;
-    this.post.gatherMat.uniforms.uShaftTaps.value = q === QUALITY.HIGH ? 7 : 5;
-    this.post.compositeMat.uniforms.uGrain.value = q === QUALITY.HIGH ? 0.020 : 0.016;
-    this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    // Post stack: POST / GRADE rows plus the driver gate (composer.ok). LOW keeps
+    // it on but runs the cheapest graph (one mip, 3 taps); BLOOM sets the row.
+    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, exposure: POST_TUNE.exposure });
+    this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : TONE_MODE;
     this.onResize();
     this.applyRig();
   }
@@ -440,8 +441,7 @@ float fbm1(vec2 p) { return vnoise(p); }
   render() {
     this._time = performance.now() * 0.001;
     if (this.post.enabled) {
-      this.post.setSun(this.camera, this.rig.sunDir, this.rig.shaftGain);
-      this.post.composite(this.scene, this.camera, this.rig, this._time);
+      this.post.render(this.scene, this.camera, this.rig, this._time);
       this.info.calls = this.post.calls;
       this.info.tris = this.post.tris;
     } else {

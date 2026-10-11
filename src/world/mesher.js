@@ -15,7 +15,9 @@ import { CHUNK, WORLD_HEIGHT } from './chunk.js';
 import { blockColor, blockSurface } from './palette.js';
 import { hash01 } from './noise.js';
 
-export const LOD_CELL = [1, 2, 4, 8];
+// lod 4 -> 16 m cells: the distant hill band. One merged cell per chunk, so a ridge
+// 1 km out costs a handful of triangles and still breaks the sky instead of being sky.
+export const LOD_CELL = [1, 2, 4, 8, 16];
 // AO floor: a crevice may be shaded, never black. 0.56 on the deepest corner, times
 // WALL_SHADE, times the shader's crevice band, is what painted a 1-cell square pit.
 const AO_LEVELS = [1.0, 0.90, 0.81, 0.72];
