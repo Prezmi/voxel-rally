@@ -234,6 +234,11 @@ function bake(def) {
     bandChunks: Object.fromEntries(bandCount),
     baked: new Date().toISOString(),
   };
+  let covered = 0;
+  for (const c of world.chunks.values()) {
+    if (!c.roadCover) continue;
+    for (let i = 0; i < c.roadCover.length; i++) covered += c.roadCover[i];
+  }
   const bytes = encodeMap({ meta, road, world, propMap, tileMap });
   const out = path.join(root, mapUrl(def.id));
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -248,6 +253,7 @@ function bake(def) {
   console.log(`[bake] ${def.id.padEnd(19)} ${(road.length / 1000).toFixed(2)} km  `
     + `${list.length} chunks  ${props} props  ${tiles} tiles  `
     + `${(bytes.length / 1e6).toFixed(2)} MB  ${secs} s  bands=[${def.bands.map((b) => b.biome).join('>')}]`
+    + `  roadCover=${covered} columns (1 bit/col in the file)`
     + `  veg trees=${stats.trees} minNN=${stats.minTrunkSpacing} meanNN=${stats.meanTrunkSpacing} overlap=${stats.crownOverlaps} specimens=${stats.specimens} dropped=${stats.dropped}`
     + `  coverage=${nearR}/${farR} m (${nearChunks}+${farChunks} chunks)  far props=${farProps}`
     + `  verify=${applied ? 'OK' : String(ok)}`);
@@ -269,7 +275,8 @@ function applyCheck(src, back, bytes, propTables) {
     for (let i = 0; i < c.blocks.length; i++) if (c.blocks[i] !== d.blocks[i]) { bad++; break; }
     for (let i = 0; i < c.height.length; i++) {
       if (c.height[i] !== d.height[i] || c.surface[i] !== d.surface[i]
-        || c.fine[i] !== d.fine[i] || c.rut[i] !== d.rut[i] || c.wear[i] !== d.wear[i]) { bad++; break; }
+        || c.fine[i] !== d.fine[i] || c.rut[i] !== d.rut[i] || c.wear[i] !== d.wear[i]
+        || c.roadCover[i] !== d.roadCover[i]) { bad++; break; }
     }
   }
   let pbad = 0;

@@ -20,7 +20,7 @@
 // THREE-free on purpose (same reason as block-tiles.js / road-skin.js): the shipped grid,
 // offsets and profile have to be assertable headless from src/debug/tests.js.
 import { CHUNK, WORLD_HEIGHT, chunkKey } from './chunk.js';
-import { SHOULDER, CROWN, RUT_DEPTH, RUT_AT, RUT_WIDTH, EDGE_BREAK, GRAVEL_RIPPLE } from './road-carve.js';
+import { SHOULDER, CROWN, RUT_DEPTH, RUT_AT, RUT_WIDTH, EDGE_BREAK, GRAVEL_RIPPLE, RIBBON_OVERLAP, RIM_EARTH } from './road-carve.js';
 import { blockColor } from './palette.js';
 import { blockSurface } from './palette.js';
 import { hash01, valueNoise } from './noise.js';
@@ -29,7 +29,10 @@ export const STEP_ALONG = 1.0;       // m along the spline (= the road sample pi
 export const STEP_ACROSS = 0.5;      // m across the corridor
 export const RIBBON_DROP = 0.004;    // m BELOW the carved terrain top: never proud, and
                                      // the neighbouring block edges overlap it (no dark gap)
-export const EDGE_BLOCK_BAND = 0.5;  // outer half metre drops onto the block lattice
+// 0.5 m of block-stepped edge + RIBBON_OVERLAP (0.4 m) of lateral tuck: the ribbon now
+// runs past the terrain edge it is carved into and slides UNDER the edge blocks, so the
+// rim is never exposed to the camera (road-carve.js RIBBON_OVERLAP / LANE_CORE_INSET).
+export const EDGE_BLOCK_BAND = 0.5 + RIBBON_OVERLAP;
 export const EDGE_CHIP = 0.16;       // m of broken edge blocks in that band
 const GRIT_SALT = 0x7a11c9f3;        // continuous ripple lattice (NOT the carve's
 const EDGE_SALT = 0x1ce7a55b;        // per-column hash - that is what steps per column)
@@ -104,6 +107,13 @@ export function ribbonHeight(world, road, i, d) {
     // hard to that column: a few mm under it, and the block edge overlaps the ribbon.
     const own = world.columnTopQAt(Math.floor(x), Math.floor(z));
     if (own >= 0 && y > own / 16 - RIBBON_DROP) y = own / 16 - RIBBON_DROP;
+    // Outermost ring (the RIBBON_OVERLAP tuck under the terrain edge blocks): clamped to
+    // the LOWEST terrain top over the cell it spans, so the overlap can never stand above
+    // the ground it slides under - that is what put the bright wedge there.
+    if (ad > hw + SHOULDER + EDGE_BLOCK_BAND - RIBBON_OVERLAP) {
+      const cq = terrainCeilQ(world, x, z);
+      if (cq >= 0 && y > cq / 16 - RIBBON_DROP) y = cq / 16 - RIBBON_DROP;
+    }
   }
   return y;
 }
@@ -175,14 +185,23 @@ export function ribbonChunk(world, road, cx, cz, carveIndex) {
     // skin band (render/road-skin.js ROAD_TONE / RUT_GLOSS) drives tone and the rut
     // sheen. Baked on top: gravel-scale albedo grain, and a darker wheel line.
     const b = blockAtColumn(world, x, z) || 0;
-    blockColor(b, cCol);
+    // Rim / edge-chip band: take the corridor's own packed earth, not the pale verge block
+    // that happens to lie under it, and darken the broken outer steps.
+    const hw0 = road.width[i] / 2, ad0 = Math.abs(d);
+    let bid = b, rimDim = 1;
+    if (ad0 > hw0 + SHOULDER) {
+      bid = RIM_EARTH;
+      const o = (ad0 - (hw0 + SHOULDER)) / EDGE_BLOCK_BAND;
+      rimDim = o > 1 - RIBBON_OVERLAP / EDGE_BLOCK_BAND ? 0.70 : 0.88;
+    }
+    blockColor(bid, cCol);
     const wl = Math.exp(-Math.pow((Math.abs(d) - (road.width[i] / 2) * RUT_AT) / ((road.width[i] / 2) * RUT_WIDTH), 2));
     const grain = 1 + (vnoise(x, z, 0.5, GRAIN_SALT) - 0.5) * 0.16
       + (vnoise(x, z, 1.5, MOTTLE_SALT) - 0.5) * 0.10;
-    const damp = 1 - 0.10 * wl;
+    const damp = (1 - 0.10 * wl) * rimDim;
     col.push(cCol[0] * grain * damp, cCol[1] * grain * damp, cCol[2] * grain * damp);
     const wear = ribbonWear(road, i, d) / 255;
-    sur.push((b ? blockSurface(b) : 0) + (wear > 1 ? 1 : wear < 0 ? 0 : wear));
+    sur.push((bid ? blockSurface(bid) : 0) + (wear > 1 ? 1 : wear < 0 ? 0 : wear));
     v = pos.length / 3 - 1;
     vKey.set(k, v);
     return v;

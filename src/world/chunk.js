@@ -25,6 +25,12 @@ export class Chunk {
     // wheel line / shoulder lip). Written by road-carve.js, read by the mesher for
     // tone only: it is NOT part of the column height and physics never reads it.
     this.wear = new Uint8Array(COLS);
+    // Baked road-coverage flag, one per column (1 = the column centre lies inside the
+    // road-ribbon footprint inset by ROAD_COVER_INSET, i.e. the ribbon fully covers it).
+    // Written by the carve (src/world/road-carve.js), serialised as ONE BIT per column in
+    // the shipped map (src/world/map-load.js), and read by the mesher to decide top-face
+    // suppression instead of approximating the ribbon footprint from `wear`.
+    this.roadCover = new Uint8Array(COLS);
     this.dirty = true;
     this.lod = -1;                                // 0 full, 1 simplified, 2 silhouette
     this.generated = false;

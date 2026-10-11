@@ -12,7 +12,6 @@
 //
 // Winding convention: front faces are CCW when viewed from outside, Y-up world.
 import { CHUNK, WORLD_HEIGHT } from './chunk.js';
-import { LANE_WEAR_MIN } from './road-carve.js';
 import { blockColor, blockSurface } from './palette.js';
 import { hash01 } from './noise.js';
 
@@ -101,6 +100,7 @@ export function meshChunk(world, chunk, lod = 0) {
   const topQ = new Int16Array(N * N);   // surface height in 1/16-block units
   const bid = new Uint8Array(N * N);
   const wearG = new Uint8Array(N * N);  // corridor wear (render-only, see chunk.js)
+  const coverG = new Uint8Array(N * N); // baked "ribbon fully covers this column" bit
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       let sum = 0, cnt = 0, mode = 0, modeCount = 0, peak = 0;
@@ -109,6 +109,7 @@ export function meshChunk(world, chunk, lod = 0) {
           const c = (j * cs + dz) * CHUNK + (i * cs + dx);
           const hc = chunk.wear ? chunk.wear[c] : 0;
           if (hc > wearG[j * N + i]) wearG[j * N + i] = hc;
+          if (chunk.roadCover && chunk.roadCover[c]) coverG[j * N + i] = 1;
           const h = chunk.height[c];
           const tq = h < 0 ? 0 : chunk.columnTopQ(c);
           sum += tq; cnt++;
@@ -173,14 +174,14 @@ export function meshChunk(world, chunk, lod = 0) {
     sur.push(surfId + wearOf(wear));
   };
 
-  // Neighbour-chunk wear band, for a wall on the last plane of this chunk (a lane that
-  // crosses a chunk border must stay suppressed across it).
-  const wearOutside = (i, j) => {
+  // Neighbour-chunk road-cover bit, for a wall on the last plane of this chunk (a lane
+  // that crosses a chunk border must stay suppressed across it).
+  const coverOutside = (i, j) => {
     const wx = Math.floor(x0 + i * cs + cs * 0.5), wz = Math.floor(z0 + j * cs + cs * 0.5);
     const c = world.chunkAt(Math.floor(wx / CHUNK), Math.floor(wz / CHUNK));
-    if (!c || !c.wear) return 0;
+    if (!c || !c.roadCover) return 0;
     const lx = ((wx % CHUNK) + CHUNK) % CHUNK, lz = ((wz % CHUNK) + CHUNK) % CHUNK;
-    return c.wear[lz * CHUNK + lx];
+    return c.roadCover[lz * CHUNK + lx];
   };
 
   const topOutside = (i, j) => {
@@ -210,8 +211,17 @@ export function meshChunk(world, chunk, lod = 0) {
     wearBkt[c] = wearG[c] >> 5;
     // The ribbon is only built for rings 0/1 (streaming.js), so the far silhouette LODs
     // keep their voxel top panels - suppressing them there would open a hole in the lane.
-    if (wearG[c] >= LANE_WEAR_MIN && lod <= 1) { laneCell[c] = 1; visited[c] = 1; }
+    if (coverG[c] && lod <= 1) laneCell[c] = 1;
   }
+  // BAKED COVERAGE, not an approximation: chunk.roadCover is computed once by the carve
+  // (road-carve.js ROAD_COVER_INSET) and shipped as one bit per column in the map
+  // (map-load.js v3). It says exactly which columns the road ribbon covers with its whole
+  // footprint inset 0.6 m, so suppression is exact on curves and on embankments. Every
+  // column outside the bit - i.e. within 0.6 m of the ribbon boundary - keeps its top face
+  // and the ribbon rim overlaps real terrain from above instead of standing on nothing.
+  // The wear-field reconstruction this replaces (LANE_CORE_INSET + a chamfer inset over
+  // the wear mask) misjudged worn verges as lane and cost boundary columns their top face.
+  for (let c = 0; c < N * N; c++) if (laneCell[c]) visited[c] = 1;
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const c0 = j * N + i;
@@ -373,8 +383,8 @@ export function meshChunk(world, chunk, lod = 0) {
         // blocky voxel edge survives, because a wall is still drawn wherever only one
         // side of the step is in the band (the outer half metre of the ribbon).
         let la, lb;
-        if (axis === 0) { la = laneCell[q * N + p]; lb = lastPlane ? (wearOutside(p + 1, q) >= LANE_WEAR_MIN ? 1 : 0) : laneCell[q * N + p + 1]; }
-        else { la = laneCell[p * N + q]; lb = lastPlane ? (wearOutside(q, p + 1) >= LANE_WEAR_MIN ? 1 : 0) : laneCell[(p + 1) * N + q]; }
+        if (axis === 0) { la = laneCell[q * N + p]; lb = lastPlane ? coverOutside(p + 1, q) : laneCell[q * N + p + 1]; }
+        else { la = laneCell[p * N + q]; lb = lastPlane ? coverOutside(q, p + 1) : laneCell[(p + 1) * N + q]; }
         if (la && lb) continue;
         // A heightfield step has to be walled whichever way it faces. The old test
         // only emitted the band when the *left/−z* column was higher, so every step

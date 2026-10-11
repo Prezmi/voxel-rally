@@ -35,9 +35,9 @@ import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguag
 import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
-import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, LANE_WEAR_MIN } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, ROAD_COVER_INSET, RIBBON_EDGE_BAND } from '../world/road-carve.js';
 import { meshChunk } from '../world/mesher.js';
-import { ribbonChunk, ribbonHeight, terrainTopBilinear, STEP_ALONG, STEP_ACROSS, RIBBON_DROP, EDGE_BLOCK_BAND } from '../world/road-ribbon.js';
+import { ribbonChunk, ribbonHeight, terrainTopBilinear, ribbonHalf, STEP_ALONG, STEP_ACROSS, RIBBON_DROP, EDGE_BLOCK_BAND } from '../world/road-ribbon.js';
 import { TILE_ON_CARRIAGEWAY, chunkTiles, TILE_SURFACE_IDS, TILE_CAP_CHUNK } from '../world/block-tiles.js';
 import { buildColliders, queryNearBrute, COLLIDER_CELL, SPECIES_SHAPE } from '../world/prop-colliders.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
@@ -3972,6 +3972,9 @@ function testRoadRibbonIsOneContinuousSurface() {
   let welded = 0, weldMiss = 0, extraSteps = 0, maxStep = 0, maxGroundStep = 0;
   let cover = 0, coverWanted = 0, coverDev = 0, reliefSum = 0, reliefN = 0;
   const posMap = new Map();
+  // (join fix) terrain top faces actually emitted, keyed by the 1 m column they cover
+  const topY = new Map();
+  let edgeTopMissing = 0, edgeCellN = 0, edgeSurfaceOff = 0, edgeSurfaceMax = 0, edgeSurfaceSum = 0, edgeSurfaceN = 0;
   const bil = (x, z) => terrainTopBilinear(world, x, z);
   const band = (x, z, margin) => {
     const i = road.nearest(x, z);
@@ -3982,6 +3985,26 @@ function testRoadRibbonIsOneContinuousSurface() {
     const cx = keyToCx(key), cz = keyToCz(key);
     const t = meshChunk(world, world.chunkAt(cx, cz), 0);
     terrainTris += t.triangles;
+    for (let k = 0; k < t.index.length; k += 3) {
+      const a = t.index[k] * 3, b = t.index[k + 1] * 3, d = t.index[k + 2] * 3;
+      // A terrain TOP face: the mesher emits every top panel flat (all four corners on
+      // one y) and bakes its tilt into the normal, so classify on flatness, not on ny -
+      // next to a void verge the baked normal tilts almost horizontal.
+      const ySpan = Math.max(t.position[a + 1], t.position[b + 1], t.position[d + 1])
+        - Math.min(t.position[a + 1], t.position[b + 1], t.position[d + 1]);
+      if (ySpan > 1e-3) continue;
+      const yMean = (t.position[a + 1] + t.position[b + 1] + t.position[d + 1]) / 3;
+      let ax = 1e9, bx = -1e9, az = 1e9, bz = -1e9;
+      for (const p of [a, b, d]) {
+        if (t.position[p] < ax) ax = t.position[p];
+        if (t.position[p] > bx) bx = t.position[p];
+        if (t.position[p + 2] < az) az = t.position[p + 2];
+        if (t.position[p + 2] > bz) bz = t.position[p + 2];
+      }
+      for (let gz = Math.floor(az + 0.4); gz <= Math.floor(bz - 0.4); gz++) {
+        for (let gx = Math.floor(ax + 0.4); gx <= Math.floor(bx - 0.4); gx++) topY.set(gx + ',' + gz, yMean);
+      }
+    }
     for (let k = 0; k < t.index.length; k += 3) {
       const a = t.index[k] * 3, b = t.index[k + 1] * 3, d = t.index[k + 2] * 3;
       // Classified by all three corners, not the centroid: a merged wall band on the
@@ -3996,12 +4019,15 @@ function testRoadRibbonIsOneContinuousSurface() {
         if (world.columnTopQAt(Math.floor(t.position[p]), Math.floor(t.position[p + 2])) < 0) overVoid = true;
       }
       if (!(overVoid || ySpan > 1.5)) {
-      if (ny > 0.9 && band(t.position[a], t.position[a + 2], 0.2)
+      // The band the RIBBON really covers alone is now the carriageway only: the mesher
+      // keeps the top face of every column the ribbon does not fully cover
+      // (LANE_CORE_INSET), so the shoulder/edge ring legitimately carries terrain faces.
+      if (ny > 0.9 && band(t.position[a], t.position[a + 2], SHOULDER + 3.0)
         && band(t.position[b], t.position[b + 2], 0.2)
         && band(t.position[d], t.position[d + 2], 0.2)) laneTopTris++;   // voxel top panel on the lane
       // A riser 1 m clear of the carriageway edge is the blocky verge character and is
       // wanted; a riser inside the lane is the stepped column fault the ribbon replaces.
-      if (ny < 0.5 && band(t.position[a], t.position[a + 2], 1.0)
+      if (ny < 0.5 && band(t.position[a], t.position[a + 2], SHOULDER + 3.0)
         && band(t.position[b], t.position[b + 2], 1.0)
         && band(t.position[d], t.position[d + 2], 1.0)) laneRisers++;
       }
@@ -4053,6 +4079,81 @@ function testRoadRibbonIsOneContinuousSurface() {
     const top = bil(road.x[i], road.z[i]);
     if (top > -1e4) { const dev = top - b; coverDev += dev; if (dev >= RIBBON_DROP - 1e-6) cover++; }
   }
+  // (1) EXACT, read from the baked per-column bit (chunk.roadCover: the same flag
+  // map-load.js v3 ships and the mesher suppresses with). A column marked fully covered
+  // must have its terrain top face suppressed AND must really lie inside the ribbon
+  // footprint, otherwise the lane has a hole; a column not marked, whose centre lies
+  // within ROAD_COVER_INSET (0.6 m) of the ribbon edge, must keep its top face. Classified
+  // per column instead of by scanning the wear band along the spline, so curves and
+  // embankments are judged on their real geometry.
+  const coverAtPt = (x, z) => {
+    const c = world.chunkAt(Math.floor(x / CHUNK), Math.floor(z / CHUNK));
+    if (!c || !c.roadCover) return 0;
+    const lx = ((Math.floor(x) % CHUNK) + CHUNK) % CHUNK, lz = ((Math.floor(z) % CHUNK) + CHUNK) % CHUNK;
+    return c.roadCover[lz * CHUNK + lx];
+  };
+  let coverBits = 0, coverKept = 0, coverHole = 0, coverMiss = 0, halfMismatch = 0;
+  for (let i = 1; i < road.n; i++) {
+    if (ribbonHalf(road, i) !== road.width[i] / 2 + SHOULDER + RIBBON_EDGE_BAND) halfMismatch++;
+  }
+  for (const key of index.keys()) {
+    const cx = keyToCx(key), cz = keyToCz(key);
+    for (let lz = 0; lz < CHUNK; lz++) {
+      for (let lx = 0; lx < CHUNK; lx++) {
+        const gx = cx * CHUNK + lx, gz = cz * CHUNK + lz;
+        if (world.columnTopQAt(gx, gz) < 0) continue;      // void column: nothing to suppress
+        const px = gx + 0.5, pz = gz + 0.5;
+        const iN = road.nearest(px, pz);
+        const lat = Math.abs((px - road.x[iN]) * road.nx[iN] + (pz - road.z[iN]) * road.nz[iN]);
+        const half = ribbonHalf(road, iN);
+        const has = topY.has(gx + ',' + gz);
+        if (coverAtPt(px, pz)) {
+          coverBits++;
+          if (lat > half - ROAD_COVER_INSET + 1e-6) coverHole++;  // bit claims a column the ribbon misses
+          if (has) coverKept++;                                   // top face left: terrain inside the ribbon
+        } else if (lat <= half - ROAD_COVER_INSET) {
+          coverMiss++;                                            // fully covered yet not suppressed
+        } else if (lat <= half + ROAD_COVER_INSET) {
+          edgeCellN++;
+          if (!has) edgeTopMissing++;                             // boundary column lost its top face
+        }
+      }
+    }
+  }
+  // (2) just outside the carriageway edge (inside the shoulder, where the ribbon now
+  // overlaps the terrain from above) the drawn surface stays on the terrain height.
+  for (let i = 1; i < road.n; i++) {
+    const hw = road.width[i] / 2;
+    for (const s of [-1, 1]) {
+      for (const off of [1.0, 1.2, 1.4]) {
+        const d = s * (hw + off);
+        const x = road.x[i] + road.nx[i] * d, z = road.z[i] + road.nz[i] * d;
+        const gx = Math.floor(x), gz = Math.floor(z);
+        const own = world.columnTopQAt(gx, gz);
+        if (own < 0) continue;
+        // a verge column with a void in its 1 m cell is a cliff lip, not a surface
+        let solid = true;
+        for (let dz = 0; dz <= 1 && solid; dz++) {
+          for (let dx = 0; dx <= 1; dx++) if (world.columnTopQAt(gx + dx, gz + dz) < 0) { solid = false; break; }
+        }
+        if (!solid) continue;
+        const y = topY.get(gx + ',' + gz);
+        if (y === undefined) continue;
+        const rib = ribbonHeight(world, road, i, d);
+        const dev = Math.abs(Math.min(y, rib) - Math.min(own / 16, rib));
+        if (dev > edgeSurfaceMax) edgeSurfaceMax = dev;
+        edgeSurfaceSum += dev; edgeSurfaceN++;
+        if (dev > 0.05) edgeSurfaceOff++;
+      }
+    }
+  }
+  if (edgeTopMissing) gaps.push(`${edgeTopMissing}/${edgeCellN} boundary columns (centre within 0.6 m of the lane boundary) lost their terrain top face`);
+  if (halfMismatch) gaps.push(`${halfMismatch} road samples disagree between road-ribbon.js ribbonHalf and road-carve.js RIBBON_EDGE_BAND`);
+  if (coverBits === 0) gaps.push('no column carries the baked road-cover bit');
+  if (coverHole) gaps.push(`${coverHole}/${coverBits} columns marked fully covered lie outside the ribbon footprint (suppressed top face with no ribbon over it)`);
+  if (coverKept) gaps.push(`${coverKept}/${coverBits} columns marked fully covered still draw a terrain top face inside the ribbon`);
+  if (coverMiss) gaps.push(`${coverMiss} columns fully covered by the ribbon but not suppressed by the baked bit`);
+  if (edgeSurfaceN === 0 || edgeSurfaceSum / edgeSurfaceN > 0.05) gaps.push(`surface just outside the carriageway edge is ${(edgeSurfaceN ? (edgeSurfaceSum / edgeSurfaceN).toFixed(3) : 'n/a')} m off the terrain height over ${edgeSurfaceN} samples (${edgeSurfaceOff} over 5 cm, max ${edgeSurfaceMax.toFixed(3)} m)`);
   if (laneTopTris) gaps.push(`${laneTopTris} voxel top panels still drawn inside the lane band`);
   if (laneRisers) gaps.push(`${laneRisers} stepped column faces still drawn inside the lane band`);
   if (proud) gaps.push(`${proud} ribbon vertices stand >2 mm above the terrain surface (max ${maxProud.toFixed(3)} m)`);
@@ -4065,7 +4166,7 @@ function testRoadRibbonIsOneContinuousSurface() {
   if (!(STEP_ALONG === 1 && STEP_ACROSS === 0.5)) gaps.push(`ribbon grid ${STEP_ALONG}/${STEP_ACROSS} m, want 1.0 along / 0.5 across`);
   check('T59 the lane is one continuous ribbon mesh, not stepped voxel columns: no voxel top face or riser is drawn inside the lane band, the 1 m x 0.5 m ribbon grid is welded across chunk borders, it never stands proud of the terrain top and adds no step along the lane the ground does not have',
     gaps.length === 0,
-    `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} wearMin=${LANE_WEAR_MIN} gaps=[${gaps.join(' ')}]`);
+    `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} coverBits=${coverBits} keptCovered=${coverKept} coverHole=${coverHole} coverMiss=${coverMiss} ribbonHalfMismatch=${halfMismatch} coverInset=${ROAD_COVER_INSET} edgeTopMissing=${edgeTopMissing}/${edgeCellN} edgeSurfaceMax=${edgeSurfaceMax.toFixed(3)}m gaps=[${gaps.join(' ')}]`);
 }
 testRoadRibbonIsOneContinuousSurface();
 

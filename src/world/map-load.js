@@ -13,7 +13,8 @@
 //     1 ROAD     the derived road table: n, length, then the 12 Float32 columns and the
 //                2 Uint8 columns (surfaceId, feature) the spline builds
 //     2 CHUNKS   terrain: the stage-cache RLE block (height, fine, rut, surface id per
-//                cell, wear, run-length voxel stack) - the format physics already reads
+//                cell, wear, road-cover bitfield (v3: 1 bit per column, 32 bytes per
+//                carved chunk), run-length voxel stack) - the format physics already reads
 //     3 PROPS    per chunk: species, x, y, z, yaw, scale, variant
 //     4 TILES    per chunk + LOD ring: sparse (column, surfaceId|flags) pairs
 //     5 CONTROL  the road spline control points (authored shape, for re-baking/editing)
@@ -27,7 +28,7 @@ import { BLOCK, blockSurface } from './palette.js';
 import { buildIndex } from './road-spline.js';
 
 export const MAP_MAGIC = [0x52, 0x4d, 0x41, 0x50];      // 'RMAP'
-export const MAP_VERSION = 2;
+export const MAP_VERSION = 3;
 export const MAP_SIZE_BUDGET = 16 * 1024 * 1024;        // per shipped map
 // Authored coverage of a shipped map (v2): no longer a disc around the start but a
 // CORRIDOR along the whole route, in two bands:
@@ -35,6 +36,9 @@ export const MAP_SIZE_BUDGET = 16 * 1024 * 1024;        // per shipped map
 //   far  - the wider band: distant terrain heightfield + far vegetation billboards only,
 //          so the horizon and the treeline exist everywhere along the stage
 export const MAP_NEAR_DEFAULT = 120;
+// v3 adds the per-column road-cover bit (chunk.roadCover): 32 bytes per carved chunk, the
+// exact ribbon footprint the mesher uses for top-face suppression instead of guessing it
+// from the wear field. Far under MAP_SIZE_BUDGET on all four shipped maps.
 export const MAP_FAR_DEFAULT = 400;
 export const SEC = { ROAD: 1, CHUNKS: 2, PROPS: 3, TILES: 4, CONTROL: 5 };
 
@@ -274,7 +278,7 @@ function columnIsCanonical(c, col) {
 
 function encodeChunks(world) {
   const parts = [];
-  let natural = 0, carved = 0;
+  let natural = 0, carved = 0, covered = 0;
   const run = new Uint8Array(COLS * BLOCK_WINDOW * 2 + 16);
   for (const c of world.chunks.values()) {
     let nat = true;
@@ -309,6 +313,12 @@ function encodeChunks(world) {
         a[7 * COLS + i] = c.wear[i];
       }
       parts.push(a);
+      // v3: the road-cover bitfield, one BIT per column (256 columns -> 32 bytes).
+      const cover = new Uint8Array(COLS >> 3);
+      for (let i = 0; i < COLS; i++) {
+        if (c.roadCover[i]) { cover[i >> 3] |= (1 << (i & 7)); covered++; }
+      }
+      parts.push(cover);
       let n = 0;
       for (let col = 0; col < COLS; col++) {
         const base = col * WORLD_HEIGHT, top = c.height[col];
@@ -331,7 +341,7 @@ function encodeChunks(world) {
   let total = 0; for (const p of parts) total += p.length;
   const out = new Uint8Array(total); let at = 0;
   for (const p of parts) { out.set(p, at); at += p.length; }
-  return { bytes: out, natural, carved };
+  return { bytes: out, natural, carved, covered };
 }
 
 function decodeChunks(world, bytes, onProgress = null) {
@@ -346,6 +356,7 @@ function decodeChunks(world, bytes, onProgress = null) {
     at += 5;
     const c = world.ensureChunk(cx, cz);
     c.farBand = isFar;
+    c.roadCover.fill(0);
     if (isFar) far++; else near++;
     if (mode === 0) {
       if (at + COLS * 2 > u.length) return null;
@@ -378,7 +389,7 @@ function decodeChunks(world, bytes, onProgress = null) {
       at += COLS + 1;
       natural++;
     } else {
-      if (at + COLS * 8 + 4 > u.length) return null;
+      if (at + COLS * 8 + (COLS >> 3) + 4 > u.length) return null;
       for (let i = 0; i < COLS; i++) {
         c.height[i] = u[at + i];
         c.surface[i] = u[at + COLS + i];
@@ -386,6 +397,7 @@ function decodeChunks(world, bytes, onProgress = null) {
         c.fine[i] = dv.getInt16(at + 3 * COLS + i * 2, true);
         c.rut[i] = dv.getInt16(at + 5 * COLS + i * 2, true);
         c.wear[i] = u[at + 7 * COLS + i];
+        c.roadCover[i] = (u[at + 8 * COLS + (i >> 3)] >> (i & 7)) & 1;
         c.blocks.fill(BLOCK.STONE, i * WORLD_HEIGHT, i * WORLD_HEIGHT + WORLD_HEIGHT);
         const top = c.height[i];
         // Above the column top: air. Inside the window: the runs below overwrite it.
@@ -394,7 +406,7 @@ function decodeChunks(world, bytes, onProgress = null) {
         for (let y = lo; y <= top; y++) c.blocks[i * WORLD_HEIGHT + y] = BLOCK.AIR;
         void topId;
       }
-      at += COLS * 8;
+      at += COLS * 8 + (COLS >> 3);
       carved++;
       const rl = dv.getUint32(at, true); at += 4;
       if (at + rl > u.length) return null;

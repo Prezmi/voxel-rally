@@ -46,6 +46,28 @@ export const GRAVEL_RIPPLE = 0.055;     // m of small-stone ripple across the st
 // shipped map (chunk.wear is serialised in map-load.js / stage-cache.js).
 export const LANE_WEAR_MIN = 64;
 
+// RIBBON JOIN (white wedges / pale shards along both carriageway edges): the ribbon used
+// to end exactly at the terrain edge it was carved into, so the last row of terrain
+// columns had its top face suppressed AND the ribbon rim was exposed at the same place -
+// the camera saw straight into the gap. Now the ribbon runs RIBBON_OVERLAP m PAST that
+// edge, tucked under the terrain edge blocks, and the mesher only suppresses a column top
+// face where the ribbon fully covers it: the column centre must lie inside the ribbon
+// footprint inset by LANE_CORE_INSET (3.0 m on the 1 m mesh column: half the 0.4 m overlap
+// plus the 0.9 m band the ribbon only overhangs, so boundary columns keep
+// their top face and the ribbon overlaps them from above.
+export const RIBBON_OVERLAP = 0.4;           // m of lateral tuck under the edge blocks
+// BAKED COVERAGE (replaces the wear approximation): the ribbon half width is
+// width/2 + SHOULDER + EDGE_BLOCK_BAND (road-ribbon.js ribbonHalf) and EDGE_BLOCK_BAND is
+// 0.5 + RIBBON_OVERLAP. A column is FULLY covered when its centre sits inside that
+// footprint inset by ROAD_COVER_INSET; the mesher suppresses a top face only there, so
+// every column within ROAD_COVER_INSET of the ribbon boundary keeps its top face. The bit
+// is computed once at bake/carve time and stored per column (chunk.roadCover).
+export const ROAD_COVER_INSET = 0.6;                  // m
+export const RIBBON_EDGE_BAND = 0.5 + RIBBON_OVERLAP; // m: == road-ribbon.js EDGE_BLOCK_BAND
+// Rim / edge-chip band material: the corridor's own packed earth, never the pale verge
+// block that happens to sit under it, and a darker tone on the broken outer steps.
+export const RIM_EARTH = BLOCK.SHOULDER;
+
 /**
  * Surface key -> block id for a corridor column, with the biome guard: SNOW/ICE are
  * MOUNTAIN-only. A shoulder or bank that resolved to a palette entry whose tone anchors
@@ -231,6 +253,15 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
     }
     wear = wear < 0 ? 0 : wear > 255 ? 255 : wear | 0;
     if (chunk.wear[c] < wear) chunk.wear[c] = wear;
+    // Exact ribbon coverage of THIS column: measured at the column centre against its own
+    // nearest road sample, not a wear threshold - so curves and embankments come out right.
+    {
+      const iN = road.nearest(colX + 0.5, colZ + 0.5);
+      const lat = Math.abs((colX + 0.5 - road.x[iN]) * road.nx[iN]
+        + (colZ + 0.5 - road.z[iN]) * road.nz[iN]);
+      chunk.roadCover[c] = (lat <= road.width[iN] / 2 + SHOULDER + RIBBON_EDGE_BAND - ROAD_COVER_INSET)
+        ? 1 : 0;
+    }
     if (world.carveColumn(colX, colZ, target, blockId)) writes++;
   }
   return writes;
