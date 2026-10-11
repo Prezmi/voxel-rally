@@ -422,7 +422,7 @@ function avg(a, i0, i1) { let s = 0, c = 0; for (let i = i0; i <= i1; i++) { s +
 
 /** Arc -> index lookup (samples are 1 m apart, so this is a direct map, plus a
  * cached cursor for the monotonic reads the game does). */
-function buildIndex(road) {
+export function buildIndex(road) {
   road.indexAt = function indexAt(arc) {
     if (arc <= 0) return 0;
     if (arc >= road.length) return road.n - 1;

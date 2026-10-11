@@ -33,6 +33,7 @@ import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_N
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
+import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
   radialBlurAmount, sunVisibility } from '../render/post/tune.js';
@@ -42,6 +43,7 @@ import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { showroomConfig, showroomRoute, showroomPose } from './showroom.js';
 import { fileURLToPath } from 'node:url';
 
@@ -3004,6 +3006,107 @@ function testVegetationCostLadderNeverInverts() {
     `${sample.length} chunks / ${placed} props = ${(placed / sample.length).toFixed(1)} per chunk | ${line('LOW')} | ${line('MED')} | ${line('HIGH')} | gaps=[${gaps.join(' ')}]`);
 }
 testVegetationCostLadderNeverInverts();
+
+// ---------------------------------------------------------------- test 46
+// The rubber's own relief (queue P12: "tyres have no tread relief once caked").
+// attachTyreDirt used to write diffuseColor and roughnessFactor only - it never touched
+// the normal, and its only detail was a value-noise spatter - so a wheel came out as a
+// brown drum at every distance and every dirt level. The tread is now a height field in
+// the wheel's own coordinates (angle around the rolling axis + axial position: it spins
+// with the wheel, costs no geometry), and its gradient tilts the normal by the lug depth
+// that survives the crust. src/render/tyre-tread.js holds the pattern and the GLSL is
+// generated from the same table, so this check measures the field the shader compiles.
+function testTyreTreadRelief() {
+  const T = TYRE_TREAD;
+  const halfW = 0.095, rMax = TYRE_BASE.r;      // the exported rubber: 0.335 m radius, ~190 mm wide
+  const plan = treadPlan(halfW, rMax);
+  const gaps = [];
+
+  // ---- 1. a real block tread: sane pitch, grooves that are grooves ----
+  if (!(plan.lugCount >= 20 && plan.lugCount <= 52)) gaps.push(`${plan.lugCount} lugs around a ${(rMax * 2).toFixed(2)} m tyre`);
+  if (!(plan.pitchAx >= 0.02 && plan.pitchAx <= 0.09)) gaps.push(`block column pitch ${plan.pitchAx.toFixed(4)} m`);
+  if (!(T.depth >= 0.004 && T.depth <= 0.016)) gaps.push(`lug depth ${T.depth} m is not a tyre lug`);
+  const crest = treadCell(0.5, 0, 1, 0, plan);        // column centre, mid-lug
+  const groove = treadCell(0, 0.5, 1, 1, plan);       // groove floor at the shoulder
+  if (!(crest > 0.85)) gaps.push(`block top reads ${crest.toFixed(2)}, not a crest`);
+  if (!(groove < 0.12)) gaps.push(`groove floor reads ${groove.toFixed(2)}, not a groove`);
+
+  // ---- 2. blocks across the width, shoulder columns staggered ----
+  let dips = 0, wasLow = false;
+  for (let c = -plan.blocks * 0.5; c <= plan.blocks * 0.5 + 1e-9; c += 0.02) {
+    const low = treadCell(0.5, c, 1, Math.min(1, Math.abs(c) / (plan.blocks * 0.5)), plan) < 0.5;
+    if (low && !wasLow) dips++;
+    wasLow = low;
+  }
+  if (!(dips >= 3 && dips <= 6)) gaps.push(`${dips} circumferential grooves across ${plan.blocks} columns`);
+  // the centre rib is shallower-cut than the shoulder grooves, and the shoulders sit half
+  // a pitch off the centre columns (a directional tread, not a grid of identical squares)
+  const cutCentre = 1 - treadCell(0.5, 0, 1, 0, plan);
+  const cutShoulder = 1 - treadCell(0.5, 2, 1, 1, plan);
+  if (!(cutShoulder > cutCentre + 0.10)) gaps.push(`shoulder cut ${cutShoulder.toFixed(2)} is not deeper than the rib ${cutCentre.toFixed(2)}`);
+  const centreLug = treadCell(0.5, 0, 1, 0, plan), centreSlot = treadCell(0, 0, 1, 0, plan);
+  const shoulderLug = treadCell(0, 2, 1, 1, plan), shoulderSlot = treadCell(0.5, 2, 1, 1, plan);
+  if (!(centreLug > 0.85 && centreSlot < 0.12)) gaps.push('the centre columns are not phased');
+  if (!(shoulderLug > 0.85 && shoulderSlot < 0.12)) gaps.push('the shoulder columns are not staggered by half a pitch');
+
+  // ---- 3. the tread is on the tread: rim and sidewall stay smooth rubber ----
+  if (!(treadCrown(0.45, 0.0, plan) === 0)) gaps.push('tread reaches down onto the rim');
+  if (!(treadCrown(1.0, 1.0, plan) === 0)) gaps.push('tread reaches out onto the sidewall');
+  if (!(treadCrown(1.0, 0.25, plan) > 0.95)) gaps.push('the crown band is not fully treaded');
+  if (!(treadCell(0.5, 0.3, treadCrown(1.0, 1.0, plan), 1.0, plan) === 0)) gaps.push('a sidewall fragment still gets lugs');
+
+  // ---- 4. the relief is real, sane, and survives caking (the P12 defect) ----
+  let maxTilt = 0, shaped = 0, capped = 0, n = 0, minAmpCaked = Infinity, maxAmpClean = 0;
+  for (let a = 0; a < Math.PI * 2; a += 0.07) {
+    for (let ax = -halfW * 0.8; ax <= halfW * 0.8; ax += 0.006) {
+      const side = Math.abs(ax) / halfW;
+      const clean = treadNormalTilt(a, ax, 1.0, side, plan, 0, 0);
+      const caked = treadNormalTilt(a, ax, 1.0, side, plan, 0.9, 0.5);
+      n++;
+      if (clean.tilt > maxTilt) maxTilt = clean.tilt;
+      if (clean.tilt > 0.15) shaped++;
+      if (clean.raw > T.maxTilt) capped++;
+      if (clean.crown > 0.9) { maxAmpClean = Math.max(maxAmpClean, clean.amp); minAmpCaked = Math.min(minAmpCaked, caked.amp); }
+    }
+  }
+  if (!(maxTilt > 0.25)) gaps.push(`max normal tilt ${maxTilt.toFixed(3)} - the tyre is still flat`);
+  if (!(maxTilt <= T.maxTilt + 1e-6)) gaps.push(`normal tilt ${maxTilt.toFixed(3)} over the ${T.maxTilt} cap`);
+  if (!(capped / n < 0.25)) gaps.push(`the tilt cap binds on ${((capped / n) * 100).toFixed(0)} % of the tread: the groove walls are cliffs, not walls`);
+  if (!(shaped / n > 0.25)) gaps.push(`only ${((shaped / n) * 100).toFixed(0)} % of the tread carries relief`);
+  if (!(minAmpCaked > 0.5 * maxAmpClean)) gaps.push(`a caked tyre keeps only ${minAmpCaked.toFixed(5)} m of the ${maxAmpClean.toFixed(5)} m lug depth`);
+  if (!(treadReliefAmp(0, 1, plan) < treadReliefAmp(0, 0, plan))) gaps.push('water does not round the block edges');
+  if (!(treadReliefAmp(1, 0, plan) < treadReliefAmp(0, 0, plan))) gaps.push('crust does not round the block edges');
+  if (!(treadReliefAmp(1, 0, plan) >= 0.5 * treadReliefAmp(0, 0, plan))) gaps.push('crust erases the tread instead of rounding it');
+
+  // ---- 5. the shader really compiles this field, with no added geometry ----
+  const src = readFileSync(new URL('../render/carMesh.js', import.meta.url), 'utf8');
+  const tyreFn = src.slice(src.indexOf('function attachTyreDirt'), src.indexOf('const _m4 ='));
+  if (!tyreFn.length) gaps.push('attachTyreDirt not found');
+  if (!/normal_fragment_maps/.test(tyreFn)) gaps.push('the tyre patch never touches the normal - the P12 defect is back');
+  if (!/TYRE_TREAD_GLSL/.test(tyreFn) || !/treadPlan\(/.test(tyreFn)) gaps.push('the tyre patch hand-writes its own tread maths');
+  if (!/uTyreRelief|vTyreT1/.test(tyreFn)) gaps.push('the tread gradient never reaches the normal');
+  if (/new THREE\.BufferGeometry|setAttribute\(/.test(tyreFn)) gaps.push('the tread is baked as extra geometry instead of relief');
+  if ((src.match(/#include <normal_fragment_maps>/g) || []).length < 2) gaps.push('only the body shader perturbs the normal');
+  for (const k of ['feather']) {
+    if (!TYRE_TREAD_GLSL.includes(String(T[k]))) gaps.push(`the generated GLSL lost TYRE_TREAD.${k}`);
+  }
+
+  // ---- 6. the patched sources still parse ----
+  // A GLSL patch lives inside a JS template literal, so one stray backtick in a shader
+  // comment is a page-wide SyntaxError: the car layer never builds and every shader
+  // string below silently never compiles. This exact defect happened while writing P12,
+  // and the only thing that caught it was a screenshot of a blank frame.
+  for (const f of ['../render/carMesh.js', '../render/tyre-tread.js', '../dirt/dirt.js', '../main.js']) {
+    const p = fileURLToPath(new URL(f, import.meta.url));
+    const r = spawnSync(process.execPath, ['--check', p], { encoding: 'utf8' });
+    if (r.status !== 0) gaps.push(`${f.split('/').pop()} does not parse: ${(r.stderr || '').split('\n')[1] || r.status}`);
+  }
+
+  check('T46 the rubber has its own relief: a real block tread (lugs, grooves, staggered shoulders, smooth sidewall) whose normal tilt is bounded, covers the crown, and survives caking and water - and the tyre shader perturbs the normal instead of only painting colour',
+    gaps.length === 0,
+    `lugs=${plan.lugCount} pitch ${(T.lugPitch * 1000).toFixed(0)}mm cols=${plan.blocks} axPitch=${(plan.pitchAx * 1000).toFixed(0)}mm depth=${(T.depth * 1000).toFixed(0)}mm | crest=${crest.toFixed(2)} groove=${groove.toFixed(2)} dips=${dips} | tilt max=${maxTilt.toFixed(2)} capped=${((capped / n) * 100).toFixed(0)}% shaped=${((shaped / n) * 100).toFixed(0)}% amp clean=${maxAmpClean.toFixed(4)} caked>=${minAmpCaked.toFixed(4)} | newTris=0 gaps=[${gaps.join(' ')}]`);
+}
+testTyreTreadRelief();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

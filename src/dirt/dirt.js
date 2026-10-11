@@ -84,6 +84,21 @@ export class DirtSystem {
   wipeLens() { this.lens.sweep(); }
   rain(v) { this.env.rain = v; this.env.wet = Math.max(this.env.wet, v * 0.6); }
 
+  /**
+   * Debug only (?dirtseed=<0..1>, src/main.js): pin one dirt state over every panel and
+   * tyre, so a headless frame can photograph the caked skin without driving there. The
+   * sim never calls this - evolution, fling and wash keep owning the real state.
+   */
+  seedPanels(v = 1) {
+    const p = this.panels, k = Math.max(0, Math.min(1, v));
+    for (let i = 0; i < p.count; i++) {
+      p.thick[i] = k; p.wet[i] = 0.40 * k; p.dust[i] = 0.22 * k; p.streak[i] = 0.35 * k;
+      p.cr[i] = 0.32; p.cg[i] = 0.26; p.cb[i] = 0.19;
+    }
+    for (let w = 0; w < p.rubber.length; w++) p.rubber[w] = 0.45 * k;
+    this.map.dirtySeq++;
+  }
+
   summary() {
     return `brud ${this.panels.summary()} | obiektyw ${(this.lens.severity() * 100).toFixed(0)}%`;
   }

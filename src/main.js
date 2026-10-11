@@ -69,6 +69,11 @@ function params() {
   const surfaceKey = (q.get('surface') || '').toLowerCase();
   const frames = q.get('frames') !== null ? Math.max(0, Number(q.get('frames')) | 0) : 0;
   const rain = Number(q.get('rain') || 0);
+  // ?dirtseed=<0..1>: pin the dirt state of every panel and tyre. The showroom freezes
+  // the sim, so its car is otherwise always clean and the caked-rubber skin (tyre tread
+  // under crust, queue P12) could never be photographed. Debug only: absent means the
+  // dirt a real drive makes.
+  const dirtSeed = q.has('dirtseed') ? Math.max(0, Math.min(1, Number(q.get('dirtseed')))) : 0;
   // ?cam=CHASE|BUMPER|ONBOARD|FREE: the dirt proof needs a close view of the panels.
   const cam = (q.get('cam') || '').toUpperCase();
   // ?ref=<s> reference time for the stage (docs/03 §6 ghost is not wired yet).
@@ -126,7 +131,7 @@ function params() {
     autoStart, shotBoot, menuScreen,
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
-    surfaceKey, frames, rain, cam, ref, tod, stats, perftest, steerForce,
+    surfaceKey, frames, rain, dirtSeed, cam, ref, tod, stats, perftest, steerForce,
     showroom: !!showroom, viewName: sheet.view, sheet,
   };
 }
@@ -221,6 +226,7 @@ async function main() {
   const car = new Vehicle(cfg.carId, carWorld, { assists: { ...settings.assists } });
   const dirt = new DirtSystem();
   dirt.rain(cfg.rain);
+  if (cfg.dirtSeed > 0) dirt.seedPanels(cfg.dirtSeed);
   const view = buildCarMesh(car, dirt);
   renderer.scene.add(view.group);
   // ---- particle FX (src/fx): backfire plumes off the two exhaust nodes, wheel

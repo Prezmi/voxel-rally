@@ -9,6 +9,7 @@ import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, defaultExhaust, tyreScale
 import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
 import { PANELS, PANEL_COUNT, PANEL_INDEX } from '../dirt/panel-dirt.js';
+import { TYRE_TREAD, TYRE_TREAD_GLSL, treadPlan } from './tyre-tread.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, beamAnchors, beamGeometry, beamMaterialSpec, isDark, setBeamGain } from './headlights.js';
 import { settings } from '../core/settings.js';
@@ -512,30 +513,68 @@ function attachTyreDirt(mat, dtex, panelIdx, geo) {
   const dims = [s.x, s.y, s.z];
   dims.splice(ai, 1);
   const rMax = Math.max(dims[0], dims[1]) * 0.5;
+  // Angle zero for the tread field: any in-plane unit axis, so that
+  // cross(axis, u) is the second one and atan2 gives the bearing around the wheel.
+  const uAxis = new THREE.Vector3();
+  uAxis.setComponent(ai === 0 ? 1 : 0, 1);
+  // The pattern pitch, in shader units, off this wheel's own exported dimensions.
+  const plan = treadPlan(halfW, rMax);
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPanelTex = { value: dtex.panelTex };
     shader.uniforms.uPanelCol = { value: dtex.colTex };
     shader.uniforms.uTyreUv = { value: new THREE.Vector2((panelIdx + 0.5) / PANEL_COUNT, 0.5) };
     shader.uniforms.uTyreAxis = { value: axis };
+    shader.uniforms.uTyreU = { value: uAxis };
     shader.uniforms.uTyreDims = { value: new THREE.Vector2(Math.max(1e-3, halfW), Math.max(1e-3, rMax)) };
+    shader.uniforms.uTyreTread = { value: new THREE.Vector4(...plan.tread) };
+    shader.uniforms.uTyreCrown = { value: new THREE.Vector4(...plan.crown) };
+    shader.uniforms.uTyreRelief = { value: new THREE.Vector4(...plan.relief) };
+    shader.uniforms.uTyreRib = { value: plan.rib };
+    shader.uniforms.uTyreGroove = { value: plan.groove };
     shader.uniforms.uSpeed = { value: 0 };
     shader.uniforms.uRubber = { value: 0 };
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vTyreP;\nvarying vec3 vTyreN;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTyreP = transformed;\nvTyreN = objectNormal;');
+      .replace('#include <common>', `#include <common>
+uniform vec3 uTyreAxis;
+uniform vec3 uTyreU;
+uniform vec4 uTyreCrown;
+varying vec3 vTyreP;
+varying vec3 vTyreN;
+varying vec3 vTyreT1;
+varying vec3 vTyreT2;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+vTyreP = transformed;
+vTyreN = objectNormal;
+{
+  // The two tread directions, taken to view space here because normalMatrix only
+  // exists in this stage - the fragment shader gets unit vectors it can tilt the normal
+  // with directly, instead of the body shader's object-space fudge.
+  vec3 rv = transformed - dot(transformed, uTyreAxis) * uTyreAxis;
+  vec3 tg = cross(uTyreAxis, rv);
+  float tl = length(tg);
+  vTyreT1 = normalMatrix * (tl > 1e-5 ? tg / tl : uTyreU);
+  vTyreT2 = normalMatrix * uTyreAxis;
+}`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
 uniform sampler2D uPanelTex;
 uniform sampler2D uPanelCol;
 uniform vec2 uTyreUv;
 uniform vec3 uTyreAxis;
+uniform vec3 uTyreU;
 uniform vec2 uTyreDims;
 uniform float uSpeed;
 uniform float uRubber;
 varying vec3 vTyreP;
 varying vec3 vTyreN;
+varying vec3 vTyreT1;
+varying vec3 vTyreT2;
 float gTyreCaked = 0.0;
+float gTyreWet = 0.0;
+float gTyreH = 0.0, gTyreCrown = 0.0, gTyreSide = 0.0;
+vec2 gTyrePat = vec2(0.0);
+${TYRE_TREAD_GLSL}
 float dhash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
 float vnoise(vec3 p) {
   vec3 i = floor(p), f = fract(p);
@@ -567,13 +606,52 @@ float vnoise(vec3 p) {
   float wind = 1.0 - 0.45 * smoothstep(6.0, 30.0, uSpeed);
   float amt = clamp((thick * 1.05 + dust * 1.00) * wind * spatter, 0.0, 1.0);
   gTyreCaked = clamp(amt * (0.30 + 0.95 * clamp(sidewall + inner, 0.0, 1.0)), 0.0, 0.92);
+  gTyreWet = wet;
+
+  // The block tread (queue P12). A height field in the wheel's own coordinates, so it
+  // spins with the wheel and adds no geometry: 0 triangles, and it is what makes a tyre
+  // read as rubber with lugs rather than as a drum, clean or caked.
+  gTyreSide = clamp(side, 0.0, 1.0);
+  gTyreCrown = tyreCrown(rr, gTyreSide);
+  float ang = atan(dot(rad, cross(uTyreAxis, uTyreU)), dot(rad, uTyreU));
+  gTyrePat = vec2(ang * uTyreTread.x, ax * uTyreTread.y);
+  gTyreH = tyreTreadCell(gTyrePat.x, gTyrePat.y, gTyreCrown, gTyreSide);
 
   vec3 caked = mix(dc * 0.55 + vec3(0.10, 0.085, 0.065), vec3(0.20, 0.155, 0.115), 0.45);
+  // Mud packs in the grooves and wears off the block tops, so a caked tyre keeps the
+  // pattern's own contrast instead of becoming one flat brown band.
+  caked *= mix(1.0 - 0.55 * uTyreGroove, 1.0 + 0.35 * uTyreGroove, gTyreH);
   diffuseColor.rgb = mix(diffuseColor.rgb * (1.0 - 0.22 * clamp(uRubber, 0.0, 1.0)), caked, gTyreCaked);
 }
 `)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-roughnessFactor = mix(roughnessFactor, mix(0.86, 0.97, gTyreCaked), clamp(gTyreCaked + 0.25 * clamp(uRubber, 0.0, 1.0), 0.0, 1.0));
+{
+  // Damper, glossier mud down in the groove; dry crust on the worn block tops.
+  float rough = mix(0.86, 0.97, gTyreCaked) * mix(1.0 - 0.18 * uTyreGroove, 1.0, gTyreH);
+  roughnessFactor = mix(roughnessFactor, rough, clamp(gTyreCaked + 0.25 * clamp(uRubber, 0.0, 1.0), 0.0, 1.0));
+}
+`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+{
+  // Tread relief (queue P12): the forward-difference gradient of the height field,
+  // mapped from pattern units to metres of tyre surface, tilts the normal by the lug
+  // depth that survives the crust. The tyre used to write colour and roughness only and
+  // never touched the normal at all, which is why a caked wheel had no shape.
+  if (gTyreCrown > 0.0) {
+    float e = ${TYRE_TREAD.fd};
+    float dhb = (tyreTreadCell(gTyrePat.x + e, gTyrePat.y, gTyreCrown, gTyreSide) - gTyreH) / e;
+    float dhc = (tyreTreadCell(gTyrePat.x, gTyrePat.y + e, gTyreCrown, gTyreSide) - gTyreH) / e;
+    vec3 g = vTyreT1 * (dhb * uTyreTread.x / max(1e-3, uTyreDims.y)) + vTyreT2 * (dhc * uTyreTread.y);
+    float amp = uTyreRelief.x
+      * mix(1.0, uTyreRelief.z, clamp(gTyreCaked, 0.0, 1.0))
+      * (1.0 - uTyreRelief.w * clamp(gTyreWet, 0.0, 1.0))
+      * gTyreCrown;
+    vec3 off = g * amp;
+    float m = length(off);
+    off *= min(1.0, uTyreRelief.y / max(m, 1e-4));
+    normal = normalize(normal - off);
+  }
+}
 `);
     mat.userData.shader = shader;
   };

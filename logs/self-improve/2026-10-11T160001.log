@@ -18,3 +18,23 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T15:00:20.310Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen: P11** — "quality LOW now streams chunks to 250 m for the far vegetation band; confirm LOW frame time is not worse than MEDIUM and clamp if it is" (the lowest open P number; it was the only open item whose question — which preset pays more for its treeline — could not be asked from node at all).
+
+**Verdict: LOW is not worse than MED, so no clamp was owed — the guard was.** The whole band/cap table was inline in `Streaming._rebuildProps`; it now lives as data, and the ladder is measured and pinned.
+
+Changes:
+- `src/world/veg-bands.js:34` `PROP_CAPACITY` (instance budgets), `:46` `VEG_BANDS` (radii + cap multipliers per preset, values unchanged), `:88` `clampUnder` / `:98` `vegBandPlan` (a cheaper preset is clamped under the next one — the clamp P11 asked for, live not decorative: poisoning LOW to `nearR 90 / midCapMul 0.95 / farAdd 900` returns `24 / 0.7 / 700 / 0.3`), `:106` `vegTrisPerInstance` (near = `NEAR_LOD_TRIS`, mid = `planes x 2`, far = 2), `:141` `vegCostFromDensity` (bands integrated over a real measured density)
+- `src/world/streaming.js:13` imports `PROP_CAPACITY`/`vegBandPlan` (its own `CAPACITY` block deleted), `:875` `_rebuildProps` resolves its bands from the table instead of 11 inline constants — behaviour identical
+- `src/debug/tests.js:2923` new check **T45** (check at `:3002`): cost ladder monotone LOW≤MED≤HIGH band-by-band *and* in total, radii/caps monotone, far band still one quad per tree, LOW near band ≤ 26k tris, LOW total ≥ 25 % under MED, LOW farR never under 240 m, the poisoned-row clamp, and that `streaming.js` reads the table
+- `tools/vegcost.mjs` the reproducible probe (48 corridor chunks, 790 props → LOW 27,181 / MED 51,410 / HIGH 94,750 vegetation tris; LOW 47 % under MED in every band)
+- `docs/QUALITY-QUEUE.md` P11 → Done; new open items **P47** (LOW's *effective* far band is 253 m inside a 700 m view — T31 checks the knob, not the radius), **P48** (ladder pinned for FOREST density 1 only), **P49** (posts/spectators/fences are free in the model: no `NEAR_LOD_TRIS` row)
+
+One headless Chrome pass read back: `shots/quality-veg-low.png` (`?q=LOW&cam=CHASE`) — no page error with the streaming layer live (`[car] asset car "rally_v2" ACTIVE`, `[blocks] block tile layer: active`), both forest flanks, fence lines and bushes still drawn. Frame cost untouched (no geometry path edited; `tools/smoke.mjs` clean, `tools/stagetest.mjs` ALL PASS, E1–E4 unchanged).
+
+Test line, verbatim:
+```
+56/56 passed
+```
+(was 55/55 — +1 check, none removed or weakened). Committed locally as `b0819d8 quality loop: the quality ladder is measured, not guessed - vegetation bands as data with a clamp that keeps LOW cheaper than MED (queue P11)`; not pushed.
+To https://github.com/Prezmi/voxel-rally.git
+   265b6c9..b0819d8  main -> main

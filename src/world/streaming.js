@@ -6,6 +6,8 @@ import { CHUNK, COLS, chunkKey, keyToCx, keyToCz } from './chunk.js';
 import { hash01 } from './noise.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
 import { carveChunk, SHOULDER } from './road-carve.js';
+import { chunkTiles, FLAG_PEBBLE, FLAG_RUT, FLAG_CROWN, SURF_MASK, VERGE, VERGE_SALT, BARE_SALT,
+  PEBBLE_CHANCE, TILE_CAP_CHUNK } from './block-tiles.js';
 import { SURF } from './surfaces.js';
 import { PALETTE } from './palette.js';
 import { GeoBuilder } from '../render/primitives.js';
@@ -59,14 +61,10 @@ const BLOCK_SURFACES = Object.keys(BLOCK_NODE).map(Number);
 // Hard caps: 192 tiles per chunk (a 16x16 chunk crossed by an 18 m corridor cannot
 // carry more, and the cap makes the instance budget fixed), one InstancedMesh per
 // surface type with a fixed capacity allocated once at boot. No allocation per frame.
-const TILE_CAP_CHUNK = 192;
 const TILE_CAPACITY = 4096;
-const VERGE = 1.7;                 // nominal m past carriageway+shoulder that still counts
 const VERGE_SHRINK = 0.78;         // grass/verge plates shrink: paving stops at the edge
 // The verge used to end on a ruled tile line. The cutoff jitters per column and the
 // grass band is thinned out to bare dirt, so the corridor edge is ragged.
-const VERGE_SALT = 0x5177a1e3;
-const BARE_SALT = 0x2be4c07d;
 // A tile footprint is 12 % wider than the 1 m column pitch, so neighbours overlap
 // instead of leaving slots, and the slab sits a hair BELOW the column top: TILE_LIFT
 // used to be +0.02, which put a lit lip under every plate and let graded ground show
@@ -76,10 +74,6 @@ const TILE_LIFT = -0.03;           // top face stays at or under the column top,
 const TILE_JITTER = 0.14;          // m of in-plane jitter, affordable because tiles overlap
 const RUT_DROP = 0.04;             // packed wheel line sits lower than the crown
 const CROWN_RAISE = 0.02;          // the centre of the road is the high line (inside LIFT)
-const PEBBLE_CHANCE = 0.18;        // share of the road-edge band that becomes small stones
-// Free high bits of the per-column tile table (surface ids are < 32): what relief and
-// what kind of edge material this column's tile carries.
-const FLAG_PEBBLE = 0x80, FLAG_RUT = 0x40, FLAG_CROWN = 0x20, SURF_MASK = 0x1f;
 // Distance ramp, not a hard cut. TILE_RING_MAX = 0 gave a visible wall where the block
 // detail simply stopped at ~110 m. Ring 0 keeps one block per corridor column (full
 // detail on the road you are driving on), ring 1 gets every 3rd column - a coarser,
@@ -350,58 +344,6 @@ export class Streaming {
     return this.blockActive;
   }
 
-  /** Which columns of one chunk get a tile: the carriageway band plus VERGE beyond it. */
-  _chunkTiles(cx, cz, stride = 1, cap = TILE_CAP_CHUNK) {
-    // Data only: no dependency on the block glb, so pre-generation (boot or the
-    // offline cache) can build these tables before stage_blocks.glb has resolved.
-    const chunk = this.world.chunkAt(cx, cz);
-    if (!chunk) return null;
-    const t = new Uint8Array(COLS);
-    t.tiles = 0;
-    const x0 = cx * CHUNK, z0 = cz * CHUNK;
-    const road = this.road;
-    const cand = [];
-    for (let c = 0; c < COLS; c++) {
-      // Mid distance keeps the same blocks on a sparser grid: 1/9 of the instances of
-      // the near ring, so the ramp costs almost nothing but hides the cut-off.
-      if (stride > 1 && ((c & (CHUNK - 1)) % stride || (c >> 4) % stride)) continue;
-      const wx = x0 + (c & (CHUNK - 1)) + 0.5, wz = z0 + (c >> 4) + 0.5;
-      const i = road.nearest(wx, wz);
-      const lat = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i]);
-      const hw = road.width[i] / 2;
-      const verge = VERGE * (0.5 + hash01(Math.round(wx), Math.round(wz), VERGE_SALT));
-      if (lat > hw + SHOULDER + verge) continue;
-      const sid = chunk.surface[c];                        // the id physics already has
-      if (!sid || !BLOCK_SURFACES.includes(sid)) continue;
-      let flags = 0;
-      if (lat > hw + SHOULDER * 0.4) {
-        // Verge: bare dirt shows between the plates, and the dropout deepens outwards so
-        // nothing sits far up the bank where it reads as paving. Grass survives only in
-        // the inner half of the verge band; the outer half drops over half its columns.
-        const outer = lat > hw + SHOULDER + verge * 0.5;
-        if (outer && sid === SURF.GRASS) continue;
-        if (hash01(c + cx * 17, cz * 31 + cx, BARE_SALT) < (outer ? 0.55 : 0.22)) continue;
-      } else if (lat > hw - 0.55) {
-        if (hash01(c + cx * 13, cz * 29 + cx, VERGE_SALT) < PEBBLE_CHANCE) flags = FLAG_PEBBLE;
-      } else if (Math.abs(lat - hw * 0.55) < hw * 0.22) {
-        flags = FLAG_RUT;                                  // same band the carve wears dark
-      } else if (lat < hw * 0.30) {
-        flags = FLAG_CROWN;
-      }
-      cand.push([c, sid | flags, lat]);
-    }
-    // The cap is fixed, so spend it from the carriageway outwards: stopping at the
-    // first 192 columns left raw unbanded strips in the middle of the corridor.
-    cand.sort((a, b) => a[2] - b[2]);
-    let n = 0;
-    for (const [c, sid] of cand) {
-      if (n >= cap) break;
-      t[c] = sid;
-      n++;
-    }
-    t.tiles = n;                                           // count kept on the same array
-    return t;
-  }
 
   /**
    * Ring-specific tile table for one chunk, cached on the stage. Pre-generation
@@ -414,7 +356,7 @@ export class Streaming {
     let t = tables.get(key);
     if (t !== undefined) return t;
     const stride = TILE_STRIDE[ring];
-    t = stride ? (this._chunkTiles(cx, cz, stride, TILE_CAP_RING[ring]) || null) : null;
+    t = stride ? (chunkTiles(this.world, this.road, BLOCK_SURFACES, cx, cz, stride, TILE_CAP_RING[ring]) || null) : null;
     tables.set(key, t);
     return t;
   }
