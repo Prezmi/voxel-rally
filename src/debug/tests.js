@@ -7,7 +7,7 @@
 import { Vehicle } from '../car/vehicle.js';
 import { VoxelWorld } from '../world/chunk.js';
 import { SURF, SURFACES, surface } from '../world/surfaces.js';
-import { TYRE_BASE } from '../car/car-params.js';
+import { TYRE_BASE, CARS } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust } from '../render/car-asset.js';
@@ -16,7 +16,7 @@ import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
 import { buildRoad } from '../world/road-spline.js';
-import { solveGhost } from '../game/ghost.js';
+import { solveGhost, powertrainCeiling, SURFACE_VMAX } from '../game/ghost.js';
 import { planGates, StageRun, STATE } from '../game/stage.js';
 import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
@@ -1348,7 +1348,62 @@ function testLooseSurfaceDragBand() {
     gaps.length === 0, rows.join(' ') + ` | steps=${(term.gravel - term.peat).toFixed(0)}kph total | drag=${LADDER.map((k) => { const s = SURFACES.find((x) => x.key === k); return `${k}:${s.crr}/${s.sink}`; }).join(' ')} | gaps=[${gaps.join(' ')}]`);
   return { term, gaps, grip };
 }
-testLooseSurfaceDragBand();
+const bandTerm = testLooseSurfaceDragBand().term;
+
+// ---------------------------------------------------------------- test 24
+// The straight-line powertrain ceiling the ghost takes as its hard cap. It used to be the
+// drag-only cube root of peak power (82.3 m/s for car 'A') while the source quoted
+// "~70 m/s" for it: both sat above the tallest gear (71.3 m/s) and 60 % above what the
+// car actually holds on the reference surface (gravel, 51.6 m/s), so the number the pace
+// was justified with was not a capability at all. Pin that ceiling between the gearbox and
+// the physics: never above the gearing limit, never under the terminal speed measured on
+// the flat straight, never rising with rolling resistance, and always above the
+// willingness table SURFACE_VMAX so the surface row — never the cap — is what bounds a
+// reference. Re-measure the physics column with tools/vmax.mjs.
+function testGhostPowertrainCeilingIsReal() {
+  const measured = { ...bandTerm };   // kph, straight already driven by T23 for the loose ladder
+  const gaps = [], rows = [];
+  for (const key of ['asphalt', 'stone', 'ice', 'unknown']) {
+    const s = SURFACES.find((x) => x.key === key);
+    const w = new FlatWorld(s.id);
+    const car = makeCar(w, {});
+    car.placeAt(0, 0, 0);
+    let vtop = 0;
+    for (let i = 0; i < Math.round(150 / DT); i++) {
+      car.setInput({ throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+      car.step(DT);
+      vtop = Math.max(vtop, car.body.groundSpeed);
+    }
+    measured[key] = vtop * 3.6;
+  }
+  const gearingOf = (c) => (c.engine.redline * Math.PI / 30) / (Math.min(...c.gears) * c.finalDrive) * TYRE_BASE.r;
+  for (const key of Object.keys(SURFACE_VMAX)) {
+    const s = SURFACES.find((x) => x.key === key);
+    const cap = powertrainCeiling(CARS.A, s), capKph = cap * 3.6;
+    rows.push(`${key}=${capKph.toFixed(0)}v${measured[key].toFixed(0)}kph`);
+    if (capKph < measured[key] - 0.5) gaps.push(`${key} cap ${capKph.toFixed(0)} under measured ${measured[key].toFixed(0)}`);
+    if (!(cap > SURFACE_VMAX[key])) gaps.push(`${key} cap ${cap.toFixed(1)}m/s binds the surface ceiling ${SURFACE_VMAX[key]}`);
+  }
+  // Gearing is the hard side of the cap for every car; the power side must be what binds
+  // first for a car geared short enough to run out of power before the rev limiter.
+  for (const id of Object.keys(CARS)) {
+    const c = CARS[id], vGear = gearingOf(c);
+    for (const s of SURFACES) {
+      const cap = powertrainCeiling(c, s);
+      if (!(cap > 0) || cap > vGear + 1e-6) gaps.push(`${id}/${s.key} cap ${cap.toFixed(1)} outside 0..${vGear.toFixed(1)} gearing`);
+    }
+    if (!(powertrainCeiling(c, surface(SURF.GRAVEL)) >= powertrainCeiling(c, surface(SURF.PEAT)))) {
+      gaps.push(`${id} cap rises with rolling resistance`);
+    }
+  }
+  if (!(powertrainCeiling(CARS.C, surface(SURF.GRAVEL)) < gearingOf(CARS.C) - 0.5)) {
+    gaps.push('power term never binds (car C should run out of power before the limiter)');
+  }
+  check('T24 the ghost powertrain ceiling is a real ceiling: never over the tallest gear, never under the terminal speed the physics reaches, never binding under the surface ceiling',
+    gaps.length === 0, `car A cap/measured ${rows.join(' ')}`
+    + ` | gearing=${gearingOf(CARS.A).toFixed(1)}m/s carC=${powertrainCeiling(CARS.C, surface(SURF.GRAVEL)).toFixed(1)}m/s of ${gearingOf(CARS.C).toFixed(1)}m/s | gaps=[${gaps.join(' ')}]`);
+}
+testGhostPowertrainCeilingIsReal();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

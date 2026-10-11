@@ -12,8 +12,17 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P4 · `src/game/ghost.js:30` still says top speed ~70 m/s, stale after the
-      powertrain retune, and any ghost pace built on it is wrong
+- [ ] P4 · the ghost *calibration* is stale after the P3 drag retune (pre-existing at
+      HEAD, confirmed by stashing): `tools/stagetest.mjs` **E3 and A6 are RED** — the
+      harness driver laps seed 12345 in 222.83 s while `referenceSpeedMargin 0.58` still
+      yields ref 268.16 s, so the reference is 20.3 % SLOWER than the driver it was tuned
+      to be 4.8 % quicker than, and the A6 split sanity band (|split| < 20 s) is at
+      -44.30 s; the stage limit (ref * 1.6) is consequently 28 % more generous than the
+      design intends. `src/game/ghost.js:94-98` now carries the measured numbers. Nothing
+      in `src/debug/tests.js` compares the reference with a driven lap, so the suite
+      stayed green over a red acceptance criterion — re-calibrate the margin (and if the
+      surface ceilings move, move `SURFACE_VMAX` with them per P18) and give T24 a sibling
+      check that pins ref-vs-driver inside the band
 - [ ] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
       setting); add a row in the same wood-banner style so mobile users can reach it
 - [ ] P6 · prop and glb materials export with `doubleSided` true from Blender
@@ -60,10 +69,44 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       (`src/dirt/emitters.js:276` `crr * 0.9 + sink * 2.2`), so fitting those for terminal
       speed also cut the mud/sand/peat plumes by a third (mud 0.247 -> 0.168, peat 0.278
       -> 0.187); churn should follow `plough`/looseness, not the speed-fit columns
+- [ ] P21 · the ghost has no driveline in its acceleration envelope: `aPow = peakPower /
+      (mass * v)` (`src/game/ghost.js:170`) is constant power with no torque curve, no rpm
+      band and no gear steps, so the reference pulls from a standstill in a way the car
+      cannot (car 'A' needs 4.61 s to 100 kph, T20); the accel pass also carries a dead
+      term (`src/game/ghost.js:172` `- (k > CURV_EPS ? 0 : 0)`) while the `cornerDrag`
+      knob documented as "extra resistance while cornering" (`:83`) is applied only to the
+      braking pass (`:181`) — so cornering scrub is charged in the wrong pass
+- [ ] P22 · `powertrainCeiling` derives the gearing cap from `TYRE_BASE.r` = 0.335 m
+      (`src/game/ghost.js:56-57`, the unloaded radius) while the wheel model rolls on its
+      own dynamic `rGeo`; the cap (71.3 m/s) sits only 3 % over the measured terminal on
+      asphalt (69.3) and stone (69.1), so any suspension or tyre-radius change puts the
+      cap under the measured value and turns T24 red over a non-defect — derive it from
+      the loaded radius, or compare against a measured column instead of a formula
 
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P4 · `src/game/ghost.js:30` still says top speed ~70 m/s, stale after the
+      powertrain retune, and any ghost pace built on it is wrong
+      · done — the quoted figure and the ceiling it described were both fiction: the solver
+      computed its straight-line cap as the drag-only cube root of peak power (82.3 m/s for
+      car 'A'), which is above the tallest gear (71.3 m/s) and 60 % above what the car
+      actually holds on the reference surface (gravel 51.6 m/s), while the comment quoted a
+      third number (~70 m/s) that nothing produced. Now `powertrainCeiling(car, surfaceRow)`
+      (`src/game/ghost.js:55`) is the real cap — the smaller of redline through the tallest
+      ratio, and where peak power stops beating rolling + aero — memoised per surface row
+      (`:135-136`) and used for `vCap` (`:151`); the comment quotes the measured terminal
+      per surface (`:31-37`), the new probe `tools/vmax.mjs` reproduces that column for any
+      car, and T24 (`src/debug/tests.js:1363`, check at `:1402`) pins the cap between the
+      gearbox and the physics (never over gearing for any of the four cars, never under the
+      terminal speed measured on the flat straight, never binding under `SURFACE_VMAX`, and
+      the power term must bind for the short-geared car C at 61.0 m/s of its 88.7 m/s
+      gearing). Reference pace is unchanged bit-for-bit because the new cap still sits above
+      every surface ceiling: `tools/pacenote-test.mjs` ref 268.16 s / raw 168.97 s before and
+      after, ALL PASS. The *calibration* drift that item hinted at is a separate defect and
+      is filed as the new P4 (stagetest E3/A6 red). Proof: 35/35 checks (34 before, +1),
+      `tools/smoke.mjs` drive clean with no NaN
 
 - [x] P3 · mud, sand and peat still carry the old heavy sink values in
       `src/world/surfaces.js` after the gravel retune, so those surfaces are far slower

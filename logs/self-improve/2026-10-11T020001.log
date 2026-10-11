@@ -17,3 +17,25 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T01:00:08.346Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+Done. Committed locally as `80a15a0` (not pushed).
+
+**Item chosen (lowest OPEN P number):** P3 · "mud, sand and peat still carry the old heavy sink values in `src/world/surfaces.js` after the gravel retune, so those surfaces are far slower than intended; retune to a consistent band"
+
+**Changes**
+
+- `src/world/surfaces.js:7-15` — new band note: the retune basis (terminal speed of car 'A' on the flat straight), `mu`/`plough` deliberately untouched, and the measured taper
+- `src/world/surfaces.js:65` — mud `crr 0.115 / sink 0.065` → `0.084 / 0.042`
+- `src/world/surfaces.js:74` — snow `0.095 / 0.045` → `0.050 / 0.022`
+- `src/world/surfaces.js:83` — grass `0.075 / 0.030` → `0.045 / 0.017`
+- `src/world/surfaces.js:91` — sand `0.130 / 0.055` → `0.070 / 0.030`
+- `src/world/surfaces.js:108` — peat `0.125 / 0.075` → `0.086 / 0.050`
+- `src/world/surfaces.js:125` — dirt `0.090 / 0.040` → `0.048 / 0.020` (grass/dirt/snow had to follow: leaving them would have made mud out-run dirt and grass, i.e. a non-monotone band)
+- `src/debug/tests.js:1312-1352` — new check **T23** pinning the band (per-surface terminal window), the monotonically rising `crr`/`sink` columns along the softness ladder, monotonically falling terminal speed, and a max 40 kph step down (no re-introducible cliff). No test was edited, weakened or removed.
+
+Measured terminal speeds (flat straight, 150 s): gravel 186 > grass 150 > dirt 141 > snow 132 > sand 122 > mud 103 > peat 90 kph — was 186/123/109/92/92/81/68. `tools/pacenote-test.mjs` (ghost calibration) still ALL PASS. No screenshot pass used (physics-only item, no visual change).
+
+**Queue** — P3 moved to Done with the above note; 3 new Open items added: P18 (`src/game/ghost.js:32` `SURFACE_VMAX` is an uncross-checked second speed table, now only ~13 % under peat's physical capability), P19 (`src/world/surfaces.js:36` `unknown` fallback still on the pre-retune drag scale), P20 (`src/dirt/emitters.js:276` churn derives from the retuned columns, so mud/peat plumes dropped ~⅓).
+
+**Verbatim test line:** `34/34 passed` (baseline was `33/33 passed`; new check detail: `PASS  T23 loose-surface drag band: terminal speed tapers monotonically from gravel to peat, no surface is a wall  gravel=186kph grass=150kph dirt=141kph snow=132kph sand=122kph mud=103kph peat=90kph | steps=96kph total | drag=gravel:0.034/0.008 grass:0.045/0.017 dirt:0.048/0.02 snow:0.05/0.022 sand:0.07/0.03 mud:0.084/0.042 peat:0.086/0.05 | gaps=[]`)
+To https://github.com/Prezmi/voxel-rally.git
+   6d8fd86..80a15a0  main -> main

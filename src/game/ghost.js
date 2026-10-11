@@ -9,8 +9,9 @@
 //   2. the friction-circle corner speed (docs/02 §3.4 / docs/03 §6 step 2):
 //         v_corner = sqrt(a_lat / |kappa|), hard-capped at sqrt(mu_eff * g * R)
 //      so a sector reference can never claim more grip than the surface has.
-//   3. forward capability from the car ('A') table: traction limit, power/drag top
-//      speed, rolling + aero resistance; braking from the wheel torque capped by mu.
+//   3. forward capability from the car ('A') table: traction limit, the straight-line
+//      powertrain ceiling (tallest gear, or power vs rolling + aero, whichever binds —
+//      see powertrainCeiling()); braking from the wheel torque capped by mu.
 // Then a forward pass (acceleration-limited) and a backward pass (braking-limited)
 // over the arc give the fastest speed profile that respects both, and the integral
 // of ds/v becomes refTime / refSector[] — real numbers, not length/const_speed.
@@ -27,19 +28,50 @@ const CURV_EPS = 1e-4;        // 1/m: below this the road is treated as a straig
 const COMPOUND_SCALE = 1.0;   // reference driver runs the MED compound (car-params)
 
 // What a reference driver is *willing* to carry on a surface on the long straights.
-// The power/drag top speed of car 'A' is ~70 m/s; nobody holds that on 7.5 m of
-// forest gravel lined with trees, so the ceiling is a surface property (docs/03 §3).
-const SURFACE_VMAX = {
+// These are NOT top speeds. Measured on the flat straight with tools/vmax.mjs (car 'A',
+// 2026-10-11, pinned by T24 in src/debug/tests.js), what car 'A' can actually hold is
+//   gearing cap 71.3 m/s > asphalt 69.3 > stone 69.1 > ice 66.9 > gravel 51.6 >
+//   grass 41.7 > dirt 39.1 > snow 36.7 > sand 33.9 > mud 28.7 > peat 24.9 m/s
+// and nobody holds even gravel's 51.6 m/s on 7.5 m of forest road lined with trees, so
+// the number used here is a surface property, always well under the powertrain cap that
+// `powertrainCeiling()` derives below (docs/03 §3).
+export const SURFACE_VMAX = {
   gravel: 36, dirt: 32, mud: 24, sand: 26, grass: 29, asphalt: 46,
   stone: 34, peat: 22, snow: 24, ice: 20, unknown: 30,
 };
+
+/**
+ * Straight-line powertrain ceiling: the fastest a car can *hold* a straight on one
+ * surface row. A cap on the pace, never the pace itself. Two limits, take the smaller:
+ *   gearing — redline through the tallest ratio at the tyre radius (docs/02 §3.7);
+ *   power   — where peak power stops beating rolling + aero resistance,
+ *             0.5*rho*CdA*v^3 + Crr*m*g*v = P, monotone in v so 40 bisection steps land
+ *             far inside float precision.
+ * The tyre's own losses (plough, sink, drag torque) sit outside this model, so the
+ * measured terminal on loose ground is lower than the cap (gravel 51.6 m/s measured vs
+ * 71.3 m/s here); on asphalt the gearing term binds and the two agree to 3 %. Re-measure
+ * the measured column with tools/vmax.mjs.
+ */
+export function powertrainCeiling(p, s) {
+  const topRatio = Math.min(...p.gears) * p.finalDrive;
+  const vGear = (p.engine.redline * Math.PI / 30) / topRatio * TYRE_BASE.r;
+  const P = p.engine.maxTorque * p.engine.peakRpm * Math.PI / 30 * p.efficiency;
+  const aero = 0.5 * RHO * p.aero.cdA, roll = s.crr * p.mass * G;
+  let lo = 0, hi = vGear;
+  for (let i = 0; i < 40; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (aero * mid * mid * mid + roll * mid > P) hi = mid; else lo = mid;
+  }
+  return Math.min(vGear, 0.5 * (lo + hi));
+}
 
 /**
  * Reference-driver capability margins. These are the only tuning knobs: they say
  * how much of the available envelope the reference driver uses. Measured against
  * the headless harness driver (tools/stagetest.mjs): the ghost ends up ~4 % quicker
  * than that driver, which is the intent — the harness driver lifts off early and
- * leaves the road (see SYSTEM-NOTES.md "ghost calibration").
+ * leaves the road (see SYSTEM-NOTES.md "ghost calibration"). That is the intent, not
+ * the current state: see the measurement on referenceSpeedMargin below.
  */
 export const GHOST_TUNE = {
   gripMargin: 0.98,     // fraction of the friction circle used at the apex
@@ -59,6 +91,11 @@ export const GHOST_TUNE = {
   // tools/stagetest.mjs) and inside the +/-25 % band, while limit = ref * 1.6 =
   // 07:09 stays beatable. Numbers re-measured by tools/pacenote-test.mjs.
   // Numbers + the raw solve are printed by tools/pacenote-test.mjs; see SYSTEM-NOTES.md.
+  // STALE 2026-10-11: re-measured on the same stage the raw solve is 168.97 s and the
+  // reference 268.16 s (so the numbers above are within 1 %), but the harness driver has
+  // come down from 281.8 s to 222.83 s after the loose-surface drag retune, so this
+  // margin now makes the reference 20.3 % SLOWER than the driver, not 4.8 % quicker, and
+  // tools/stagetest.mjs E3 + A6 are red. Re-calibrating the margin is queue P4.
   referenceSpeedMargin: 0.58,
 };
 
@@ -92,7 +129,11 @@ export function solveGhost(road, opts = {}) {
   const peakPower = p.engine.maxTorque * p.engine.peakRpm * Math.PI / 30 * p.efficiency;   // W
   const brakeForceCap = p.brakeMax / TYRE_BASE.r;                                          // N at the CoM
   const cdA = p.aero.cdA, mass = p.mass;
-  const vPower = Math.cbrt(2 * peakPower / (RHO * cdA));                                   // drag-limited top speed
+  // Hard straight-line cap per surface row (gearing + power vs rolling/aero). Memoised
+  // over the <= 11 rows a stage can use; never the number the pace is built on, but it
+  // must stay above the surface ceiling so the surface is what binds (T24).
+  const ceilings = {};
+  const ceilingOf = (s) => (s.key in ceilings ? ceilings[s.key] : (ceilings[s.key] = powertrainCeiling(p, s)));
 
   const vCap = new Float32Array(n);      // straight-line ceiling for this node
   const muEffArr = new Float32Array(n);
@@ -107,7 +148,7 @@ export function solveGhost(road, opts = {}) {
     const mu = effectiveMu(s, wetness, frozen) * COMPOUND_SCALE * TYRE_BASE.gain;
     muEffArr[i] = mu;
     const surfMax = SURFACE_VMAX[s.key] ?? SURFACE_VMAX.unknown;
-    vCap[i] = Math.min(vPower, surfMax) * o.straightUtil * o.referenceSpeedMargin;
+    vCap[i] = Math.min(ceilingOf(s), surfMax) * o.straightUtil * o.referenceSpeedMargin;
     const lim = cornerLimits(road, i, o, mu);
     // vCorner is the *reference* corner speed; vLimit stays the raw physics limit
     // (sqrt(mu_eff * g * R)) so the audit can prove the ghost never exceeds it.
@@ -202,7 +243,7 @@ export function solveGhost(road, opts = {}) {
     v, t, vCap, vCorner, vLimit: vLimitArr, muEff: muEffArr, aLat: aLatArr,
     refTime, refSectors: refSector, sectors,
     avgSpeed: road.length / refTime, maxSpeed,
-    peakPower, brakeForceCap, vPower,
+    peakPower, brakeForceCap, ceilings,
     solveMs: ms,
     overshoot: maxLimitExceed,       // must be 0: no corner faster than sqrt(mu g R)
     ghostPath: { x: gx, z: gz, t: gt, step, count },
