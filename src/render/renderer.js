@@ -7,6 +7,7 @@ import { QUALITY, settings } from '../core/settings.js';
 import { createLightRig, lightingFor } from './lighting.js';
 import { PostChain } from './post.js';
 import { surfaceTones } from '../world/palette.js';
+import { ROAD_TONE, RUT_GLOSS } from './road-skin.js';
 
 const SHADOW_PRESET = [
   // LOW / MED / HIGH. `span` is the half-extent of the orthographic shadow frustum
@@ -158,10 +159,14 @@ float fbm1(vec2 p) { return vnoise(p); }
   float grit  = fbm1(wp * 3.2 - 17.0);   // aggregate / pebble character
 
   // Hue AND value: the two palette anchors mix across the patch field, then the tile
-  // field swings brightness ~+-20% (PLAN §10 criterion 2 wants >= 12%, spatially
-  // coherent: the spread lives in metre-scale features, not per cell).
+  // field swings brightness by 12% about 1.0 (PLAN §10 criterion 2 wants >= 12%,
+  // spatially coherent: the spread lives in metre-scale features, not per cell).
+  // The old 0.82 -> 1.22 swing was a 49% band whose midpoint sat above 1.0, so whole
+  // 2.5 m panels of the near-field carriageway came out lifted into pale patches
+  // (queue P7). The swing is interpolated from ROAD_TONE, so the number the suite pins
+  // (T28) is literally the number the shader runs on.
   vec3 hue = mix(ta, tb, patchv);
-  float tone = 0.82 + 0.40 * tile;
+  float tone = ${ROAD_TONE.base} + ${ROAD_TONE.swing} * tile;
   diffuseColor.rgb *= hue * tone;
 
   // Per-surface character (docs/04 §3): asphalt has aggregate + patches of old
@@ -235,6 +240,12 @@ float fbm1(vec2 p) { return vnoise(p); }
   else if (sidx == 8) r = 1.0;          // peat
   else if (sidx == 9) r = 0.38;         // ice
   else if (sidx == 10) r = 0.96;        // dirt
+  // A wheel-line rut is compacted ground on EVERY road surface, not only asphalt: the
+  // low end of the packed wear band loses a little roughness, so the rut sells itself in
+  // the specular once the value spread came down (queue P7). Sheen, not a reflection.
+  float rutRoad = (sidx == 2 || sidx == 3 || sidx == 8 || sidx == 10) ? 1.0 : 0.0;
+  r *= 1.0 - (1.0 - ${RUT_GLOSS.road}) * rutRoad
+         * (1.0 - smoothstep(${RUT_GLOSS.from}, ${RUT_GLOSS.to}, fract(vSurface)));
   // Roughness varies across the panel too: a uniform slab is what the reference
   // never has (PLAN §10). Worn edges are polished slightly.
   float wob = 0.92 + 0.16 * fbm1(vWPos.xz * 0.85 + 5.0);

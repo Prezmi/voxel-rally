@@ -26,6 +26,7 @@ import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings
 import { RallyHud } from '../game/hud-rally.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex, prewarmArea } from '../world/road-carve.js';
+import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
@@ -1681,6 +1682,74 @@ function testShippedGlbsAreSingleSided() {
     `nodes=${nodes} materials=${mats} primitives=${sided} tris=${tris} doubleSided=0 backfacing=${backfacing} | gaps=[${gaps.join(' ')}]`);
 }
 testShippedGlbsAreSingleSided();
+
+// ---------------------------------------------------------------- test 28
+// The road skin's value swing (queue P7). The terrain material multiplied every panel by
+// `0.82 + 0.40 * tile` - a 48.8 % band whose midpoint sat at 1.02, i.e. above the panel
+// colour itself - so whole 2.5 m patches of the near-field carriageway came out over-lit,
+// and that one swing dwarfed every other value field in the shader (hue mix ~14 %, grit
+// ~22 %, edge wear ~18 %). Narrowed to a 12 % band centred on 1.0: still above the floor
+// PLAN §10 criterion 2 sets for tonal difference between panels of one surface, with no
+// net lift. Because the value spread came down, the wheel-line rut now has to sell itself
+// in the specular instead: it gets a slightly lower roughness across the packed wear band
+// on every loose road surface, not only on asphalt. The constants live in
+// src/render/road-skin.js and are interpolated into the GLSL, so this check pins the
+// numbers that actually compile rather than a copy of them.
+function testRoadSkinToneBandAndRutGloss() {
+  const src = readFileSync(new URL('../render/renderer.js', import.meta.url), 'utf8');
+  const range = roadToneRange();
+  const gaps = [];
+
+  // The band itself: PLAN §10 criterion 2 floor, and a ceiling the near field tolerates.
+  if (!(range.spreadPct >= 12)) gaps.push(`panel tone spread ${range.spreadPct.toFixed(1)} % is under the 12 % criterion`);
+  if (!(range.spreadPct <= 18)) gaps.push(`panel tone spread ${range.spreadPct.toFixed(1)} % is blown out again`);
+  // No net lift: the midpoint of the swing sits ON the panel colour, and no panel gets
+  // brightened more than 2 % (the old band reached 1.22).
+  if (Math.abs(range.mid - 1) > 0.01) gaps.push(`tone midpoint ${range.mid.toFixed(3)} is off 1.00`);
+  if (range.max > 1.10) gaps.push(`brightest panel lifted to ${range.max.toFixed(3)} of the panel colour`);
+
+  // The rut must read as packed ground: glossier than the panel around it, and only
+  // slightly so (a mirror-polished road is the other failure mode).
+  const inRut = roadRutRoughness(0);
+  const onPanel = roadRutRoughness(RUT_GLOSS.to);
+  const gloss = (1 - inRut / onPanel) * 100;
+  if (!(inRut < onPanel)) gaps.push(`rut roughness ${inRut.toFixed(3)} is not under panel ${onPanel.toFixed(3)}`);
+  if (!(gloss >= 5 && gloss <= 30)) gaps.push(`rut is ${gloss.toFixed(1)} % glossier, not slight`);
+  let monotone = true;
+  for (let w = 0; w <= 1.0001; w += 0.05) if (roadRutRoughness(w) < inRut - 1e-9 || roadRutRoughness(w) > onPanel + 1e-9) monotone = false;
+  if (!monotone) gaps.push('the rut term leaves its band');
+
+  // Wiring: the shader builds its tone and rut terms from the pinned constants, so a
+  // number edited here is a number the player sees - and a hardcoded GLSL literal would
+  // silently escape this check.
+  const importsSkin = /from '\.\/road-skin\.js'/.test(src);
+  const toneWired = src.includes('float tone = ${ROAD_TONE.base} + ${ROAD_TONE.swing} * tile;');
+  const rutWired = src.includes('(1.0 - ${RUT_GLOSS.road}) * rutRoad')
+    && src.includes('smoothstep(${RUT_GLOSS.from}, ${RUT_GLOSS.to}, fract(vSurface))');
+  if (!importsSkin) gaps.push('renderer.js no longer imports render/road-skin.js');
+  if (!toneWired) gaps.push(`ROAD_TONE ${ROAD_TONE.base}/${ROAD_TONE.swing} is not the tone the shader compiles`);
+  if (!rutWired) gaps.push(`RUT_GLOSS ${RUT_GLOSS.road} is not the rut term the shader compiles`);
+  if (/float tone = \d/.test(src)) gaps.push('the shader carries a hardcoded tone band instead of the pinned constants');
+
+  // Surface scope: the rut mask must cover exactly the road family the colour pass
+  // treats as road, minus asphalt, which keeps its own stronger compaction term.
+  const idsOf = (re) => { const m = src.match(re); return m ? [...m[1].matchAll(/sidx == (\d+)/g)].map((s) => +s[1]).sort((a, b) => a - b) : null; };
+  const roadish = idsOf(/float roadish = \(([^;]*)\) \? 1\.0 : 0\.0;/);
+  const rutMask = idsOf(/float rutRoad = \(([^;]*)\) \? 1\.0 : 0\.0;/);
+  if (!roadish || !rutMask) gaps.push('could not read the road surface masks');
+  else {
+    const want = roadish.filter((s) => s !== SURF.ASPHALT);
+    if (JSON.stringify(rutMask) !== JSON.stringify(want)) gaps.push(`rut mask [${rutMask}] != road family minus asphalt [${want}]`);
+    if (!src.includes('r *= mix(0.55, 1.0, smoothstep(0.10, 0.40, fract(vSurface)))')) gaps.push('asphalt lost its own compaction term');
+  }
+
+  check('T28 the road skin swings 12 % in value about the panel colour, never over-lit, and the wheel-line rut runs slightly glossier',
+    gaps.length === 0,
+    `tone ${range.min.toFixed(2)}..${range.max.toFixed(2)} spread ${range.spreadPct.toFixed(1)} % mid ${range.mid.toFixed(3)} `
+    + `| rut roughness ${inRut.toFixed(3)} vs panel ${onPanel.toFixed(3)} = ${gloss.toFixed(1)} % glossier `
+    + `| masks road=[${roadish}] rut=[${rutMask}] | wired=${importsSkin}/${toneWired}/${rutWired} | gaps=[${gaps.join(' ')}]`);
+}
+testRoadSkinToneBandAndRutGloss();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

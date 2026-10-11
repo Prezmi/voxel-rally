@@ -26,9 +26,20 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       wall-clock time while the stage needs ~12 s to generate (this run's first pass
       captured the `generowanie etapu: 41% 3450 / 8379 chunks` boot screen, costing a
       screenshot pass); publish a "world ready" flag the harness waits for instead of a timer
-- [ ] P7 · road surface still shows over-light patches in the near field because
-      `src/render/renderer.js` applies `tone = 0.82 + 0.40 * tile`; narrow that spread
-      to about 12 percent and let ruts get slightly glossier
+- [ ] P32 · with the panel tone spread narrowed, the near-field carriageway patchiness is
+      now **geometric**: the road reads as a staircase of 1 m slabs from ~2-20 m (lit top
+      face + dark riser alternating at column pitch, visible across the whole lower half
+      of `shots/quality-road-tone.png`), so the corridor looks terraced rather than graded;
+      grade the corridor columns (or shade the risers) instead of painting over it
+- [ ] P33 · the headless shot pass cannot load the hero car: the frame logs
+      `[assets] "rally_v2" unavailable (Failed to fetch)` (`src/render/assets.js:23`
+      `loadModel`, path built at `:17`) while the same URL answers **200** over the same
+      port (`curl -o /dev/null -w %{http_code} http://127.0.0.1:8090/assets/models/rally_v2.glb`),
+      so every visual pass judges the procedural car instead of the asset car
+- [ ] P34 · the wet-stage gloss mask disagrees with the road mask: `roadishw`
+      (`src/render/renderer.js:255`) covers asphalt / gravel / mud / dirt but not PEAT (8),
+      while the colour pass `roadish` (`:210`) and the new rut gloss (`:246`) do — a rain
+      stage loses roughness on a dirt road and keeps full roughness on a peat one
 - [ ] P8 · night stages have no headlight beams; add two cheap cone volumes or a spot
       light plus road decals that stay inside the frame budget
 - [ ] P9 · livery number roundel is hard to read past ~15 m; raise the decal resolution
@@ -122,6 +133,30 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P7 · road surface still shows over-light patches in the near field because
+      `src/render/renderer.js` applies `tone = 0.82 + 0.40 * tile`; narrow that spread
+      to about 12 percent and let ruts get slightly glossier
+      · done — the tone field is now pinned and narrowed to `0.94 + 0.12 * tile`
+      (`src/render/renderer.js:169`, constants `src/render/road-skin.js:12-15`): a 12.8 %
+      band centred on 1.000 instead of 0.82..1.22 (48.8 %, midpoint 1.02 above the panel
+      colour, brightest panel lifted 22 %), which keeps PLAN §10 criterion 2 (>= 12 %
+      tonal difference between panels of one surface) with no net lift; and the wheel-line
+      rut now loses roughness across the packed wear band on every loose road surface, not
+      only asphalt (`src/render/renderer.js:246-248`, `RUT_GLOSS` at
+      `src/render/road-skin.js:23-27` = 20 % glossier in the rut, feathered 0.10..0.45).
+      The numbers were dead GLSL text before, so they moved into a THREE-free module that
+      the shader interpolates and the suite asserts on; new check **T28**
+      (`src/debug/tests.js:1698`, check at `:1746`) pins the band floor/ceiling, the 1.000
+      midpoint, the monotone rut gloss, that the shader compiles the pinned constants
+      rather than a literal, and that the rut mask covers exactly the road family minus
+      asphalt (which keeps its own stronger compaction term). Proof: `node src/debug/tests.js`
+      **39/39 passed** (38 before, +1), `tools/smoke.mjs` drive clean, no NaN. Visual proof,
+      one headless pass, read back: `shots/quality-road-tone.png` (seed 12345, bumper cam,
+      520 frames) — the near-field carriageway is one worked brown surface with visible
+      panel-to-panel variation and no blown pale patches, the pale shoulder line reads
+      without blooming. What that shot now shows instead is the 1 m slab stepping of the
+      corridor and a car asset that failed to fetch: filed as P32-P34.
 
 - [x] P6 · prop and glb materials export with `doubleSided` true from Blender
       (`build_stage_props.py:518` `make_material`); set `use_backface_culling` so the
