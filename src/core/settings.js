@@ -59,6 +59,13 @@ export const settings = {
   // "swim" and the player must read the road. The lens is the dirt the player
   // cannot look away from, so it is a dialled accent by default, not a effect.
   lensDirt: 0.45,            // 0 = off, 1 = full docs/04 §6 strength
+  // Speed feel (src/render/camera.js). Each is a 0..1 gain on a term that is itself
+  // smoothed (1 - exp / critically damped) and hard-clamped in camera.js, so the rig
+  // can never lurch or make the player ill: FOV ceiling 20 deg, roll ceiling 6 deg,
+  // ride-height ceiling 0.26 m. The existing cameraShake ceiling is untouched.
+  speedFov: 1.0,             // FOV widens with speed
+  cornerLean: 0.55,          // camera rolls into the corner with lateral acceleration
+  rideSag: 0.60,             // rig drops at speed: the downforce read
 
   // Audio (F5)
   audioEnabled: false,

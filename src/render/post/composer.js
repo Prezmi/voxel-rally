@@ -18,11 +18,13 @@
 // draw-call count is read straight after the scene render, before any quad runs,
 // so renderer.info (and the budget harness) reports the same calls as the raw path.
 import * as THREE from 'three';
-import { POST_TUNE, BLOOM_LEVELS, passGraph, resolveToneMode, clampNum } from './tune.js';
+import { POST_TUNE, BLOOM_LEVELS, passGraph, resolveToneMode, clampNum, ATMO_TUNE,
+  sunVisibility, shaftAlpha, lensFlareAlpha, radialBlurAmount } from './tune.js';
+import { settings } from '../../core/settings.js';
 
 // The dial table + the pass graph live in tune.js (no THREE import there, so the
 // headless suite can pin them). Re-exported here so callers have one entry point.
-export { POST_TUNE, BLOOM_LEVELS, passGraph };
+export { POST_TUNE, BLOOM_LEVELS, passGraph, ATMO_TUNE };
 
 // r169 exports AgXToneMapping, so AgX is the mode of record. The same curve is
 // mirrored in the composite below (a raw ShaderMaterial gets no built-in tonemap),
@@ -30,6 +32,12 @@ export { POST_TUNE, BLOOM_LEVELS, passGraph };
 const _tone = resolveToneMode(THREE);
 export const TONE_MODE = _tone.mode;
 export const TONE_MODE_NAME = _tone.name;
+
+// Scratch for the sun projection: allocated once, never per frame.
+const _sunPos = new THREE.Vector3();
+const _sunFwd = new THREE.Vector3();
+const _sunNdc = new THREE.Vector3();
+const _sunInfo = { uv: null, vis: 0 };
 
 
 /** Clamp + sanitise a dial read from settings/save, so a stale payload can never
@@ -101,7 +109,51 @@ void main() {
 }
 `;
 
-// ---- composite: bloom -> AgX -> grade -> sRGB ---------------------------------
+// ---- sun shafts: one eighth-res quad, a radial march back toward the sun --------
+// No depth, no shadow access, no extra geometry: the streak samples the HDR scene
+// along the ray from the pixel to the sun, so whatever the canopy left bright there is
+// what leaks through. A procedural 2-D noise modulates it per ray and per sample, so
+// the beams dapple instead of reading as a flat wash, and the whole term is scaled by
+// an alpha that is 0 the moment the sun leaves the frame.
+const SHAFT_FRAG = `
+varying vec2 vUv;
+uniform sampler2D uScene;
+uniform vec2 uSunUv;
+uniform float uAmt, uTime, uDecay, uDensity, uDrift, uContrast, uSpread, uFalloff, uSamples;
+
+float h13(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h13(i), h13(i + vec2(1.0, 0.0)), f.x),
+             mix(h13(i + vec2(0.0, 1.0)), h13(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+
+void main() {
+  if (uAmt <= 0.0002) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+  vec2 d = vUv - uSunUv;
+  float len = length(d);
+  vec2 dirv = d / max(1e-4, len);
+  float ang = atan(dirv.y, dirv.x);
+  float acc = 0.0, wsum = 0.0, w = 1.0;
+  for (int i = 0; i < 8; i++) {
+    if (float(i) >= uSamples) break;
+    float t = float(i) / max(1.0, uSamples - 1.0) * uSpread;
+    vec2 s = vUv - dirv * t;
+    float l = dot(texture2D(uScene, s).rgb, vec3(0.2126, 0.7152, 0.0722));
+    float leak = 0.55 + 0.45 * vnoise(vec2(ang * 5.0 + uTime * uDrift, t * uDensity * 8.0 + uTime * uDrift));
+    acc += min(l, 4.0) * leak * w;
+    wsum += w;
+    w *= uDecay;
+  }
+  // Per-ray static wobble: distinct beams, not one uniform glow.
+  float ray = 0.45 + 0.55 * vnoise(vec2(ang * 11.0, uTime * uDrift * 0.6));
+  float gain = acc / max(1e-3, wsum);
+  gl_FragColor = vec4(vec3(gain) * mix(1.0, ray, uContrast) * exp(-len * uFalloff) * uAmt, 1.0);
+}
+`;
+
+// ---- composite: shafts -> lens -> bloom -> radial blur -> AgX -> grade -> sRGB ---
 const COMPOSITE_FRAG = `
 varying vec2 vUv;
 uniform sampler2D uScene;
@@ -112,6 +164,14 @@ uniform float uContrast, uShadowLift, uWarmAmt, uCoolAmt, uSatGreen, uSatBrown;
 uniform float uVignette, uGrain, uGrainSpeed;
 uniform vec3 uWarmHi, uCoolSh;
 uniform vec2 uRes;
+// rally atmosphere: sun shafts, sun-keyed dirty lens, edge radial blur
+uniform sampler2D uShaft;
+uniform float uShaftW;
+uniform float uRadial, uRBInner, uRBOuter;
+uniform vec2 uSunUv;
+uniform float uLensAmt, uLensSmudge, uLensFlare, uLensHalo, uLensBlobs, uLensGhosts;
+
+float h13(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
 vec3 agx(vec3 color) {
   const mat3 LINEAR_SRGB_TO_LINEAR_REC2020 = mat3(
@@ -144,7 +204,53 @@ vec3 agx(vec3 color) {
 }
 
 void main() {
+  // Edge radial blur, folded in here so it costs no pass of its own: the weight ramps
+  // from 0 inside uRBInner to 1 at uRBOuter, so the car and the road centre (screen
+  // centre) stay perfectly sharp however fast the car is.
+  vec2 rc = vUv - vec2(0.5);
+  float rr = length(rc);
+  float sm = uRadial * smoothstep(uRBInner, uRBOuter, rr);
   vec3 c = texture2D(uScene, vUv).rgb;
+  if (sm > 0.0004) {
+    vec3 acc = c;
+    float ws = 1.0;
+    for (int i = 1; i < 4; i++) {
+      float t = sm * float(i) * 0.030;
+      float w = 1.0 - float(i) * 0.16;
+      acc += texture2D(uScene, vUv + rc * t).rgb * w;
+      ws += w;
+    }
+    c = acc / ws;
+  }
+  // One eighth-res quad of fake canopy shafts, added in linear HDR.
+  c += texture2D(uShaft, vUv).rgb * uShaftW;
+
+  // Dirty lens (docs/04 §6): procedural smudge + ghosts along the sun->centre axis,
+  // generated in-shader (no texture) and keyed on the sun being in or near the frame,
+  // with settings.lensDirt as the player dial. Zero when the sun is out of frame.
+  if (uLensAmt > 0.0004) {
+    vec2 sd = vUv - uSunUv;
+    float halo = exp(-dot(sd, sd) * 11.0);
+    float smudge = 0.0, flare = 0.0;
+    for (int i = 0; i < 5; i++) {
+      if (float(i) >= uLensBlobs) break;
+      vec2 c0 = vec2(h13(vec2(float(i) + 1.3, 3.7)), h13(vec2(float(i) + 8.1, 9.4)));
+      float r = 0.045 + 0.085 * h13(vec2(float(i) + 4.0, 2.6));
+      vec2 q = (vUv - c0) / r;
+      smudge += exp(-dot(q, q) * 1.6) * (0.45 + 0.55 * h13(vec2(float(i) + 12.0, 5.5)));
+    }
+    for (int i = 1; i < 4; i++) {
+      if (float(i) > uLensGhosts) break;
+      vec2 gp = mix(uSunUv, vec2(1.0) - uSunUv, float(i) / (uLensGhosts + 1.0));
+      vec2 q = (vUv - gp) / (0.018 + 0.026 * float(i));
+      flare += exp(-dot(q, q) * 1.35) * (0.5 + 0.5 * h13(vec2(float(i), 7.3)));
+    }
+    float veil = clamp(smudge, 0.0, 1.6) * uLensSmudge * uLensAmt;
+    float vl = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(c, mix(c, vec3(vl), 0.55) + vec3(0.016, 0.014, 0.011), veil);
+    c += (flare * uLensFlare + halo * uLensHalo) * uLensAmt * vec3(1.06, 0.93, 0.74);
+  }
+
   // Two mips: the quarter carries the tight halo, the eighth the wide wash.
   c += texture2D(uBloomQ, vUv).rgb * uBloomQ_W + texture2D(uBloomE, vUv).rgb * uBloomE_W;
 
@@ -193,6 +299,8 @@ export class PostComposer {
     this.ok = false;
     this.forceLDR = false;
     this.level = 'MEDIUM';
+    this.shaftsOn = true;        // the one extra quad; passGraph gates it
+    this.speedIn = 0;            // ground speed, pushed by camera.js for the radial blur
     this.gradeOn = true;
     this.exposure = POST_TUNE.exposure;
     this.calls = 0; this.tris = 0;
@@ -233,10 +341,29 @@ export class PostComposer {
         uSatGreen: { value: 0.18 }, uSatBrown: { value: 0.14 },
         uVignette: { value: 0.30 }, uGrain: { value: 0.018 }, uGrainSpeed: { value: 20 },
         uRes: { value: new THREE.Vector2(1280, 720) },
+        uShaft: { value: null }, uShaftW: { value: 1 },
+        uRadial: { value: 0 }, uRBInner: { value: ATMO_TUNE.blur.inner }, uRBOuter: { value: ATMO_TUNE.blur.outer },
+        uSunUv: { value: new THREE.Vector2(0.5, 0.5) },
+        uLensAmt: { value: 0 }, uLensSmudge: { value: ATMO_TUNE.lens.smudge },
+        uLensFlare: { value: ATMO_TUNE.lens.flare }, uLensHalo: { value: ATMO_TUNE.lens.halo },
+        uLensBlobs: { value: ATMO_TUNE.lens.blobs }, uLensGhosts: { value: ATMO_TUNE.lens.ghosts },
+      },
+    });
+    // One extra quad, eighth res: the sun-shaft radial streak (see SHAFT_FRAG).
+    this.shaftMat = new THREE.ShaderMaterial({
+      vertexShader: VERT, fragmentShader: SHAFT_FRAG, depthTest: false, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uScene: { value: null }, uSunUv: { value: new THREE.Vector2(0.5, 0.5) },
+        uAmt: { value: 0 }, uTime: { value: 0 },
+        uDecay: { value: ATMO_TUNE.shafts.decay }, uDensity: { value: ATMO_TUNE.shafts.density },
+        uDrift: { value: ATMO_TUNE.shafts.drift }, uContrast: { value: ATMO_TUNE.shafts.contrast },
+        uSpread: { value: ATMO_TUNE.shafts.spread }, uFalloff: { value: ATMO_TUNE.shafts.falloff },
+        uSamples: { value: ATMO_TUNE.shafts.samples },
       },
     });
 
-    this.rtScene = null; this.rtBQ = null; this.rtQB = null; this.rtBE = null; this.rtEB = null;
+    this.rtScene = null; this.rtBQ = null; this.rtQB = null; this.rtBE = null; this.rtEB = null; this.rtShaft = null;
     this._size = new THREE.Vector2();
     this.graph = [];
     this.setSize(1280, 720);
@@ -247,8 +374,9 @@ export class PostComposer {
   setConfig(cfg = {}) {
     this.level = BLOOM_LEVELS.includes(cfg.bloom) ? cfg.bloom : 'MEDIUM';
     this.gradeOn = cfg.grade !== false;
+    this.shaftsOn = cfg.shafts !== false;
     this.enabled = !!cfg.post && this.ok;
-    this.graph = passGraph({ post: this.enabled, bloom: this.level });
+    this.graph = passGraph({ post: this.enabled, bloom: this.level, shafts: this.shaftsOn });
     const b = POST_TUNE.bloom[this.level];
     const g = POST_TUNE.grade;
     const e = num(cfg.exposure, 0.4, 2.2, this.exposure);
@@ -300,7 +428,7 @@ export class PostComposer {
     const canHalf = caps.isWebGL2 && (hasExt('EXT_color_buffer_half_float') || hasExt('EXT_color_buffer_float'));
     const type = (canHalf && !this.forceLDR) ? THREE.HalfFloatType : THREE.UnsignedByteType;
     const opts = { type, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat };
-    const old = [this.rtScene, this.rtBQ, this.rtQB, this.rtBE, this.rtEB];
+    const old = [this.rtScene, this.rtBQ, this.rtQB, this.rtBE, this.rtEB, this.rtShaft];
     for (const rt of old) if (rt) rt.dispose();
     this.rtScene = new THREE.WebGLRenderTarget(w, h, { ...opts, depthBuffer: true, stencilBuffer: false });
     const qw = Math.max(1, Math.round(w / 4)), qh = Math.max(1, Math.round(h / 4));
@@ -309,14 +437,36 @@ export class PostComposer {
     this.rtQB = new THREE.WebGLRenderTarget(qw, qh, { ...opts, depthBuffer: false });
     this.rtBE = new THREE.WebGLRenderTarget(ew, eh, { ...opts, depthBuffer: false });
     this.rtEB = new THREE.WebGLRenderTarget(ew, eh, { ...opts, depthBuffer: false });
+    this.rtShaft = new THREE.WebGLRenderTarget(ew, eh, { ...opts, depthBuffer: false });
     this._size.set(w, h);
     this._texel = { s: [1 / w, 1 / h], q: [1 / qw, 1 / qh], e: [1 / ew, 1 / eh] };
     this.compositeMat.uniforms.uRes.value.set(w, h);
     // Half-float only where the driver can actually complete an FBO with it; on a
     // driver without it the composite would come out black, so gate the whole stack.
     this.ok = !!canHalf;
-    if (this.enabled) this.graph = passGraph({ post: this.ok, bloom: this.level });
+    if (this.enabled) this.graph = passGraph({ post: this.ok, bloom: this.level, shafts: this.shaftsOn });
     this.setConfig({ bloom: this.level, grade: this.gradeOn, post: this.enabled, exposure: this.exposure });
+  }
+
+  /** Ground speed, pushed by render/camera.js every frame. Clamped here, never
+   *  trusted; radialBlurAmount() does the rest. */
+  setSpeed(v) { this.speedIn = num(v, 0, 200, 0); }
+
+  /** Screen-space sun + the 0..1 "is it in (or near) the frame" term the shafts, the
+   *  lens flare and the blur all key off. Uses the camera matrices the scene render
+   *  just left current, so no extra matrix work. */
+  _sunOnScreen(camera, rig) {
+    const dir = rig && rig.sunDir;
+    _sunInfo.uv = null; _sunInfo.vis = 0;
+    if (!dir) return _sunInfo;
+    _sunPos.set(camera.position.x + dir.x * 400, camera.position.y + dir.y * 400, camera.position.z + dir.z * 400);
+    camera.getWorldDirection(_sunFwd);
+    const inFront = (_sunFwd.x * dir.x + _sunFwd.y * dir.y + _sunFwd.z * dir.z) > 0.0;
+    _sunNdc.copy(_sunPos).project(camera);
+    if (!Number.isFinite(_sunNdc.x) || !Number.isFinite(_sunNdc.y)) return _sunInfo;
+    _sunInfo.vis = sunVisibility(_sunNdc.x, _sunNdc.y, inFront, ATMO_TUNE.shafts.edgeFade);
+    _sunInfo.uv = _sunNdc;
+    return _sunInfo;
   }
 
   render(scene, camera, rig, time) {
@@ -352,6 +502,35 @@ export class PostComposer {
 
     const u = this.compositeMat.uniforms;
     u.uBloomQ.value = this.rtQB.texture;
+
+    // ---- sun shafts: the one extra quad (eighth res), 0 alpha when the sun is off
+    // frame, so it never lights a frame the sun is not in.
+    const sun = this._sunOnScreen(camera, rig);
+    const su = this.shaftMat.uniforms;
+    const sAmt = this.shaftsOn
+      ? shaftAlpha({ post: this.enabled, bloom: this.level, sunVis: sun.vis,
+        sun: num(rig && (rig.sunAmount !== undefined ? rig.sunAmount : rig.sunIntensity), 0, 1, 1) })
+      : 0;
+    if (sun.uv) su.uSunUv.value.set(sun.uv.x * 0.5 + 0.5, sun.uv.y * 0.5 + 0.5);
+    su.uScene.value = this.rtScene.texture;
+    su.uAmt.value = sAmt;
+    su.uTime.value = time || 0;
+    if (this.shaftsOn) {
+      this.quad.material = this.shaftMat;
+      r.setRenderTarget(this.rtShaft);
+      r.render(this.passScene, this.passCam);
+    }
+    u.uShaft.value = this.rtShaft.texture;
+    u.uShaftW.value = 1;
+
+    // ---- lens dirt + edge blur: folded into the composite, zero extra passes.
+    if (sun.uv) u.uSunUv.value.copy(su.uSunUv.value);
+    u.uLensAmt.value = lensFlareAlpha({ post: this.enabled, sunVis: sun.vis, lensDirt: settings.lensDirt });
+    u.uRadial.value = radialBlurAmount({
+      post: this.enabled, speed: this.speedIn,
+      gain: this.level === 'LOW' ? 0.55 : (this.level === 'HIGH' ? 1.0 : 0.85),
+    });
+
     if (twoMip) {
       // 3) bright + horizontal gaussian, eighth (wider taps: 2 source texels apart)
       bu.uOff.value.set(T.e[0], T.e[1]);

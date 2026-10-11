@@ -13,7 +13,7 @@ import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
 import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP } from '../render/car-livery.js';
-import { FxSystem } from '../fx/fx.js';
+import { FxSystem, FX_CAPACITY, DUST_TUNE } from '../fx/fx.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
@@ -31,7 +31,9 @@ import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
-import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode } from '../render/post/tune.js';
+import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
+  ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
+  radialBlurAmount, sunVisibility } from '../render/post/tune.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
@@ -2437,6 +2439,93 @@ function testI18nDictionaryCoversEveryLabel() {
     + `switched=${switched} persisted=${persisted} wheelEn="${wheelEn}" wheelPl="${wheelPl}" | gaps=[${gaps.join(' ')}]`);
 }
 testI18nDictionaryCoversEveryLabel();
+
+// ---------------------------------------------------------------- test 40
+// Rally atmosphere + speed-feel layer (sun shafts, sun-keyed dirty lens, edge radial
+// blur, camera feel, wheel dust). Headless: pass graph, dial table and the two hard
+// zero-conditions (sun out of frame, speed zero) are all pure data.
+const ATMO_RANGES = {
+  'shafts.samples': [1, 8], 'shafts.decay': [0.1, 1], 'shafts.density': [0.05, 4],
+  'shafts.drift': [0, 3], 'shafts.intensity': [0, 1.5], 'shafts.contrast': [0, 1],
+  'shafts.spread': [0.05, 1], 'shafts.falloff': [0.1, 6], 'shafts.edgeFade': [0.05, 1],
+  'lens.blobs': [1, 5], 'lens.ghosts': [0, 3], 'lens.smudge': [0, 1], 'lens.flare': [0, 1],
+  'lens.halo': [0, 1], 'lens.spread': [0, 1], 'lens.edgeFade': [0.05, 1],
+  'blur.maxStrength': [0, 0.12], 'blur.speedFull': [5, 120], 'blur.inner': [0, 0.5],
+  'blur.outer': [0.2, 1], 'blur.taps': [1, 4],
+};
+const FEEL_RANGES = { speedFov: [0, 1], cornerLean: [0, 1], rideSag: [0, 1] };
+const DUST_RANGES = {
+  looseMul: [0, 2], hardMul: [0, 1], ttlMin: [0.1, 4], ttlSpan: [0, 4],
+  windMul: [0, 1.5], drag: [0, 2], sizeLoose: [0.5, 2],
+};
+
+function testRallyAtmosphereBudget() {
+  const gaps = [];
+  const per = {};
+  for (const [qName, q] of [['LOW', QUALITY.LOW], ['MED', QUALITY.MED], ['HIGH', QUALITY.HIGH]]) {
+    qualityPreset(q);
+    const g = passGraph({ post: settings.post, bloom: settings.bloom, shafts: true });
+    const off = g.filter((p) => p.res !== 'canvas').length;
+    per[qName] = { bloom: settings.bloom, n: g.length, off, names: g.map((p) => p.name) };
+    if (g.length > MAX_POST_PASSES) gaps.push(`${qName}: ${g.length} passes > budget ${MAX_POST_PASSES}`);
+    if (off > MAX_OFFSCREEN_PASSES) gaps.push(`${qName}: ${off} offscreen passes > budget ${MAX_OFFSCREEN_PASSES}`);
+    if (g.filter((p) => p.kind === 'shafts').length !== 1) gaps.push(`${qName}: shafts pass is not exactly one quad`);
+    if (g[g.length - 1].name !== 'composite') gaps.push(`${qName}: composite is no longer the last pass`);
+    if (per[qName].off > (qName === 'LOW' ? 2 : 4) + 1) gaps.push(`${qName}: more than one pass added over the bloom graph`);
+  }
+  if (per.LOW.n !== 4 || per.MED.n !== 6 || per.HIGH.n !== 6) gaps.push(`pass count moved: ${per.LOW.n}/${per.MED.n}/${per.HIGH.n} (want 4/6/6)`);
+  // POST off stays the zero-pass fallback, shafts included.
+  if (passGraph({ post: false, bloom: 'HIGH', shafts: true }).length !== 0) gaps.push('POST off still builds passes');
+  // every new dial finite and inside its pinned range
+  const walk = (obj, ranges, path) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const p = path ? `${path}.${k}` : k;
+      if (v && typeof v === 'object') { walk(v, ranges, p); continue; }
+      if (!Number.isFinite(v)) { gaps.push(`${p} is not finite (${v})`); continue; }
+      const r = ranges[p];
+      if (!r) gaps.push(`${p} has no pinned range`);
+      else if (v < r[0] || v > r[1]) gaps.push(`${p}=${v} outside ${r[0]}..${r[1]}`);
+    }
+  };
+  walk(ATMO_TUNE, ATMO_RANGES, '');
+  walk(DUST_TUNE, DUST_RANGES, '');
+  const feel = {}; for (const k of Object.keys(FEEL_RANGES)) feel[k] = settings[k];
+  walk(feel, FEEL_RANGES, '');
+  // garbage in -> finite, clamped out
+  const bad = [NaN, Infinity, -1e9, 1e9, undefined, '4'];
+  for (const v of bad) {
+    for (const a of [
+      shaftAlpha({ post: true, bloom: 'HIGH', sunVis: v, sun: v }),
+      radialBlurAmount({ post: true, speed: v, gain: v }),
+      lensFlareAlpha({ post: true, sunVis: v, lensDirt: v }),
+      sunVisibility(v, v, v, v),
+    ]) if (!Number.isFinite(a) || a < 0 || a > 1.5) gaps.push(`clamp leaked ${a} for input ${v}`);
+  }
+  // the two hard zeros: sun out of frame, and a standstill
+  if (shaftAlpha({ post: true, bloom: 'HIGH', sunVis: 0, sun: 1 }) !== 0) gaps.push('shaft alpha is not 0 with the sun out of frame');
+  if (lensFlareAlpha({ post: true, sunVis: 0, lensDirt: 1 }) !== 0) gaps.push('lens flare is not 0 with the sun out of frame');
+  if (radialBlurAmount({ post: true, speed: 0 }) !== 0) gaps.push('radial blur is not 0 at a standstill');
+  if (shaftAlpha({ post: false, bloom: 'HIGH', sunVis: 1, sun: 1 }) !== 0) gaps.push('shafts light a frame with POST off');
+  if (radialBlurAmount({ post: false, speed: 90 }) !== 0) gaps.push('radial blur runs with POST off');
+  if (sunVisibility(0.1, 0.1, false) !== 0) gaps.push('sun behind the camera still lit the shafts');
+  if (sunVisibility(9, 9, true) !== 0) gaps.push('sun far outside the frame still lit the shafts');
+  const full = radialBlurAmount({ post: true, speed: 1e9 });
+  if (full > ATMO_TUNE.blur.maxStrength + 1e-9) gaps.push(`radial blur ${full} exceeded its cap ${ATMO_TUNE.blur.maxStrength}`);
+  const shMax = shaftAlpha({ post: true, bloom: 'HIGH', sunVis: 1, sun: 1e9 });
+  if (shMax > ATMO_TUNE.shafts.intensity + 1e-9) gaps.push(`shaft alpha ${shMax} exceeded its ceiling ${ATMO_TUNE.shafts.intensity}`);
+  // wheel dust: surface-keyed, longer-lived, and the pools never grew
+  if (!(DUST_TUNE.hardMul < DUST_TUNE.looseMul)) gaps.push('dust is not keyed loose > hard');
+  if (!(DUST_TUNE.ttlMin > 0.5 && DUST_TUNE.ttlMin + DUST_TUNE.ttlSpan > 1.4)) gaps.push('dust plume is not longer lasting');
+  const fxS = new FxSystem({ scale: 1 });
+  for (const k of Object.keys(FX_CAPACITY)) {
+    if (fxS[k].capacity !== FX_CAPACITY[k]) gaps.push(`${k} capacity grew: ${fxS[k].capacity} != ${FX_CAPACITY[k]}`);
+  }
+  qualityPreset(QUALITY.MED);
+  check('T40 the atmosphere/feel layer stays inside its budget: 4 passes at LOW and 6 at MED/HIGH (never > 6, one shaft quad, POST off = 0), every new tunable finite and clamped, and the shaft/lens/blur intensity is exactly 0 when the sun is out of frame or the speed is 0',
+    gaps.length === 0,
+    `LOW ${per.LOW.n} [${per.LOW.names}] | MED ${per.MED.n} [${per.MED.names}] | HIGH ${per.HIGH.n} [${per.HIGH.names}] | budget ${MAX_POST_PASSES} passes / ${MAX_OFFSCREEN_PASSES} offscreen | shaft max ${shMax.toFixed(3)} blur max ${full.toFixed(4)} | dust ${DUST_TUNE.hardMul}/${DUST_TUNE.looseMul} ttl ${DUST_TUNE.ttlMin}+${DUST_TUNE.ttlSpan} caps ${Object.keys(FX_CAPACITY).map((k) => fxS[k].capacity).join('/')} | gaps=[${gaps.join(' ')}]`);
+}
+testRallyAtmosphereBudget();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

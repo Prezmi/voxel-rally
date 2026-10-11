@@ -9,6 +9,7 @@ const _want = new THREE.Vector3();
 const _look = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
+const _upLean = new THREE.Vector3(0, 1, 0);
 
 function damp(current, target, rate, dt) {
   return target + (current - target) * Math.exp(-rate * dt);
@@ -30,6 +31,24 @@ function springStep(p, v, target, omega, dt) {
   return [p, v];
 }
 
+// ---- rally speed feel (settings.speedFov / cornerLean / rideSag are 0..1 gains on
+// these ceilings; every term is smoothed AND clamped, so the rig can never lurch).
+const FOV_SPEED_GAIN = 0.32, FOV_SPEED_MAX = 20;   // deg, deg per m/s
+const ONB_FOV_GAIN = 0.35, ONB_FOV_MAX = 22;      // deg, onboard rig
+const LEAN_PER_G = 0.0115;   // rad of roll per m/s^2 of lateral acceleration
+const LEAN_MAX = 0.105;      // rad (~6 deg) hard ceiling
+const LEAN_LPF = 3.2;        // lateral-accel low-pass, 1/s
+const LEAN_RATE = 2.4;       // how fast the roll itself settles, 1/s
+const LAT_MAX = 14;          // m/s^2 ceiling on the measured lateral accel
+const SAG_PER_MS = 0.0028;   // m of ride-height drop per m/s
+const SAG_MAX = 0.26;        // m hard ceiling
+const SAG_RATE = 2.6;        // settle rate, 1/s
+
+
+function clamp01(v, fb) {
+  return (typeof v === 'number' && Number.isFinite(v)) ? Math.min(1, Math.max(0, v)) : fb;
+}
+
 export class ChaseCamera {
   constructor(renderer) {
     this.camera = renderer.camera;
@@ -44,6 +63,12 @@ export class ChaseCamera {
     this.baseFov = this.camera.fov || 62;
     this._init = false;
     this._springInit = false;
+    // Speed feel state (all smoothed, all clamped below).
+    this.post = (renderer && renderer.post) ? renderer.post : null;  // edge radial blur dial
+    this._latV = 0;      // body-frame lateral velocity, last frame (m/s)
+    this._latA = 0;      // low-passed lateral acceleration (m/s^2)
+    this._lean = 0;      // current camera roll (rad)
+    this._sag = 0;       // current ride-height drop (m)
   }
 
   /** Impacts feed this; cameraShake scales it (docs/04). Capped low on purpose. */
@@ -56,7 +81,25 @@ export class ChaseCamera {
     if (_fwd.lengthSq() < 1e-6) _fwd.set(1, 0, 0);
     _fwd.normalize();
 
-    _target.set(b.pos.x, b.pos.y + 0.55, b.pos.z);
+        _target.set(b.pos.x, b.pos.y + 0.55, b.pos.z);
+
+    // ---- lateral acceleration, body frame: the derivative of the lateral velocity
+    // (lateral axis = forward x up = (-fz, 0, fx)), low-passed and clamped. Feeds the
+    // corner lean only; it never touches the follow spring or the shake budget.
+    const latX = -_fwd.z, latZ = _fwd.x;
+    const latV = b.vel.x * latX + b.vel.z * latZ;
+    const aRaw = Math.max(-LAT_MAX, Math.min(LAT_MAX, (latV - this._latV) / Math.max(1e-4, dt)));
+    this._latV = latV;
+    this._latA = damp(this._latA, aRaw, LEAN_LPF, dt);
+    this._lean = damp(this._lean,
+      Math.max(-LEAN_MAX, Math.min(LEAN_MAX, this._latA * LEAN_PER_G))
+      * clamp01(settings.cornerLean, 0.55), LEAN_RATE, dt);
+    this._sag = damp(this._sag,
+      Math.min(SAG_MAX, speed * SAG_PER_MS) * clamp01(settings.rideSag, 0.6), SAG_RATE, dt);
+
+    // The post stack owns the edge radial blur; it only ever sees the speed and clamps
+    // it itself, so a POST-off frame or a standstill gets zero smear.
+    if (this.post && this.post.setSpeed) this.post.setSpeed(speed);
 
     if (mode === 'FREE') {
       this.orbitAngle += dt * 0.45;
@@ -78,9 +121,9 @@ export class ChaseCamera {
         b.pos.z + b.forward.z * 14,
       );
       this.camera.position.copy(_want);
-      this.camera.up.set(0, 1, 0);
+      this.camera.up.copy(_upLean.set(-_fwd.z * Math.sin(this._lean), Math.cos(this._lean), _fwd.x * Math.sin(this._lean)));
       this.camera.lookAt(_look);
-      this.camera.fov = this.baseFov + Math.min(22, speed * 0.35);
+      this.camera.fov = this.baseFov + Math.min(ONB_FOV_MAX, speed * ONB_FOV_GAIN) * clamp01(settings.speedFov, 1);
       this.camera.updateProjectionMatrix();
       return;
     }
@@ -93,7 +136,11 @@ export class ChaseCamera {
     // to the driving rig again, so the in-stage feel is untouched.
     const crawl = Math.max(0, 1 - speed / 6);
     const back = bumper ? 1.1 : 6.2 + Math.min(4.5, speed * 0.20) + crawl * 2.4;
-    const high = bumper ? 0.75 : 2.05 + Math.min(1.4, speed * 0.045) + crawl * 1.15;
+    // Ride height: the rig sits a decimetre or two lower once the speed is up. Clamped
+    // by SAG_MAX and smoothed, and it only lowers the boom, never the framed distance
+    // logic below, so the terrain-clearing march still runs on the new height.
+    const sag = bumper ? 0 : this._sag;
+    const high = bumper ? 0.75 : 2.05 + Math.min(1.4, speed * 0.045) + crawl * 1.15 - sag;
 
     // Look-ahead along the *velocity*, not the nose: during a slide the camera
     // swings to face where the car is actually going.
@@ -192,7 +239,10 @@ export class ChaseCamera {
     // lag on the rig is what made the car drift to the bottom of the frame.
     this.pos.copy(_want);
     this.camera.position.copy(this.pos);
-    this.camera.up.copy(_up);
+    // Lean INTO the corner: the up vector is rolled about the (flattened) forward axis
+    // by the smoothed, clamped lateral-accel term, so the horizon banks as the car
+    // turns in instead of the whole frame sliding.
+    this.camera.up.copy(_upLean.set(-_fwd.z * Math.sin(this._lean), Math.cos(this._lean), _fwd.x * Math.sin(this._lean)));
 
     // Look slightly AHEAD of the car along its travel: the car sits a touch off
     // centre and the corner it is about to turn appears before it arrives.
@@ -200,7 +250,7 @@ export class ChaseCamera {
     _look.set(this.focus.x + this.dirX * ahead, this.focus.y + 0.45, this.focus.z + this.dirZ * ahead);
     this.look.copy(_look);
     this.camera.lookAt(_look);
-    const fovWant = this.baseFov + Math.min(20, speed * 0.32);
+    const fovWant = this.baseFov + Math.min(FOV_SPEED_MAX, speed * FOV_SPEED_GAIN) * clamp01(settings.speedFov, 1);
     const f = damp(this.camera.fov, fovWant, 3.0, dt);
     if (Math.abs(f - this.camera.fov) > 0.01) {
       this.camera.fov = f;

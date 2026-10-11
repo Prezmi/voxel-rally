@@ -11,6 +11,7 @@
 // and nothing allocated after construction).
 import { bus as defaultBus } from '../core/events.js';
 import { clamp, quatToMat3, mul3v } from '../core/math3.js';
+import { surface } from '../world/surfaces.js';
 
 export const STRIDE = 10;
 export const F = { X: 0, Y: 1, Z: 2, VX: 3, VY: 4, VZ: 5, LIFE: 6, TTL: 7, SIZE: 8, HEAT: 9 };
@@ -18,6 +19,19 @@ export const F = { X: 0, Y: 1, Z: 2, VX: 3, VY: 4, VZ: 5, LIFE: 6, TTL: 7, SIZE:
 /** Default exhaust tip offsets (car-group local: x fwd, y up, z lateral, ground
  *  at y = -comY) used when the glb carries no car_exhaust_* nodes. */
 export const EXHAUST_NODES = ['car_exhaust_l', 'car_exhaust_r'];
+
+/** Wheel-dust dial (docs/04 §6 "kurz zza kol"). Capacities are NOT touched — the
+ *  plume gets longer, wind-driven and surface-keyed inside the existing pool, and
+ *  spawn() still returns -1 at capacity, so the frame cost never grows. */
+export const DUST_TUNE = {
+  looseMul: 1.00,          // rate gain on a `loose` surface row (gravel, mud, sand..)
+  hardMul: 0.18,           // asphalt / stone: nearly none, the rally read is loose only
+  ttlMin: 0.90,            // s, plume lifetime floor (was 0.50)
+  ttlSpan: 1.50,           // s of jitter on top of ttlMin (was 0.90)
+  windMul: 0.32,           // fraction of the wind field carried into the plume
+  drag: 0.62,              // age() drag: lower = the plume travels and hangs (was 0.90)
+  sizeLoose: 1.25,         // size gain on loose ground (0.20..0.56 -> 0.25..0.70)
+};
 
 export class ParticlePool {
   constructor(capacity) {
@@ -167,15 +181,26 @@ export class AmbientFx {
     const spd = b.groundSpeed;
     quatToMat3(b.quat, this._m);
 
-    // ---- wheel dust: proportional to slip and speed -------------------------
-    let slipSum = 0;
-    for (let i = 0; i < 4; i++) slipSum += Math.abs(car.wheels[i].slip || 0);
+    // ---- wheel dust: proportional to slip and speed, and to what the tyres are
+    // actually standing on. Loose ground (gravel/mud/sand/...) gets the plume;
+    // asphalt and stone get nearly none, which is what makes a stage read as loose.
+    let slipSum = 0, looseSum = 0;
+    for (let i = 0; i < 4; i++) {
+      slipSum += Math.abs(car.wheels[i].slip || 0);
+      const sfc = surface(car.wheels[i].surfaceId);
+      looseSum += (sfc && sfc.loose) ? 1 : 0;
+    }
+    const looseN = looseSum / 4;
+    const surfMul = DUST_TUNE.hardMul + (DUST_TUNE.looseMul - DUST_TUNE.hardMul) * looseN;
     const rate = ((4 + 2.4 * clamp(spd * 0.045, 0, 1)) * slipSum * clamp(spd * 0.14, 0, 1)
       + 3.2 * clamp(spd * 0.035, 0, 1))            // rolling dust even off throttle: speed feel
-      * (1 - 0.6 * (env.rain || 0));
+      * surfMul * (1 - 0.6 * (env.rain || 0));
     this.dacc += rate * dt;
     let n = Math.floor(this.dacc); this.dacc -= n;
     const groundY = b.pos.y - (p.comY || 0.5) + 0.04;
+    // Same wind field the leaves drift on, so the plume leans with the stage wind.
+    const windX = Math.cos(this.t * 0.33 + b.pos.z * 0.05) * (env.wind || 3);
+    const windZ = Math.sin(this.t * 0.27 + b.pos.x * 0.05) * (env.wind || 3) * 0.7;
     for (let i = 0; i < n; i++) {
       const o = this.dust.spawn();
       if (o < 0) break;
@@ -186,15 +211,16 @@ export class AmbientFx {
       mul3v(this._m, this._l, this._p);                // reused scratch, no alloc
       const d = this.dust.data;
       const s = Math.abs(car.wheels[w].slip || 0);
+      const rough = (surface(car.wheels[w].surfaceId) || {}).loose ? 1 : 0.7;
       d[o + F.X] = b.pos.x + this._p.x + (rnd() - 0.5) * 0.3;
       d[o + F.Y] = groundY + rnd() * 0.1;
       d[o + F.Z] = b.pos.z + this._p.z + (rnd() - 0.5) * 0.3;
-      d[o + F.VX] = -(this._m[0]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4;
+      d[o + F.VX] = -(this._m[0]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4 + windX * DUST_TUNE.windMul;
       d[o + F.VY] = 0.7 + 1.9 * s + rnd() * 0.7;
-      d[o + F.VZ] = -(this._m[6]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4;
-      const ttl = 0.5 + 0.9 * rnd();
+      d[o + F.VZ] = -(this._m[6]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4 + windZ * DUST_TUNE.windMul;
+      const ttl = DUST_TUNE.ttlMin + DUST_TUNE.ttlSpan * rnd();
       d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = 0.20 + 0.36 * rnd();
+      d[o + F.SIZE] = (0.20 + 0.36 * rnd()) * DUST_TUNE.sizeLoose * rough;
       d[o + F.HEAT] = clamp(0.35 + 0.6 * s + 0.02 * spd, 0, 1);
     }
 
@@ -209,8 +235,7 @@ export class AmbientFx {
       const a = rnd() * 6.2832, rad = 7 + 19 * rnd();
       const wx = Math.cos(this.t * 0.33 + b.pos.z * 0.05) * (env.wind || 3);
       const wz = Math.sin(this.t * 0.27 + b.pos.x * 0.05) * (env.wind || 3) * 0.7;
-      d[o + F.X] = b.pos.x + Math.cos(a) * rad;
-      d[o + F.Y] = groundY + 2.0 + 4.5 * rnd();
+      d[o + F.X] = b.pos.x + Math.cos(a) * rad;      d[o + F.Y] = groundY + 2.0 + 4.5 * rnd();
       d[o + F.Z] = b.pos.z + Math.sin(a) * rad;
       d[o + F.VX] = wx * (0.25 + 0.35 * rnd());
       d[o + F.VY] = -(0.5 + 0.5 * rnd());
@@ -300,7 +325,7 @@ export class FxSystem {
 
     // Age + compact every pool: one in-place pass each, no allocation.
     age(this.flame, dt, 0.5);
-    age(this.dust, dt, 0.9);
+    age(this.dust, dt, DUST_TUNE.drag);
     age(this.leaves, dt, 0.0);
     age(this.motes, dt, 0.0);
 
