@@ -442,7 +442,20 @@ const SPR_TONES = {
   [SPR.BIRCH]: { shadow: [30, 46, 20], mid: [54, 80, 30], sun: [84, 110, 40], rim: [136, 138, 52], bark: [176, 168, 148] },
   [SPR.BUSH]: { shadow: [16, 30, 13], mid: [28, 50, 19], sun: [48, 74, 26], rim: [92, 100, 36], bark: [52, 40, 24] },
   [SPR.FERN]: { shadow: [14, 26, 12], mid: [24, 42, 16], sun: [44, 66, 22], rim: [84, 92, 30], bark: [44, 36, 22] },
+  // DEAD had no row here, so its cell fell through to the oak palette AND to paintSnag,
+  // i.e. a trunk-only cell in the band the mid quad samples. A standing dead tree still
+  // carries a dry crown; four tones, green-dominant like every other species.
+  [SPR.DEAD]: { shadow: [34, 42, 24], mid: [50, 60, 30], sun: [74, 86, 40], rim: [104, 110, 54], bark: [106, 88, 67] },
 };
+/** The palette as data, so a headless test can check a painted cell against the tones
+ *  the species is allowed to use. */
+export const SPRITE_TONES = SPR_TONES;
+/** Does this species own a painted far (billboard) cell? If not the far band must draw
+ *  the mid sprite, never a bare trunk. */
+export function hasFarCell(prop) {
+  const i = SPRITE_PROPS.indexOf(prop);
+  return i >= 0 && FAR_SPRITE_CELLS[i] !== undefined && FAR_SPRITE_CELLS[i] !== null;
+}
 
 function paintFoliage(kind, data) {
   data.fill(0);
@@ -480,6 +493,27 @@ function paintFoliage(kind, data) {
       if (i > 1) wood(x0 + dx * i, y0 - Math.round(dy * i) + 1, T.shadow, s + 3);
     }
   };
+
+  // 0) The crown envelope, filled solid, BEFORE any species stroke. This 32x32 cell is
+  //    what the MID band quad samples (buildSpriteGeometries -> atlasRect), so the upper
+  //    two thirds have to carry canopy mass: at 30..96 m a whole crown is a dozen texels
+  //    across, and with NearestFilter and no mipmaps the sparse ragged interior of the
+  //    old stroke-only crowns dropped out, leaving bare brown trunks in the middle
+  //    distance. Envelope first (no transparent hole inside the outline), detail on top.
+  {
+    const conifer = kind === SPR.PINE, snag = kind === SPR.DEAD;
+    const low = kind === SPR.BUSH || kind === SPR.FERN;
+    const top = 0, bot = Math.round(TEX_PX * (conifer ? 0.74 : 0.70));
+    const wide = snag ? 0.34 : conifer ? 0.44 : low ? 0.40 : 0.36;
+    for (let y = top; y <= bot; y++) {
+      const u = (y - top) / Math.max(1, bot - top);
+      let half;
+      if (conifer || snag) half = wide * TEX_PX * Math.pow(u, snag ? 0.80 : 1.00) + 2.0;
+      else half = wide * TEX_PX * Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.42) / 0.68, 2)));
+      const h = Math.round(half);
+      for (let x = 16 - h; x <= 16 + h; x++) fill(x, y, 5, false);
+    }
+  }
 
   if (kind === SPR.PINE || kind === SPR.BIRCH) {
     const spruce = kind === SPR.PINE;
@@ -544,7 +578,7 @@ function paintFoliage(kind, data) {
     return;
   }
 
-  if (kind === SPR.DEAD) return paintSnag(data);
+  if (kind === SPR.DEAD) { paintSnag(data); return; }
 
   // FERN / BRACKEN: fronds radiating from the base, drawn as stepped 2-texel strokes so
   // a fern patch has mass instead of a hairline.
@@ -615,14 +649,14 @@ function paintFarCanopy(kind, data, N) {
   };
   const conifer = kind === SPR.PINE;
   const snag = kind === SPR.DEAD;
-  const crownTop = Math.round(N * 0.04);
+  const crownTop = Math.round(N * 0.02);
   const crownBot = Math.round(N * (conifer ? 0.72 : 0.66));
-  const wide = snag ? 0.22 : conifer ? 0.30 : 0.34;
+  const wide = snag ? 0.36 : conifer ? 0.42 : 0.34;
   // 1) the envelope, filled solid: conifer cone, broadleaf lobed ellipse
   for (let y = crownTop; y <= crownBot; y++) {
     const u = (y - crownTop) / Math.max(1, crownBot - crownTop);
     let half;
-    if (conifer || snag) half = wide * N * Math.pow(u, snag ? 0.9 : 1.25) + N * 0.03;
+    if (conifer || snag) half = wide * N * Math.pow(u, snag ? 0.80 : 1.00) + N * 0.03;
     else half = wide * N * Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.40) / 0.64, 2)));
     const h = Math.round(half);
     for (let x = Math.round(mid - h); x <= Math.round(mid + h); x++) leaf(x, y, 5);
@@ -633,7 +667,7 @@ function paintFarCanopy(kind, data, N) {
   for (let k = 0; k < lumps; k++) {
     const u = 0.10 + ph(k, 5, 73) * 0.86;
     const env = (conifer || snag)
-      ? wide * N * Math.pow(u, snag ? 0.9 : 1.25) + N * 0.03
+      ? wide * N * Math.pow(u, snag ? 0.80 : 1.00) + N * 0.03
       : wide * N * Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.40) / 0.64, 2)));
     const side = ph(k, 9, 79) < 0.5 ? -1 : 1;
     const cx1 = mid + side * env * (0.45 + ph(k, 11, 83) * 0.62);
@@ -643,7 +677,7 @@ function paintFarCanopy(kind, data, N) {
       const dy = (y - cy1) / Math.max(1, r);
       const h = Math.round(r * Math.sqrt(Math.max(0, 1 - dy * dy)));
       for (let x = Math.round(cx1 - h); x <= Math.round(cx1 + h); x++) {
-        if (snag && ph(x, y, k + 91) < 0.45) continue;      // snags stay open-worked
+        if (snag && ph(x, y, k + 91) < 0.15) continue;      // snags stay open-worked
         leaf(x, y, k);
       }
     }

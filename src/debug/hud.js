@@ -52,14 +52,14 @@ export class Hud {
     const b = car.body;
     const kmh = num(b.groundSpeed) * 3.6;
 
-    const gear = car.powertrain.gear;
+    const gear = car.powertrain.gearLabel;
     const rpm = num(car.powertrain.rpm);
     const redline = num(car.params.engine.redline, 1);
     const bar = (n, v) => '▰'.repeat(Math.round(v * n)) + '▱'.repeat(n - Math.round(v * n));
 
     this._set(0, [
       `${car.params.name}`,
-      `${kmh.toFixed(0).padStart(4)} km/h   ${gear === 0 ? 'N' : gear}`,
+      `${kmh.toFixed(0).padStart(4)} km/h   ${gear}`,
       `${bar(22, Math.min(1, rpm / redline))} ${rpm.toFixed(0)} rpm`,
       `throttle ${num(input.state.throttle).toFixed(2)}  brake ${num(input.state.brake).toFixed(2)}  hb ${num(input.state.handbrake).toFixed(2)}`,
       `steer ${(num(input.state.steer) * 100).toFixed(0)}%  -> ${(num(car.wheels[0] && car.wheels[0].steer) * RAD2DEG).toFixed(1)}°`,

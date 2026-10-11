@@ -33,8 +33,8 @@ import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings
 import { RallyHud } from '../game/hud-rally.js';
 import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguages, TEXT_BOXES } from '../core/i18n.js';
 import { textWidth } from '../game/pixel-font.js';
-import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
-import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
+import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, SPRITE_TONES, hasFarCell, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
+import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance, vegBandHas } from '../world/veg-bands.js';
 import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, ROAD_COVER_INSET, RIBBON_EDGE_BAND } from '../world/road-carve.js';
 import { meshChunk } from '../world/mesher.js';
 import { ribbonChunk, ribbonHeight, terrainTopBilinear, ribbonHalf, STEP_ALONG, STEP_ACROSS, RIBBON_DROP, EDGE_BLOCK_BAND } from '../world/road-ribbon.js';
@@ -3553,6 +3553,10 @@ function testBackfireHasASound() {
   let shifts = 0, flameBursts = 0, prevBurst = 0;
   const p0 = bf.pops, g0 = bf.gated;
   const off = bus.on('shift', () => { shifts++; });
+  // Let the pops the earlier sections scheduled ring out before the lap starts: a first
+  // gear launch redlines fast, and its first crack would otherwise be judged against a
+  // chain the harness itself was still holding.
+  ctx.currentTime += 1.0;
   drive(car, input, 8.0, (c) => {
     fx.step(DT, c, 1);
     if (fx.exhaust.burst > 0 && prevBurst <= 0) flameBursts++;
@@ -3884,6 +3888,100 @@ function testPlannedForestAndFarBandCanopy() {
 }
 testPlannedForestAndFarBandCanopy();
 
+// ---- T60 every visible tree shows its crown ---------------------------------
+// The defect: a tree at 30..96 m drew a bare brown trunk. The mid band quad samples the
+// 32x32 near/mid atlas cell (buildSpriteGeometries -> atlasRect, props.js), and that cell
+// was stroke-drawn with a ragged, low-mass crown - and for PROP.DEAD it was a literal
+// trunk-only cell (paintFoliage -> paintSnag, no SPR_TONES row for the species). Measured
+// crown coverage (upper two thirds of the cell, pixels in the species tones) was 0.00 for
+// dead and 0.28 for pine in that cell. Both the near/mid cell and the 48x48 far cell must
+// clear 45% crown coverage, every band a tree can sit in must draw a quad set whose cell
+// clears it, and no species may ever fall out of the bands onto nothing.
+function crownCoverage(data, n, kind) {
+  const T = SPRITE_TONES[kind];
+  const tones = [T.shadow, T.mid, T.sun, T.rim];
+  const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+  const nt = tones.map(norm);
+  let hit = 0, tot = 0;
+  for (let y = 0; y < Math.floor(n * 2 / 3); y++) {
+    for (let x = 0; x < n; x++) {
+      const k = (y * n + x) * 4;
+      tot++;
+      if (data[k + 3] <= 127) continue;
+      const p = norm([data[k], data[k + 1], data[k + 2]]);
+      // The painters multiply a tone by a brightness scalar, so compare the colour
+      // direction, not the exact value: an opaque pixel must belong to the species.
+      if (nt.some((t) => p[0] * t[0] + p[1] * t[1] + p[2] * t[2] > 0.985)) hit++;
+    }
+  }
+  return hit / Math.max(1, tot);
+}
+function testEveryTreeShowsACrown() {
+  const gaps = [];
+  const cells = [];
+  const CROWN_MIN = 0.45;
+  const TREES = [PROP.OAK, PROP.PINE, PROP.BIRCH, PROP.DEAD];
+  // 1) every painted cell of every sprite species carries a crown.
+  const cov = new Map();
+  for (const p of SPRITE_PROPS) {
+    const i = SPRITE_PROPS.indexOf(p);
+    const nk = SPRITE_ATLAS.species[i], fk = FAR_SPRITE_CELLS[i];
+    if (fk === undefined || fk === null) gaps.push(`${PROP_NAMES[p]}/noFarCell`);
+    const midCell = crownCoverage(paintFoliageCell(nk, SPRITE_ATLAS.cellPx), SPRITE_ATLAS.cellPx, nk);
+    const farCell = crownCoverage(paintFoliageCell(fk, FAR_SPRITE_PX), FAR_SPRITE_PX, fk);
+    cov.set(`${i}`, { mid: midCell, far: farCell });
+    cells.push(`${PROP_NAMES[p]} mid ${midCell.toFixed(2)} far ${farCell.toFixed(2)}`);
+    if (midCell < CROWN_MIN) gaps.push(`${PROP_NAMES[p]}/midCrown=${midCell.toFixed(2)}`);
+    if (farCell !== undefined && farCell < CROWN_MIN) gaps.push(`${PROP_NAMES[p]}/farCrown=${farCell.toFixed(2)}`);
+  }
+  // 2) the four probe distances each land in a band that draws a crown-bearing quad set.
+  const plan = vegBandPlan(settings.quality, settings);
+  const bandAt = (d) => (d <= plan.nearR ? 'near' : d <= plan.midR ? 'mid' : d <= plan.farR ? 'far' : 'none');
+  const probe = [];
+  for (const d of [25, 80, 200, 400]) {
+    const band = bandAt(d);
+    if (band === 'none') { gaps.push(`${d}m/noBand`); continue; }
+    let worst = 1, worstSp = '';
+    for (const p of TREES) {
+      if (!vegBandHas(p, band)) { gaps.push(`${d}m/${PROP_NAMES[p]}/noBandMesh`); continue; }
+      const i = SPRITE_PROPS.indexOf(p);
+      const c = band === 'far' ? (hasFarCell(p) ? cov.get(`${i}`).far : cov.get(`${i}`).mid)
+        : cov.get(`${i}`).mid;
+      if (c < worst) { worst = c; worstSp = PROP_NAMES[p]; }
+      if (c < CROWN_MIN) gaps.push(`${d}m/${PROP_NAMES[p]}/${band}=${c.toFixed(2)}`);
+    }
+    probe.push(`${d}m=${band}(${worst.toFixed(2)} ${worstSp})`);
+  }
+  // 3) census across a real placement: how many trees at each band draw a crown.
+  const def = MAP_CATALOG.find((m) => m.id === 'forest-loop') || MAP_CATALOG[0];
+  const w = new VoxelWorld(def.seed >>> 0);
+  const r = applyMap(w, fs.readFileSync(mapUrl(def.id)));
+  const road = r.road;
+  const i0 = Math.floor(road.n / 2);
+  const focus = { x: road.x[i0], z: road.z[i0] };
+  const trees = [];
+  for (const list of r.propTables.values()) for (const p of list) if (TREES.includes(p.prop)) trees.push(p);
+  const tally = { near: [0, 0], mid: [0, 0], far: [0, 0], none: [0, 0] };
+  for (const p of trees) {
+    const d = Math.hypot(p.x - focus.x, p.z - focus.z);
+    const band = bandAt(d);
+    const t = tally[band];
+    t[0]++;
+    const ci = cov.get(`${SPRITE_PROPS.indexOf(p.prop)}`);
+    const c = band === 'none' ? 0 : band === 'far' ? (hasFarCell(p.prop) ? ci.far : ci.mid) : ci.mid;
+    if (c >= CROWN_MIN) t[1]++;
+  }
+  const census = ['near', 'mid', 'far'].map((b) => `${b} ${tally[b][1]}/${tally[b][0]}`);
+  for (const b of ['near', 'mid', 'far']) {
+    if (!tally[b][0]) gaps.push(`census/${b}=0`);
+    if (tally[b][1] !== tally[b][0]) gaps.push(`crownless/${b}=${tally[b][0] - tally[b][1]}`);
+  }
+  check('T60 every visible tree shows its crown: every species paints a full-tree cell (trunk plus a crown filling the upper two thirds of the atlas cell at >=45% opaque pixels in its own tones) in BOTH the crossed-sprite and the billboard cell, each of the 25/80/200/400 m distance bands draws a quad set whose cell passes that test, and no species may fall past its bands onto a bare trunk',
+    gaps.length === 0 && probe.length === 4 && cells.length === SPRITE_PROPS.length,
+    `crownCoverage: ${cells.join(' | ')} | bands near<=${plan.nearR} mid<=${plan.midR} far<=${plan.farR} | ${probe.join(' ')} | census ${census.join(' ')} (beyond ${plan.farR}m ${tally.none[0]} trees, no band) | want>=${CROWN_MIN} gaps=[${gaps.join(' ')}]`);
+}
+testEveryTreeShowsACrown();
+
 // T58 (JOB: the road reads as paving slabs with black gaps, not a rally stage): the
 // carriageway must be ONE continuous carved strip - every lane column authored, the crown
 // line continuous along the route, the wheel lines carved as real depth - and the block
@@ -4169,6 +4267,157 @@ function testRoadRibbonIsOneContinuousSurface() {
     `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} coverBits=${coverBits} keptCovered=${coverKept} coverHole=${coverHole} coverMiss=${coverMiss} ribbonHalfMismatch=${halfMismatch} coverInset=${ROAD_COVER_INSET} edgeTopMissing=${edgeTopMissing}/${edgeCellN} edgeSurfaceMax=${edgeSurfaceMax.toFixed(3)}m gaps=[${gaps.join(' ')}]`);
 }
 testRoadRibbonIsOneContinuousSurface();
+
+// ---------------------------------------------------------------- test 60
+// The gear the HUD shows IS the gear the gearbox is in. The cluster used to invent its
+// own neutral out of the speed (kmh > 2 ? gear+1 : 'N') and the debug telemetry row
+// printed the raw 0-based index, so the digit disagreed with the rev counter, showed 'N'
+// while the car was still rolling in 1st, and lagged or jumped the shift. Both now read
+// the powertrain's own displayGear/gearLabel, so the only source is the gearbox.
+function testHudGearIsThePowertrainGear() {
+  const ctx2d = new Proxy({}, { get(t, k) { if (k in t) return t[k]; return () => {}; }, set(t, k, v) { t[k] = v; return true; } });
+  class CanvasStubDoc extends MenuStubDoc {
+    createElement(tag) {
+      const el = super.createElement(tag);
+      if (tag === 'canvas') el.getContext = () => ctx2d;
+      return el;
+    }
+  }
+  globalThis.window = { innerWidth: 1600, innerHeight: 900, addEventListener() {} };
+  const hud = new RallyHud(new CanvasStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  const car = makeCar(new FlatWorld(SURF.ASPHALT), {});
+  car.placeAt(0, 0, 0);
+  const e = car.params.engine;
+  const hctx = { car, stage: null, notes: [], stageName: 'TEST' };
+
+  // The gear label the cluster actually paints, read back out of the cache key that
+  // drives its redraw: `${f}|${kmh}|${gl}|${fr}|${mode}`.
+  const shown = () => String((hud._keys.cluster || '').split('|')[2] ?? '');
+
+  let shifts = 0, pending = null, lagFrames = 0, maxLag = 0, samples = 0, topSeen = 0, ups = 0, downs = 0, maxDev = 0;
+  const off = bus.on('shift', (ev) => { shifts++; pending = { want: String(ev.gear), dir: ev.up ? 1 : -1 }; });
+  const gaps = [];
+  let lastLabel = String(car.powertrain.displayGear), lastGear = car.powertrain.displayGear, changes = 0;
+  const path = [lastGear];
+  for (let i = 0; i < Math.round(60 / DT); i++) {
+    car.setInput({ throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 });
+    car.step(DT);
+    hud._drawCluster(hctx);
+    samples++;
+    const label = shown(), g = car.powertrain.displayGear, rpm = car.powertrain.rpm;
+    if (label !== String(g)) gaps.push(`#${i} hud=${label} box=${g}`);
+    if (label === 'N' && g !== 0) gaps.push(`#${i} hud says N while box is engaged (${g})`);
+    topSeen = Math.max(topSeen, g);
+    if (label !== lastLabel) {
+      changes++;
+      if (Math.abs(g - lastGear) !== 1) gaps.push(`gear skipped ${lastGear}->${g} at #${i}`);
+      if (g > lastGear) ups++; else downs++;
+      if (pending) {
+        lagFrames = 0;
+        if (label !== pending.want) { lagFrames = 1; pending = null; }
+      }
+      maxLag = Math.max(maxLag, lagFrames);
+      pending = null;
+      lastLabel = label; lastGear = g; path.push(g);
+    }
+    // The rev counter must agree with the displayed gear: engine speed is the displayed
+    // ratio over wheel speed, and it must sit inside that gear's envelope.
+    const p = car.params, wheels = car.wheels;
+    const omega = p.drive === 'RWD'
+      ? (wheels[2].omega + wheels[3].omega) / 2
+      : (wheels[0].omega + wheels[1].omega + wheels[2].omega + wheels[3].omega) / 4;
+    const want = Math.max(e.idle, omega * p.gears[g - 1] * p.finalDrive * 60 / (2 * Math.PI));
+    if (rpm < e.idle - 1 || rpm > e.redline * 1.12) gaps.push(`#${i} rpm ${rpm.toFixed(0)} outside ${e.idle}..${(e.redline * 1.12).toFixed(0)} in ${g}`);
+    // With the clutch shut the rev counter must sit on the displayed ratio; during the
+    // 120 ms shift cut the driveline is open and the revs legitimately fall towards it.
+    if (car.powertrain.cut <= 0) {
+      const dev = Math.abs(rpm - want) / e.redline;
+      maxDev = Math.max(maxDev, dev);
+      if (dev > 0.10) gaps.push(`#${i} rpm ${rpm.toFixed(0)} vs gear ${g} ratio ${want.toFixed(0)}`);
+    }
+  }
+  if (off) off();
+  if (changes !== shifts) gaps.push(`shift events=${shifts} != display changes=${changes}`);
+  if (ups !== car.params.gears.length - 1) gaps.push(`launch made ${ups} upshifts, want ${car.params.gears.length - 1}`);
+  if (topSeen !== car.params.gears.length) gaps.push(`top gear seen ${topSeen}`);
+  if (maxLag > 1) gaps.push(`display lag ${maxLag} frames`);
+  check('T60 the HUD gear is the powertrain gear at every sample of a full throttle launch through every upshift: no skipping, revs inside the displayed gear, shift events equal display changes',
+    gaps.length === 0,
+    `samples=${samples} shiftEvents=${shifts} displayChanges=${changes} up=${ups} down=${downs} lagFrames=${maxLag} path=${path.join('>')}`
+    + ` top=${topSeen}/${car.params.gears.length} rpmDevMax=${(maxDev * 100).toFixed(1)}% of redline rpmBand=${e.idle}..${e.redline} gaps=[${gaps.slice(0, 4).join(' ')}]`);
+}
+testHudGearIsThePowertrainGear();
+
+// ------------------------------------------------- T61 steering table (player: "left and right is not right")
+// A headless sweep of the real Vehicle: both directions, both surfaces, five speeds,
+// 30 % and 90 % of lock. What the player has a right to expect: the yaw sign follows
+// the steer sign (positive steer = LEFT, the T15 ground truth), |yaw| falls as speed
+// rises at a given lock, left and right agree inside 8 %, full lock at 120 km/h cannot
+// snap the car into a tiny radius, and a standing launch starts in FIRST (the box used
+// to start in second and immediately downshift, which the cluster showed as a flicker).
+function testSteeringTable() {
+  const sweep = (surfaceId, kph, steerFrac) => {
+    const v0 = kph / 3.6;
+    const car = makeCar(new FlatWorld(surfaceId), {});
+    car.placeAt(0, 0, 0);
+    car.body.vel.x = v0;
+    car.wheels.forEach((w) => { w.omega = v0 / w.rEff; });
+    drive(car, { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 }, 1.0);
+    const hist = [];
+    let lock0 = 0;
+    drive(car, { throttle: 0, brake: 0, steer: steerFrac, handbrake: 0, shiftUp: 0, shiftDown: 0 }, 3.0,
+      (c, i) => { hist.push(c.body.angVel.y); if (i === 0) lock0 = c.steerAngle; });
+    const tail = hist.slice(Math.round(0.5 / DT));           // settled half second
+    const yaw = tail.reduce((a, b) => a + b, 0) / tail.length;
+    return { yaw, lock0, radius: Math.abs(yaw) > 1e-3 ? car.body.groundSpeed / Math.abs(yaw) : Infinity,
+      lock: car.steerAngle, steerMax: car.params.steerMax };
+  };
+  const gaps = [];
+  let cells = 0, worstLR = 0;
+  for (const surf of [SURF.ASPHALT, SURF.GRAVEL]) {
+    for (const st of [0.3, -0.3, 0.9, -0.9]) {
+      let prev = Infinity;
+      for (const kph of [20, 40, 60, 90, 120]) {
+        cells++;
+        const band = Math.abs(st) > 0.5 ? 40 : 60;   // the speed the grip circle starts to bite
+        if (kph === band) prev = Infinity;
+        const r = sweep(surf, kph, st);
+        if (Math.sign(r.yaw) !== Math.sign(st)) gaps.push(`${surf} ${kph}km/h steer=${st} yaw=${r.yaw.toFixed(3)} turned the wrong way`);
+        // A held step steer must not get more nervous as the stage gets faster. The
+        // 20 km/h case is a full-lock hairpin, legitimately the fastest yaw of all, so
+        // the falling rule is measured from the speed the grip circle starts to bite.
+        if (kph >= band && Math.abs(r.yaw) > prev) {
+          gaps.push(`${surf} ${kph}km/h steer=${st} |yaw| ${Math.abs(r.yaw).toFixed(3)} did not fall (was ${prev.toFixed(3)})`);
+        }
+        prev = Math.abs(r.yaw);
+        if (kph === 120 && (!Number.isFinite(r.radius) || r.radius < 45)) {
+          gaps.push(`${surf} 120km/h steer=${st} radius ${r.radius.toFixed(1)} m is inside the pinned 45 m floor`);
+        }
+      }
+    }
+    for (const kph of [20, 60, 120]) {
+      const L = sweep(surf, kph, 0.9), R = sweep(surf, kph, -0.9);
+      const d = Math.abs(Math.abs(L.yaw) - Math.abs(R.yaw)) / Math.max(1e-6, Math.abs(L.yaw));
+      worstLR = Math.max(worstLR, d);
+      if (d > 0.08) gaps.push(`${surf} ${kph}km/h L/R yaw differ ${(d * 100).toFixed(1)}% (L=${L.yaw.toFixed(3)} R=${R.yaw.toFixed(3)})`);
+    }
+    // The ramp: full lock at parking speed, about 30 % of it left at 120 km/h.
+    const slow = sweep(surf, 5, 1.0), fast = sweep(surf, 120, 1.0);
+    if (slow.lock0 < slow.steerMax * 0.95) gaps.push(`${surf} parking lock ${(slow.lock0 * 180 / Math.PI).toFixed(1)} deg < 95 % of steerMax`);
+    if (fast.lock0 > slow.steerMax * 0.36) gaps.push(`${surf} 120km/h lock ${(fast.lock0 * 180 / Math.PI).toFixed(1)} deg > 36 % of steerMax`);
+  }
+  // A standing launch starts in first, and stays there off the line.
+  const launch = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  launch.placeAt(0, 0, 0);
+  const g0 = launch.powertrain.displayGear;
+  drive(launch, { throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 }, 0.5);
+  const g1 = launch.powertrain.displayGear;
+  if (!(g0 === 1 && g1 === 1)) gaps.push(`standing launch gear ${g0} -> ${g1} at 0.5 s, want 1 -> 1`);
+  check('T61 steering table: yaw sign follows steer, |yaw| falls with speed, left/right inside 8 %, 120 km/h lock ramped to a pinned radius, standing launch in first',
+    gaps.length === 0,
+    `cells=${cells} worstLR=${(worstLR * 100).toFixed(1)}% parkingLock=${(sweep(SURF.ASPHALT, 5, 1).lock0 * 180 / Math.PI).toFixed(1)}deg 120Lock=${(sweep(SURF.ASPHALT, 120, 1).lock0 * 180 / Math.PI).toFixed(1)}deg launch=${g0}->${g1} gaps=[${gaps.slice(0, 4).join(' ')}]`);
+}
+testSteeringTable();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

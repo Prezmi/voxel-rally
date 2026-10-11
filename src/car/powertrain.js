@@ -6,6 +6,9 @@ import { bus } from '../core/events.js';
 const CUT_TIME = 0.12;
 const RPM_COUPLE = 18;      // 1/s coupling of engine rpm to the driveline
 
+const NEUTRAL = -1;         // reserved index: transmission not engaged
+const REVERSE = -2;         // reserved index: this 6-speed box is forward-only
+
 function torqueCurve(e, rpm) {
   // Flat rally torque plateau. A launch from idle still delivers torque through
   // the clutch, so the curve must not collapse to zero at idle.
@@ -23,7 +26,8 @@ export class Powertrain {
     this.car = car;
     const e = car.params.engine;
     this.rpm = e.idle;
-    this.gear = 1;              // 0-based index into params.gears
+    this.gear = 0;              // 0-based index into params.gears: a standing launch starts in FIRST
+    this._forbear = 0;          // s of AutoShift forbearance left after a shift
     this.cut = 0;               // shift interruption timer
     this.shaftTorque = 0;
     this.autoShift = true;
@@ -31,6 +35,23 @@ export class Powertrain {
   }
 
   ratio() { return this.car.params.gears[this.gear] * this.car.params.finalDrive; }
+
+  /** THE gear readout, single source (docs/02 §3.7). Forward gears show their 1-based
+   *  index, an unengaged transmission (NEUTRAL / out of range) shows 0, REVERSE shows -1.
+   *  The HUD cluster, the debug telemetry row and every other consumer read this; nothing
+   *  may derive a gear from speed, smooth it or guess it. */
+  get displayGear() {
+    const g = this.gear, n = this.car.params.gears.length;
+    if (g === REVERSE) return -1;
+    if (g < NEUTRAL || g >= n) return 0;
+    return g + 1;
+  }
+
+  /** Same number as a label: '1'..'6', 'N' when not engaged, 'R' for reverse. */
+  get gearLabel() {
+    const d = this.displayGear;
+    return d < 0 ? 'R' : (d === 0 ? 'N' : String(d));
+  }
 
   shiftUp() { if (this.gear < this.car.params.gears.length - 1) { this.gear++; this.cut = CUT_TIME; this._emitShift(true); } }
   shiftDown() { if (this.gear > 0) { this.gear--; this.cut = CUT_TIME; this._emitShift(false); } }
@@ -41,7 +62,7 @@ export class Powertrain {
     const thr = this._lastThrottle || 0;
     bus.emit('shift', {
       up,
-      gear: this.gear + 1,
+      gear: this.displayGear,
       rpm: this.rpm,
       throttle: thr,
       demand: clamp(thr * (this.rpm / Math.max(1, this.car.params.engine.redline)), 0, 1),
@@ -101,7 +122,6 @@ export class Powertrain {
 
     this.shaftTorque = tq * this.ratio() * p.efficiency;
     this.car.rpm = this.rpm;
-    this.car.gear = this.gear + 1;
     this.car.redlineOmega = e.redline * 60 / (2 * Math.PI) / this.ratio();
     return this.shaftTorque;
   }

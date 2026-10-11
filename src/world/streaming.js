@@ -12,7 +12,7 @@ import { chunkTiles, FLAG_PEBBLE, FLAG_RUT, FLAG_CROWN, SURF_MASK, VERGE, VERGE_
 import { SURF } from './surfaces.js';
 import { PALETTE } from './palette.js';
 import { GeoBuilder } from '../render/primitives.js';
-import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries, buildNearLodVariantGeometries, vegToneJitter } from './props.js';
+import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries, buildNearLodVariantGeometries, vegToneJitter, hasFarCell } from './props.js';
 import { PROP_CAPACITY as CAPACITY, vegBandPlan } from './veg-bands.js';
 import { settings, QUALITY } from '../core/settings.js';
 import { loadModelNodes } from '../render/assets.js';
@@ -947,8 +947,14 @@ export class Streaming {
       } else put(im, near, nN, false, 0, 0, 0, 0.78);
       const mim = this.midMeshes.get(type);
       if (mim) put(mim, mid, mN, false, midR * 0.55, midR, 1, 0.72);
+      // A species past its near geometry must never be dropped to nothing: the far band
+      // draws the billboard cell, and a species with no painted far cell (or no billboard
+      // mesh) falls back to the crossed-quad mid sprite, which still carries a crown.
       const bim = this.billMeshes.get(type);
-      if (bim) put(bim, bill, bN, true, farR * 0.5, farR, 1, 0.4);
+      if (bim && hasFarCell(type)) put(bim, bill, bN, true, farR * 0.5, farR, 1, 0.4);
+      else if (mim && SPRITE_SET.has(type)) {
+        put(mim, bill, Math.min(bill.length, mim.instanceMatrix.count), false, farR * 0.5, farR, 1, 0.55);
+      }
     }
     this.stats.props = total;
     for (const a of nearB.values()) a.length = 0;      // keep the arrays, drop the items

@@ -702,8 +702,10 @@ export class RallyHud {
     // sweep on the rev fraction, so dial and digits disagreed).
     const kmh = Math.round((car.body ? car.body.groundSpeed : (car.speed || 0)) * 3.6);
     const f = Math.max(0, Math.min(1, kmh / DIAL_MAX));
-    const gear = pt ? pt.gear : 0;
-    const gl = kmh > 2 ? String(gear + 1) : 'N';
+    // ONE gear source: the gearbox's own index. No km/h threshold, no smoothing, no
+    // guessed neutral - the cluster shows the shift on the frame it happens.
+    const gl = pt ? pt.gearLabel : 'N';
+    const topGear = String(((car.params && car.params.gears) || []).length);
     if (this._key('cluster', `${f.toFixed(3)}|${kmh}|${gl}|${fr.toFixed(3)}|${this.mode}`) || this._dirtyAll) {
       if (this.g && this._dialFace) {
         const D = this.L.dial, G2 = this.g;
@@ -731,7 +733,7 @@ export class RallyHud {
         drawText(G2, t('hud.kmh'), S.x + 5, S.y + S.h - 11, 1, C.TEXT);
         const gx = S.x - 24, gy = S.y + S.h - 22;
         slotRect(G2, gx, gy, 20, 20);
-        drawText(G2, gl, gx + 8, gy + 3, 2, gl === 'N' ? C.TEXT : (gl === '6' ? C.RED : C.TEXT));
+        drawText(G2, gl, gx + 8, gy + 3, 2, gl === 'N' ? C.TEXT : (gl === topGear ? C.RED : C.TEXT));
       }
     }
   }

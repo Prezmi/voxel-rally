@@ -43,7 +43,6 @@ export class Vehicle {
     this.tyreTemp = 0;
     this.grainPhase = 0;
     this.rpm = this.params.engine.idle;
-    this.gear = 1;
     this.redlineOmega = 400;
     this.steerAngle = 0;
     this.groundSpeed = 0;
@@ -190,7 +189,7 @@ export class Vehicle {
       w.slipTime = 0;
     }
     this.powertrain.rpm = this.params.engine.idle;
-    this.powertrain.gear = 1;
+    this.powertrain.gear = 0;   // a respawn/standing launch starts in FIRST
     this.powertrain.cut = 0;
     resetRollover(this.rollover);
   }
