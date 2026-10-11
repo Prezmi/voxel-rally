@@ -42,6 +42,26 @@ const BIOME_BIAS = {
   CANYON: { sat: 1.14, haze: 0.95, ground: 0x57483a, shaft: 1.05 },
 };
 
+// The sun is pinned to a low, raking band (PLAN §10 criterion 1/4: shadows must lie
+// across the carriageway, not straight down under the car). Noon used to sit at 52 deg
+// and the whole frame read flat and evenly lit. Night and the rise/set stops keep their
+// own curve (elev <= 0), only the daylight arc is clamped into this band.
+export const SUN_ELEV_RANGE = [18, 28];
+// Azimuth in radians, negative = the key comes in across the road from the left rather
+// than along the camera axis, so the shadow of the car and the verge posts fall to the
+// side of the object that casts them and are actually visible in frame.
+export const SUN_AZ = { base: -0.86, swing: 0.55, min: -1.25, max: -0.45 };
+
+export function sunAzimuth(t) {
+  const a = SUN_AZ.base + (t - 0.5) * SUN_AZ.swing;
+  return Math.min(SUN_AZ.max, Math.max(SUN_AZ.min, a));
+}
+
+export function clampSunElev(e) {
+  if (!(e > 0)) return e;                                  // night / below the horizon
+  return Math.min(SUN_ELEV_RANGE[1], Math.max(SUN_ELEV_RANGE[0], e));
+}
+
 const _a = new THREE.Color();
 const _b = new THREE.Color();
 const _w = new THREE.Color();
@@ -82,7 +102,8 @@ export function lightingFor(biome, tod, out) {
 
   // Sun direction: the arc runs across the sky so the key light swings with the
   // day (long shadows at low elevation = the Colin McRae frame, PLAN §10).
-  const az = -2.35 + t * 3.4;
+  out.elevationDeg = clampSunElev(out.elevationDeg);
+  const az = sunAzimuth(t);
   const e = out.elevationDeg * Math.PI / 180;
   const ce = Math.cos(e), se = Math.sin(e);
   out.sunDir.set(ce * Math.sin(az), se, ce * Math.cos(az)).normalize();

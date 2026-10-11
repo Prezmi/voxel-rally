@@ -16,7 +16,7 @@ import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
 import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP, LIVERY_TEXEL, LIVERY_NUM, LIVERY_SAMPLE, liveryNumberRects, buildLiveryTexture } from '../render/car-livery.js';
-import { FxSystem, FX_CAPACITY, DUST_TUNE, SOOT_TUNE, STRIDE, shiftPop, POP_FLOOR, LIFT_THROTTLE } from '../fx/fx.js';
+import { FxSystem, FX_CAPACITY, DUST_TUNE, SOOT_TUNE, BURST_TUNE, STRIDE, shiftPop, POP_FLOOR, LIFT_THROTTLE } from '../fx/fx.js';
 import { BackfirePop, BACKFIRE, popVoice, crackTrain, shiftRpmN } from '../audio/backfire.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
@@ -4464,6 +4464,256 @@ function testSteeringTable() {
     `cells=${cells} worstLR=${(worstLR * 100).toFixed(1)}% parkingLock=${(sweep(SURF.ASPHALT, 5, 1).lock0 * 180 / Math.PI).toFixed(1)}deg 120Lock=${(sweep(SURF.ASPHALT, 120, 1).lock0 * 180 / Math.PI).toFixed(1)}deg launch=${g0}->${g1} gaps=[${gaps.slice(0, 4).join(' ')}]`);
 }
 testSteeringTable();
+
+// ------------------------------------------------- T62 sun shadow / baked AO / ground tone
+// (JOB: the frame read flat and evenly lit - no directional shadow, no occlusion in the
+// crevices, nothing anchoring the car to the road). Pinned: the sun sits in a low raking
+// band with an azimuth across the road; every quality preset owns a 120 m near shadow box
+// (1024 at LOW, 2048 at MED/HIGH) plus a 300 m coarser fit with its own looser bias; the
+// baked AO stays in 0.70..1.00; the car has a contact shadow gated at 1.2 m of travel; the
+// grass face tone varies cell to cell.
+import { AO_LEVELS, AO_RANGE, TONE_SPREAD } from '../world/mesher.js';
+
+function testSunShadowAoGround() {
+  const gaps = [];
+  const src = readFileSync(new URL('../render/renderer.js', import.meta.url), 'utf8');
+  const cut = src.indexOf('const SHADOW_FAR');
+  const rows = (txt) => [...txt.matchAll(/\{\s*span:\s*([\d.]+),\s*map:\s*(\d+),\s*dist:\s*(\d+),\s*bias:\s*(-?[\d.e-]+),\s*normalBias:\s*([\d.]+)/g)]
+    .map((m) => ({ span: +m[1], map: +m[2], dist: +m[3], bias: +m[4], nb: +m[5] }));
+  const near = rows(src.slice(src.indexOf('const SHADOW_PRESET'), cut)), far = rows(src.slice(cut));
+  if (near.length !== 3 || far.length !== 3) gaps.push('presetRows');
+  if (near[0] && near[0].map !== 1024) gaps.push('LOWmap');
+  if (near[1] && near[1].map !== 2048) gaps.push('MEDmap');
+  if (near[2] && near[2].map !== 2048) gaps.push('HIGHmap');
+  for (const p of near) if (p.span * 2 < 100 || p.span * 2 > 140) gaps.push(`nearOrtho${p.span * 2}`);
+  for (const p of far) if (p.span * 2 !== 300 || p.map !== 1024 || p.dist < 300) gaps.push('farFit');
+  for (let i = 0; i < 3; i++) {
+    if (!(near[i].bias < 0 && near[i].bias > -0.002)) gaps.push(`nearBias${i}`);
+    if (!(near[i].nb > 0.01 && near[i].nb < 0.08)) gaps.push(`nearNormalOffset${i}`);
+    if (!(far[i].bias < near[i].bias && far[i].nb > near[i].nb)) gaps.push(`farBiasLooser${i}`);
+  }
+  const floor = /const MIN_SUN_Y = Math\.sin\((\d+)/.exec(src);
+  const mGate = /export const CONTACT_GATE = ([\d.]+)/.exec(src);
+  const mRest = /export const CONTACT_REST = ([\d.]+)/.exec(src);
+  const CONTACT_GATE = mGate ? +mGate[1] : 0;
+  const CONTACT_REST = mRest ? +mRest[1] : 0;
+  const floorDeg = floor ? +floor[1] : 0;
+  // Sun (src/render/lighting.js carries the band; node has no `three`, so the band and
+  // the azimuth law are pinned straight off the module source + applied formulas).
+  const lsrc = readFileSync(new URL('../render/lighting.js', import.meta.url), 'utf8');
+  const elevBand = /export const SUN_ELEV_RANGE = \[(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\]/.exec(lsrc);
+  const SUN_ELEV_RANGE = elevBand ? [+elevBand[1], +elevBand[2]] : [0, 0];
+  const azm = /export const SUN_AZ = \{ base: (-?[\d.]+), swing: (-?[\d.]+), min: (-?[\d.]+), max: (-?[\d.]+) \}/.exec(lsrc);
+  const SUN_AZ = azm ? { base: +azm[1], swing: +azm[2], min: +azm[3], max: +azm[4] } : null;
+  if (!SUN_ELEV_RANGE || !SUN_AZ) gaps.push('sunBandMissing');
+  if (!/out\.elevationDeg = clampSunElev\(out\.elevationDeg\)/.test(lsrc)) gaps.push('elevClampOff');
+  if (!/const az = sunAzimuth\(t\)/.test(lsrc)) gaps.push('azLawOff');
+  if (!/clampSunElev\(e\)[\s\S]{0,120}SUN_ELEV_RANGE\[1\][\s\S]{0,60}SUN_ELEV_RANGE\[0\]/.test(lsrc)) gaps.push('clampLaw');
+  let elevMin = SUN_ELEV_RANGE[0], elevMax = SUN_ELEV_RANGE[1], azMin = 9, azMax = -9;
+  for (let t = 0.22; t <= 0.86; t += 0.04) {
+    const a = Math.min(SUN_AZ.max, Math.max(SUN_AZ.min, SUN_AZ.base + (t - 0.5) * SUN_AZ.swing));
+    if (a < SUN_AZ.min - 1e-9 || a > SUN_AZ.max + 1e-9) gaps.push('az' + a.toFixed(2));
+    if (Math.abs(a) < 0.4) gaps.push('azAlongRoad');   // must rake across, not down the barrel
+    azMin = Math.min(azMin, a); azMax = Math.max(azMax, a);
+  }
+  if (!(SUN_ELEV_RANGE[0] >= 18 && SUN_ELEV_RANGE[1] <= 28)) gaps.push('elevBand');
+  if (!(floorDeg >= SUN_ELEV_RANGE[0] && floorDeg <= SUN_ELEV_RANGE[1])) gaps.push('sunFloor' + floorDeg);
+
+  // Contact shadow: present, one quad, gated by ride height.
+  if (!(CONTACT_GATE > 0.6 && CONTACT_GATE <= 1.5)) gaps.push('contactGate');
+  if (!(CONTACT_REST > 0.2 && CONTACT_REST < 0.5)) gaps.push('contactRest');
+  if (!/this\.contact = this\._buildContactShadow\(\)/.test(src)) gaps.push('contactBuilt');
+  if (!/MultiplyBlending/.test(src) || !/depthWrite: false/.test(src)) gaps.push('contactBlend');
+  if (!/if \(air > CONTACT_GATE\) \{ m\.visible = false; return; \}/.test(src)) gaps.push('contactGateMissing');
+  if (!/this\._fitContact\(target\)/.test(src)) gaps.push('contactNotFitted');
+
+  // AO range pinned, and it has to actually land on a real chunk.
+  if (AO_RANGE[0] < 0.70 - 1e-9 || AO_RANGE[1] > 1.00 + 1e-9) gaps.push('aoRange');
+  for (const a of AO_LEVELS) if (a < AO_RANGE[0] || a > AO_RANGE[1]) gaps.push(`aoLevel${a}`);
+  const seed = 9091;
+  const terrain = makeTerrain(seed, 'FOREST');
+  const road = buildRoad({ seed, lengthTarget: 900, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const world = new VoxelWorld(seed);
+  const index = carveRoad(world, road, terrain).index;
+  const cells = new Map();
+  const FACE_CELL = 3;
+  let lumMin = 1e9, lumMax = -1e9, lumN = 0;
+  const dark = [0, 0, 0, 0, 0];
+  let chunkN = 0;
+  for (const key of index.keys()) {
+    if (chunkN++ >= 208) break;
+    const t = meshChunk(world, world.chunkAt(keyToCx(key), keyToCz(key)), 0);
+    const idx = t.index, P = t.position, C = t.color;
+    for (let k = 0; k < idx.length; k += 3) {
+      const a = idx[k] * 3, b = idx[k + 1] * 3, d = idx[k + 2] * 3;
+      if (Math.max(P[a + 1], P[b + 1], P[d + 1]) - Math.min(P[a + 1], P[b + 1], P[d + 1]) > 1e-3) continue;
+      let cx = 0, cz = 0, Lf = 0;
+      for (const p of [a, b, d]) { cx += P[p]; cz += P[p + 2]; Lf += (C[p] + C[p + 1] + C[p + 2]) / 9; }
+      const gx = Math.floor(cx / FACE_CELL), gz = Math.floor(cz / FACE_CELL);
+      const e2 = cells.get(gx + ',' + gz) || { s: 0, n: 0 };
+      e2.s += Lf; e2.n++; cells.set(gx + ',' + gz, e2);
+      for (const p of [a, b, d]) {
+        const L = (C[p] + C[p + 1] + C[p + 2]) / 3;
+        lumMin = Math.min(lumMin, L); lumMax = Math.max(lumMax, L);
+        lumN++;
+        const q = Math.min(4, Math.max(0, Math.floor((L / 0.70) * 5)));
+        dark[q]++;
+      }
+    }
+  }
+  const aoMinRatio = lumMin / lumMax;
+  if (!(aoMinRatio <= AO_RANGE[0] + 0.16)) gaps.push(`aoLand${aoMinRatio.toFixed(3)}`);
+  if (lumMin < 0.06) gaps.push('aoPit');
+  if (!(dark[0] + dark[1] > 0)) gaps.push('noDarkTail');
+
+  // Ground tone spread, face to neighbouring face (JOB 4): the mean albedo of every flat
+  // top face on a 3 m lattice, then the value delta across the seams that are a seam at
+  // all (a merged panel repeats its own tone, so exact ties are skipped).
+  const meanOf = (k) => { const e = cells.get(k); return e ? e.s / e.n : null; };
+  const deltas = [];
+  let cellsN = 0;
+  for (const k of cells.keys()) {
+    const [gx, gz] = k.split(',');
+    const a = meanOf(k); cellsN++;
+    for (const nk of [(+gx + 1) + ',' + gz, gx + ',' + (+gz + 1)]) {
+      const b = meanOf(nk);
+      if (b != null && a > 0) { const dv = Math.abs(a - b) / ((a + b) / 2); if (dv > 0.004) deltas.push(dv); }
+    }
+  }
+  deltas.sort((x, y) => x - y);
+  const spreadMean = deltas.reduce((s, v) => s + v, 0) / Math.max(1, deltas.length);
+  const spreadP50 = deltas[Math.floor(deltas.length / 2)] || 0;
+  const spreadP90 = deltas[Math.floor(deltas.length * 0.9)] || 0;
+  if (cellsN < 120 || deltas.length < 30) gaps.push('faceSample');
+  if (spreadP50 < 0.06 || spreadP50 > 0.10) gaps.push('grassP50' + (spreadP50 * 100).toFixed(1));
+  if (spreadMean < 0.05 || spreadMean > 0.13) gaps.push('grassSpread' + (spreadMean * 100).toFixed(1));
+  const toneP2P = TONE_SPREAD.panel + TONE_SPREAD.fine + TONE_SPREAD.grit;
+  if (toneP2P < 0.06 || toneP2P > 0.20) gaps.push('toneBudget');
+
+  const fmt = (p) => (p.span * 2) + 'm/' + p.map + 'px/b' + p.bias + '/n' + p.nb;
+  const detail = ['sun elev ' + elevMin.toFixed(1) + '..' + elevMax.toFixed(1) + 'deg',
+    'az ' + (azMin * 180 / Math.PI).toFixed(0) + '..' + (azMax * 180 / Math.PI).toFixed(0) + 'deg',
+    'floor ' + floorDeg + 'deg',
+    'near ' + near.map(fmt).join(' '),
+    'far ' + far.map(fmt).join(' '),
+    'AO lv [' + AO_LEVELS.join(',') + '] range [' + AO_RANGE.join(',') + ']',
+    'ratio ' + aoMinRatio.toFixed(3) + ' min ' + lumMin.toFixed(3) + ' max ' + lumMax.toFixed(3) + ' n ' + lumN + ' buckets [' + dark.join(',') + ']',
+    'contact gate ' + CONTACT_GATE + 'm rest ' + CONTACT_REST + 'm',
+    'grass cells ' + cellsN + ' pairs ' + deltas.length + ' spreadP50 ' + (spreadP50 * 100).toFixed(1) + '% spreadMean ' + (spreadMean * 100).toFixed(1) + '% p90 ' + (spreadP90 * 100).toFixed(1) + '% budget ' + (toneP2P * 100).toFixed(0) + '%',
+    'gaps=[' + gaps.join(' ') + ']'].join(' | ');
+  check('T62 the sun is a low raking key and every quality preset owns a 120 m near shadow box (1024 LOW / 2048 MED-HIGH) plus a 300 m coarser looser-bias fit, the baked AO stays inside 0.70..1.00 and lands on a real chunk, the car carries a contact shadow gated at 1.2 m of travel, and neighbouring grass cells differ in value by the pinned 6..10 % band',
+    gaps.length === 0, detail);
+}
+
+testSunShadowAoGround();
+
+// T63 the rebuilt exhaust burst. Headless, in the house style: the gearbox emits a
+// real 'shift', and the flame pool must fill with a layered gesture - a short hot
+// core, an outward ring, a soot puff behind it - whose particles GROW (the pool
+// billsows them out), FADE (their life sum only ever falls once emission ends) and
+// stay inside the unchanged 1920-particle budget. The hot core must live strictly
+// shorter than the smoke, a rev-matched downshift must push out a bigger two-pulse
+// burst than a plain upshift, and with the fx switch off a shift may spawn nothing
+// at all and nothing may be drawn.
+function testExhaustBurstGesture() {
+  const gaps = [];
+  const P = { LIFE: 6, TTL: 7, SIZE: 8, HEAT: 9 };
+  const car = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  const redline = car.params.engine.redline;
+
+  const sweep = (ev) => {
+    const fx = new FxSystem({ scale: 1, bus });
+    fx.setLocalTips(defaultExhaust(car.params));
+    for (let i = 0; i < 30; i++) fx.step(DT, car, 0.0);          // pools quiet
+    const rest = fx.flame.count + fx.soot.count;
+    bus.emit('shift', ev);
+    let flameMax = 0, sootMax = 0, coreTtlHi = 0, sootTtlLo = Infinity;
+    let size0 = 0, sizePeak = 0, heatMax = 0, liveMax = 0, overLive = 0, overCap = 0;
+    let pulse2 = 0, sumLife = -1, faded = 0, fadeBreaks = 0, grew = 0, emitted = 0;
+    for (let i = 0; i < 150; i++) {
+      fx.step(DT, car, 0.0);
+      if (fx.exhaust.pulse2) pulse2 = 1;
+      emitted = Math.max(emitted, fx.exhaust.coreN + fx.exhaust.ringN);
+      const fd = fx.flame.data;
+      let s0 = 0, n = 0;
+      for (let r = 0; r < fx.flame.count; r++) {
+        const o = r * STRIDE;
+        s0 += fd[o + P.LIFE]; n++;
+        sizePeak = Math.max(sizePeak, fd[o + P.SIZE]);
+        heatMax = Math.max(heatMax, fd[o + P.HEAT]);
+        if (fd[o + P.HEAT] >= BURST_TUNE.coreHeat) coreTtlHi = Math.max(coreTtlHi, fd[o + P.TTL]);
+      }
+      if (n) { if (!size0) size0 = sizePeak; grew = Math.max(grew, sizePeak - size0); }
+      flameMax = Math.max(flameMax, fx.flame.count);
+      sootMax = Math.max(sootMax, fx.soot.count);
+      const sd = fx.soot.data;
+      for (let r = 0; r < fx.soot.count; r++) sootTtlLo = Math.min(sootTtlLo, sd[r * STRIDE + P.TTL]);
+      // fade: past the emission window no new particle lands, so the pool's total
+      // life left may only ever fall
+      if (fx.exhaust.burst <= 0 && n) {
+        if (sumLife >= 0) { if (s0 < sumLife) faded++; else fadeBreaks++; }
+        sumLife = s0;
+      }
+      for (const Q of [fx.flame, fx.soot, fx.dust, fx.leaves, fx.motes]) if (Q.count > Q.capacity) overCap++;
+      const live = fx.live();
+      if (live > liveMax) liveMax = live;
+      if (live > fx.maxLive) overLive++;
+    }
+    return { fx, rest, emitted, flameMax, sootMax, coreTtlHi, sootTtlLo, size0, sizePeak, grew,
+      heatMax, pulse2, faded, fadeBreaks, overCap, overLive, liveMax, exLive: fx.flame.count + fx.soot.count };
+  };
+
+  // 1. a plain upshift: one continuous burst that grows, fades and empties
+  const up = sweep({ up: true, gear: 3, rpm: 0.75 * redline, throttle: 1.0, demand: 0.62 });
+  if (up.rest !== 0) gaps.push(`flame/soot already live at a standstill (${up.rest})`);
+  if (!(up.emitted > 40)) gaps.push(`an upshift laid only ${up.emitted} flame particles`);
+  if (!(up.flameMax > 8)) gaps.push(`the burst never fills the air at once (${up.flameMax})`);
+  if (!(up.sootMax > 0)) gaps.push('an upshift laid no soot behind the flame');
+  if (!(up.grew > 0.02)) gaps.push(`burst particles did not grow (${up.grew.toFixed(3)} m)`);
+  if (!(up.sizePeak > up.size0)) gaps.push('the plume never got bigger than its seed puffs');
+  if (!(up.faded >= 10 && up.fadeBreaks === 0)) gaps.push(`the burst does not fade monotonically (${up.faded}/${up.fadeBreaks})`);
+  if (!(up.exLive === 0)) gaps.push('the burst never emptied: the gesture outstays its particles');
+  if (!(up.coreTtlHi > 0 && up.coreTtlHi < up.sootTtlLo)) gaps.push(`hot core ${up.coreTtlHi.toFixed(3)} s is not shorter than the smoke ${up.sootTtlLo.toFixed(3)} s`);
+  if (!(up.heatMax >= BURST_TUNE.coreHeat)) gaps.push(`no near-white core (heat ${up.heatMax.toFixed(2)})`);
+  if (up.overCap) gaps.push(`${up.overCap} pool over capacity`);
+  if (up.overLive) gaps.push(`${up.overLive} frames over the live budget`);
+
+  // 2. a rev-matched downshift (lifted, high in the revs) voices a second pulse: the
+  // same shift taken low in the revs passes the same gate but lights one pulse only
+  const plain = sweep({ up: false, gear: 3, rpm: 0.20 * redline, throttle: 0.0, demand: 0.0 });
+  const dn = sweep({ up: false, gear: 3, rpm: 0.86 * redline, throttle: 0.0, demand: 0.0 });
+  if (plain.pulse2) gaps.push('a low downshift voices a second pulse it should not');
+  if (!dn.pulse2) gaps.push('a rev-matched downshift does not voice a second pulse');
+  if (!(dn.emitted > plain.emitted * 1.15)) gaps.push(`the rev-matched pop (${dn.emitted}) is not a stronger burst than the plain downshift (${plain.emitted})`);
+  if (dn.overLive || dn.overCap) gaps.push('the two-pulse burst left the budget');
+
+  // 3. the fx switch: with it off a shift spawns nothing and draws nothing
+  const fxOff = new FxSystem({ scale: 1, bus, enabled: false });
+  fxOff.setLocalTips(defaultExhaust(car.params));
+  bus.emit('shift', { up: false, gear: 2, rpm: 0.9 * redline, throttle: 0.0, demand: 0.0 });
+  for (let i = 0; i < 40; i++) fxOff.step(DT, car, 0.0);
+  if (fxOff.flame.count || fxOff.soot.count) gaps.push(`fx off but ${fxOff.flame.count}/${fxOff.soot.count} particles were spawned`);
+  if (fxOff.exhaust.burst > 0) gaps.push('fx off but the burst window still opened');
+  const viewSrc = readFileSync(new URL('../render/fx-view.js', import.meta.url), 'utf8');
+  if (!/const on = fx\.enabled && s\.pool\.count > 0;/.test(viewSrc)) gaps.push('a pool is drawn regardless of the fx switch');
+
+  // 4. the drawing contract: soft round sprites, one draw call per pool, the hot
+  // core additive, the smoke normal-blended with depth write off but depth test on
+  if (!/makeSystem\(fx\.flame, 0, [^)]*, true\)/.test(viewSrc)) gaps.push('the hot core is not additive');
+  if (!/makeSystem\(fx\.soot, 4, [^)]*, false\)/.test(viewSrc)) gaps.push('the smoke is not normal-blended');
+  if (!/depthTest: true,\s*\n\s*depthWrite: false,/.test(viewSrc)) gaps.push('the plume is not occluded by the body');
+  if (!/exp\(-r \* r \* 3\.4\)/.test(viewSrc)) gaps.push('the sprites lost their soft round falloff');
+  if (!/uMode == 0\) \? 1\.0 \+ vAge/.test(viewSrc)) gaps.push('the flame puffs do not grow on screen');
+  if (!/float fl = 0\.86 \+ 0\.14 \* sin\(/.test(viewSrc)) gaps.push('no per-particle heat flicker');
+  if (Object.values(FX_CAPACITY).reduce((a, b) => a + b, 0) !== 1920) gaps.push('the particle budget grew');
+  if (up.liveMax > 0.75 * Object.values(FX_CAPACITY).reduce((a, b) => a + b, 0)) gaps.push('live particles beat the budget');
+
+  check('T63 a gear change lays ONE continuous exhaust gesture (a near-white core of 0.045..0.085 s, an outward flame ring of 0.16..0.30 s, a soot puff of 0.40..0.70 s behind it, two pulses on a rev-matched downshift) whose particles grow, fade monotonically and stay inside the unchanged 1920 particle budget, with the core living strictly shorter than the smoke and nothing spawned or drawn while the fx switch is off',
+    gaps.length === 0,
+    `upshift flame=${up.emitted} (peak ${up.flameMax} at once) soot=${up.sootMax} size ${up.size0.toFixed(3)}->${up.sizePeak.toFixed(3)}m coreTtl=${up.coreTtlHi.toFixed(3)}<sootTtl=${up.sootTtlLo.toFixed(3)} heat=${up.heatMax.toFixed(2)} live=${up.liveMax}/${up.fx.maxLive} | downshift plain=${plain.emitted} revMatch=${dn.emitted} pulse2=${dn.pulse2} | off=${fxOff.flame.count}/${fxOff.soot.count} | caps ${Object.keys(FX_CAPACITY).map((k) => fxOff[k].capacity).join('/')} | gaps=[${gaps.join(' ')}]`);
+}
+
+testExhaustBurstGesture();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

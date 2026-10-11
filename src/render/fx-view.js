@@ -12,6 +12,7 @@ attribute float aSize;
 attribute float aHeat;
 uniform float uScale;
 uniform float uFog;
+uniform float uPx;
 uniform int uMode;
 varying float vAge;
 varying float vHeat;
@@ -23,9 +24,12 @@ void main() {
   float dist = max(0.5, -mv.z);
   vFog = 1.0 - exp(-dist * uFog);
   gl_Position = projectionMatrix * mv;
-  // Soot (mode 4) expands as it cools; everything else keeps its seed size.
-  float grow = (uMode == 4) ? 1.0 + vAge * 1.7 : 1.0;
-  gl_PointSize = max(1.0, aSize * grow * uScale * 260.0 / dist);
+  // Soot (mode 4) and the flame plume (mode 0) expand as they cool; the leaf, the
+  // mote and the dust keep their seed size. aSize is a WORLD radius in metres, so
+  // the point size below is a real projection (screen px = radius * uPx / dist),
+  // not a fudge - which is what made the plume read as small dots before.
+  float grow = (uMode == 4) ? 1.0 + vAge * 1.7 : (uMode == 0) ? 1.0 + vAge * 0.8 : 1.0;
+  gl_PointSize = clamp(aSize * grow * uScale * uPx / dist, 1.0, 320.0);
 }`;
 
 // MODE 0 flame, 1 dust, 2 leaf, 3 mote, 4 shift soot. Same program family, one
@@ -44,12 +48,20 @@ void main() {
   float r = length(p) * 2.0;
   vec3 c = uTint;
   float a = 0.0;
-  if (uMode == 0) {                    // backfire plume: white core -> amber -> ember
-    float t = clamp(vHeat, 0.0, 1.6);
-    vec3 hot = mix(vec3(1.0, 0.93, 0.70), vec3(1.0, 0.55, 0.16), vAge);
-    vec3 mid = mix(vec3(1.0, 0.62, 0.22), vec3(0.55, 0.12, 0.04), vAge);
-    c = mix(hot, mid, clamp(vAge * 1.4, 0.0, 1.0)) * (0.55 + 0.45 * t);
-    a = (1.0 - smoothstep(0.15, 1.0, r)) * (1.0 - vAge) * (0.55 + 0.45 * t);
+  if (uMode == 0) {                    // backfire plume: near-white core -> amber -> deep grey
+    float t = clamp(vHeat, 0.0, 1.6) / 1.6;
+    // Slight heat flicker per particle (vHeat carries the phase), so no two puffs
+    // of the same burst sit at the same brightness.
+    float fl = 0.86 + 0.14 * sin(vAge * 24.0 + vHeat * 37.0);
+    vec3 hot = mix(vec3(1.00, 0.97, 0.90), vec3(1.00, 0.62, 0.22), vAge);
+    vec3 mid = mix(vec3(1.00, 0.52, 0.16), vec3(0.42, 0.30, 0.24), vAge * vAge);
+    c = mix(mix(hot, mid, clamp(vAge * 1.6, 0.0, 1.0)), vec3(0.16, 0.15, 0.15),
+      smoothstep(0.55, 1.0, vAge)) * (0.65 + 0.45 * t) * fl;
+    // A real soft falloff: dense centre plus a wide gaussian skirt, so a particle
+    // reads as a puff of light with no edge, never as a hard dot.
+    float core = exp(-r * r * 3.4);
+    float skirt = 0.55 * exp(-r * r * 1.1);
+    a = (core + skirt) * (1.0 - vAge * vAge) * (0.55 + 0.45 * t);
   } else if (uMode == 1) {             // wheel dust: big soft grey-brown puff
     c = uTint * (0.85 + 0.35 * vHeat);
     // Soft edge, eases in, fades out on a curve - it never pops out of existence.
@@ -59,8 +71,10 @@ void main() {
     c = mix(vec3(0.035, 0.035, 0.04), vec3(0.24, 0.235, 0.225), clamp(vAge * 0.85, 0.0, 1.0));
     // Warm inner core, only for a rev-matched downshift (vHeat is its 0..1 flag).
     c += vec3(0.75, 0.30, 0.08) * clamp(vHeat, 0.0, 1.0) * (1.0 - r) * (1.0 - vAge);
-    a = (1.0 - smoothstep(0.10, 1.0, r)) * smoothstep(0.0, 0.10, vAge)
-      * (1.0 - vAge * vAge) * (0.78 - 0.30 * vAge);
+    // Same soft gaussian body as the flame: overlapping puffs fuse into one
+    // billowing cloud instead of a swarm of dark dots.
+    a = (exp(-r * r * 2.6) + 0.45 * exp(-r * r * 0.9))
+      * smoothstep(0.0, 0.10, vAge) * (1.0 - vAge * vAge) * (0.78 - 0.30 * vAge);
   } else if (uMode == 2) {             // leaf / needle: small tumbling quad-ish flake
     float e = max(abs(p.x), abs(p.y)) * 2.0;
     float wob = 0.55 + 0.45 * abs(sin(vAge * 9.0 + vHeat * 20.0));
@@ -92,9 +106,16 @@ function makeSystem(pool, mode, tint, opacity, additive) {
       uOpacity: { value: opacity },
       uScale: { value: 1 },
       uFog: { value: 0.006 },
+      // projection constant for gl_PointSize: (drawingBufferHeight / 2) /
+      // tan(fov / 2), refreshed every frame in syncFxView. uScale stays the
+      // caller's pixel-ratio dial.
+      uPx: { value: 900.0 },
       uTint: { value: new THREE.Color(tint) },
     },
     transparent: true,
+    // depth test ON so the body occludes the plume (it comes out of the tips),
+    // depth write OFF so the puffs of one pool never cut holes in each other.
+    depthTest: true,
     depthWrite: false,
     blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
@@ -115,6 +136,14 @@ export function buildFxView(fx) {
   const soot = makeSystem(fx.soot, 4, 0x141414, 0.9, false);   // normal blend: it darkens
   group.add(flame.pts, dust.pts, leaves.pts, motes.pts, soot.pts);
   return { group, flame, dust, leaves, motes, soot, live: -1 };
+}
+
+/** Keep gl_PointSize a true projection: px per world metre at 1 m. */
+export function setFxPointScale(view, heightPx, fovRad) {
+  const px = (heightPx * 0.5) / Math.max(0.05, Math.tan(fovRad * 0.5));
+  for (const s of [view.flame, view.dust, view.leaves, view.motes, view.soot]) {
+    s.mat.uniforms.uPx.value = px;
+  }
 }
 
 /** Per-frame: hand the (in-place updated) pool buffer to the GPU. No allocation. */

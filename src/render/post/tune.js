@@ -6,19 +6,25 @@ export const BLOOM_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
  *  a plain finite number inside the ranges tests.js pins (T33) — nothing else in the
  *  renderer carries a bloom/grade constant, so the look is dialled from one place. */
 export const POST_TUNE = {
-  exposure: 1.46,              // AgX sits darker/softer than ACES at the same key light
+  // 1.46 -> 1.66: the sun dropped from a 52 deg noon to a 24-28 deg raking key and a
+  // 60 m / 2048 shadow box landed on the ground, so most of the frame is now in shadow.
+  // The key and the ambient stay where they are; the exposure carries the loss so the
+  // frame keeps its brightness (PLAN §10.2, high-key palette) with the shadows intact.
+  exposure: 1.58,
   bloom: {
     LOW: { threshold: 1.05, knee: 0.45, intensity: 0.30, radius: 1.00, taps: 3, sigma: 1.10, mips: 1 },
     MEDIUM: { threshold: 0.95, knee: 0.55, intensity: 0.58, radius: 1.35, taps: 5, sigma: 1.30, mips: 2 },
     HIGH: { threshold: 0.88, knee: 0.60, intensity: 0.74, radius: 1.70, taps: 7, sigma: 1.55, mips: 2 },
   },
   grade: {
-    contrast: 0.30,            // gentle S curve about the mid grey (band width 1.15)
-    shadowLift: 0.086,         // the shadow side never crushes to black
-    warmHi: [1.075, 1.005, 0.885], coolSh: [0.855, 0.940, 1.110],
-    warmAmt: 0.60, coolAmt: 0.40,
-    satGreen: 0.24, satBrown: 0.12,
-    vignette: 0.22, grain: 0.014, grainSpeed: 20.0,
+    // Contrast up (0.30 -> 0.38) because the shadow map is what sells the depth: a flat
+    // S curve was flattening the new cast shadows back into the ambient.
+    contrast: 0.38,
+    shadowLift: 0.070,         // 0.086 -> 0.070: the crevices keep detail but must read dark
+    warmHi: [1.085, 1.005, 0.870], coolSh: [0.840, 0.935, 1.150],
+    warmAmt: 0.66, coolAmt: 0.52,
+    satGreen: 0.24, satBrown: 0.16,
+    vignette: 0.30, grain: 0.014, grainSpeed: 20.0,
   },
 };
 

@@ -84,6 +84,36 @@ export const SOOT_TUNE = {
 };
 
 
+/** The exhaust gesture (docs/06 §2): one gear change reads as ONE continuous
+ *  plume — a hot near-white core at the tip, a ring of flame that expands outward
+ *  from the tip and thins out, then a puff of dark soot that billows and drifts
+ *  with the car. The emission window is short (0.26..0.36 s); the gesture outlives
+ *  it through the layer lifetimes, so the whole event reads over 0.5..0.8 s.
+ *  A rev-matched downshift (a lifted shift taken high in the revs) adds a second
+ *  visible pulse. Sizes are world radii in metres, grown in age() so the plume is
+ *  about half the car width at its peak and keeps growing as it ages. */
+export const BURST_TUNE = {
+  winMin: 0.26, winSpan: 0.10,   // s of emission: 0.26..0.36 (was 0.15..0.35)
+  coreWin: 0.055, coreMax: 26,   // the hot core only lives in the first 55 ms of it
+  coreTtlLo: 0.045, coreTtlSpan: 0.040,   // 0.045..0.085 s, strictly < the soot
+  coreSizeLo: 0.045, coreSizeSpan: 0.030, // m, near-white jet at the tip
+  coreJet: 5.6, coreJetSpan: 4.6,         // m/s straight out of the tip
+  coreHeat: 1.25, coreHeatSpan: 0.35,
+  ringTtlLo: 0.16, ringTtlSpan: 0.14,     // 0.16..0.30 s flame ring, < the soot
+  ringSizeLo: 0.070, ringSizeSpan: 0.070, // m seed radius, ~0.9 m plume at its peak
+  ringPush: 1.7, ringPushSpan: 2.3,       // m/s rearwards out of the tip
+  ringOut: 2.2, ringOutSpan: 2.6,         // m/s outward, the ring opening up
+  ringHeat: 0.70, ringHeatSpan: 0.55,
+  rateLo: 360, rateSpan: 520,             // particles/s at the peak of each pulse
+  tail: 0.20,                            // sputter floor between the pulses
+  pulse1W: 0.075,                        // 1/s width of the first pulse
+  pulse2At: 0.17, pulse2W: 0.060, pulse2Gain: 0.75,  // rev-matched downshift pop
+  grow: 2.6,                             // 1/s of size growth (the puff billows)
+  curl: 0.9,                             // m/s^2 of upward curl on the flame
+  sootCurl: 0.35,                        // m/s^2 on the soot: it rises as it cools
+};
+
+
 export class ParticlePool {
   constructor(capacity) {
     this.capacity = Math.max(1, capacity | 0);
@@ -129,11 +159,15 @@ export class ExhaustFx {
     this.strength = 0;         // 0..1 burst intensity (length + brightness)
     this.glow = 0;             // 0..1 continuous high-load glow
     this.acc = 0;
+    this.burstT = 0;           // s since the burst started (drives the pulses)
+    this.pulse2 = 0;           // 1 while a rev-matched downshift voices a 2nd pop
+    this.coreN = 0; this.ringN = 0;   // particles laid by the last burst
     this.sootBurst = 0;        // s of soot puff left
     this.sootAcc = 0;
     this.sootRev = 0;          // 1 while a rev-matched downshift lights the core
     this.pending = 0;          // shifts seen since the last step
     this.pUp = 0;
+    this.pRev = 0;             // a lifted downshift taken high in the revs
     this.pRpm = 0;
     this.pDemand = 0;
     this._m = new Float32Array(9);
@@ -153,6 +187,9 @@ export class ExhaustFx {
     if (!shiftPop(e, this._engine)) return;
     this.pending++;
     if (e.up) this.pUp++;
+    // Rev-matched downshift: let on high in the revs, so the afterburn lights twice.
+    const redline = (this._engine || SHIFT_ENGINE).redline;
+    if (!e.up && (e.rpm || 0) >= 0.55 * redline) this.pRev = 1;
     this.pRpm = e.rpm || 0;
     this.pDemand = e.demand || 0;
   }
@@ -171,25 +208,41 @@ export class ExhaustFx {
 
     if (this.pending > 0) {
       const load = clamp(0.55 * rpmN + 0.45 * this.pDemand, 0, 1);
-      const dur = 0.15 + 0.20 * load;                 // 150..350 ms plume
+      const dur = BURST_TUNE.winMin + BURST_TUNE.winSpan * load;
       this.burst = Math.max(this.burst, dur);
+      this.burstT = 0;
       this.strength = clamp(0.30 + 0.70 * load, 0, 1);
-      this.rate = (150 + 260 * load) * (this.pUp ? 1 : 0.8);
-      this.pending = 0; this.pUp = 0;
+      this.rate = (BURST_TUNE.rateLo + BURST_TUNE.rateSpan * load) * (this.pUp ? 1 : 0.9);
+      this.pulse2 = this.pRev ? 1 : 0;                // two visible pulses
+      this.coreN = 0; this.ringN = 0;
+      this.pending = 0; this.pUp = 0; this.pRev = 0;
     }
 
     // Body frame: rear = -local X, up = local Y. Reused scratch, no allocation.
     quatToMat3(car.body.quat, this._m);
     const rx = -this._m[0], ry = -this._m[3], rz = -this._m[6];
     const ux = this._m[1], uy = this._m[4], uz = this._m[7];
+    // Third body axis (car-local +Z) so the ring can open outward around the jet.
+    const sx = this._m[2], sy = this._m[5], sz = this._m[8];
 
-    let emit = 0;
+    let emit = 0, core = false;
     if (this.burst > 0) {
       this.burst -= dt;
-      this.acc += this.rate * dt * (0.55 + 0.45 * this.strength);
+      this.burstT += dt;
+      const t = this.burstT;
+      // Two gaussian pulses (the second only on a rev-matched downshift) over a
+      // sputter tail: one gesture, not a bag of independent dots.
+      const e1 = Math.exp(-(t * t) / (BURST_TUNE.pulse1W * BURST_TUNE.pulse1W));
+      const e2 = this.pulse2
+        ? BURST_TUNE.pulse2Gain * Math.exp(-((t - BURST_TUNE.pulse2At) ** 2)
+          / (BURST_TUNE.pulse2W * BURST_TUNE.pulse2W))
+        : 0;
+      const win = BURST_TUNE.winMin + BURST_TUNE.winSpan * this.strength;
+      this.acc += this.rate * dt * (e1 + e2 + BURST_TUNE.tail * (1 - Math.min(1, t / win)));
       emit = Math.floor(this.acc);
       this.acc -= emit;
-      if (this.burst <= 0) { this.burst = 0; this.strength = 0; this.rate = 0; }
+      core = t <= BURST_TUNE.coreWin && this.coreN < BURST_TUNE.coreMax;
+      if (this.burst <= 0) { this.burst = 0; this.strength = 0; this.rate = 0; this.pulse2 = 0; }
     } else if (this.glow > 0.05) {                    // the faint continuous glow
       this.acc += 14 * this.glow * dt;
       emit = Math.floor(this.acc);
@@ -231,19 +284,44 @@ export class ExhaustFx {
       if (o < 0) break;
       const strong = this.burst > 0 ? this.strength : this.glow * 0.35;
       const tip = (i & 1) * 3;
-      const sp = 1.4 + 3.6 * strong;                       // an exhaust pop, not a torch
+      const hot = core && this.burst > 0;
       const jx = (rnd() - 0.5), jy = (rnd() - 0.5), jz = (rnd() - 0.5);
-      d[o + F.X] = tips[tip] + jx * 0.05;
-      d[o + F.Y] = tips[tip + 1] + jy * 0.04;
-      d[o + F.Z] = tips[tip + 2] + jz * 0.05;
-      d[o + F.VX] = rx * sp + jx * 1.6 + ux * 0.4;
-      d[o + F.VY] = ry * sp + 0.5 + strong * 0.7 + uy * 0.6;
-      d[o + F.VZ] = rz * sp + jz * 1.6 + uz * 0.4;
-      const ttl = 0.05 + 0.10 * strong + 0.06 * rnd();     // was 0.06..0.32: shorter
-      d[o + F.LIFE] = ttl;
-      d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = 0.04 + 0.09 * strong * (0.7 + 0.6 * rnd());   // was 0.05..0.21
-      d[o + F.HEAT] = clamp(0.75 + 0.75 * strong + 0.35 * rpmN, 0, 1.6);  // warmer core
+      if (hot) {
+        // Hot core: a tight near-white jet down the middle of the plume, gone
+        // inside 85 ms so it never fights the smoke for the silhouette.
+        const sp = BURST_TUNE.coreJet + BURST_TUNE.coreJetSpan * strong;
+        d[o + F.X] = tips[tip] + jx * 0.02;
+        d[o + F.Y] = tips[tip + 1] + jy * 0.02;
+        d[o + F.Z] = tips[tip + 2] + jz * 0.02;
+        d[o + F.VX] = rx * sp + jx * 0.5;
+        d[o + F.VY] = ry * sp + jy * 0.5 + uy * 0.2;
+        d[o + F.VZ] = rz * sp + jz * 0.5;
+        const ttl = BURST_TUNE.coreTtlLo + BURST_TUNE.coreTtlSpan * rnd();
+        d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
+        d[o + F.SIZE] = BURST_TUNE.coreSizeLo + BURST_TUNE.coreSizeSpan * rnd();
+        d[o + F.HEAT] = clamp(BURST_TUNE.coreHeat + BURST_TUNE.coreHeatSpan * rnd() + 0.2 * rpmN, 0, 1.6);
+        this.coreN++;
+      } else {
+        // Flame ring: laid around the jet axis at the tip and thrown outward, so it
+        // reads as one ring opening up and thinning out with an upward curl.
+        const a = i * 2.399976 + rnd() * 0.5;               // golden step, no clumps
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const rr = 0.03 + 0.025 * rnd();
+        const ox = sx * ca + ux * sa, oy = sy * ca + uy * sa, oz = sz * ca + uz * sa;
+        const push = BURST_TUNE.ringPush + BURST_TUNE.ringPushSpan * strong;
+        const out = BURST_TUNE.ringOut + BURST_TUNE.ringOutSpan * strong;
+        d[o + F.X] = tips[tip] + ox * rr + jx * 0.03;
+        d[o + F.Y] = tips[tip + 1] + oy * rr + jy * 0.02;
+        d[o + F.Z] = tips[tip + 2] + oz * rr + jz * 0.03;
+        d[o + F.VX] = rx * push + ox * out + jx * 0.7;
+        d[o + F.VY] = ry * push + oy * out + jy * 0.5;
+        d[o + F.VZ] = rz * push + oz * out + jz * 0.7;
+        const ttl = BURST_TUNE.ringTtlLo + BURST_TUNE.ringTtlSpan * rnd();
+        d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
+        d[o + F.SIZE] = BURST_TUNE.ringSizeLo + BURST_TUNE.ringSizeSpan * rnd();
+        d[o + F.HEAT] = clamp(BURST_TUNE.ringHeat + BURST_TUNE.ringHeatSpan * strong + 0.3 * rpmN, 0, 1.15);
+        this.ringN++;
+      }
     }
   }
 
@@ -426,8 +504,8 @@ export class FxSystem {
     this.ambient.step(dt, car, this.env);
 
     // Age + compact every pool: one in-place pass each, no allocation.
-    age(this.flame, dt, 0.5);
-    age(this.soot, dt, 1.1);
+    age(this.flame, dt, 0.9, BURST_TUNE.curl, BURST_TUNE.grow);
+    age(this.soot, dt, 1.1, BURST_TUNE.sootCurl);
     age(this.dust, dt, DUST_TUNE.drag);
     age(this.leaves, dt, 0.0);
     age(this.motes, dt, 0.0);
@@ -441,7 +519,9 @@ export class FxSystem {
   }
 }
 
-function age(P, dt, drag) {
+// `drag` bleeds velocity, `lift` m/s^2 curls the plume up, `grow` 1/s billsows it
+// out (the flame grows in the pool, so the headless test can watch it).
+function age(P, dt, drag, lift = 0, grow = 0) {
   const d = P.data, keep = P.keep;
   let dead = false;
   for (let i = 0; i < P.count; i++) {
@@ -453,7 +533,8 @@ function age(P, dt, drag) {
     d[o + F.X] += d[o + F.VX] * dt;
     d[o + F.Y] += d[o + F.VY] * dt;
     d[o + F.Z] += d[o + F.VZ] * dt;
-    d[o + F.VX] *= k; d[o + F.VY] *= k; d[o + F.VZ] *= k;
+    d[o + F.VX] *= k; d[o + F.VY] = d[o + F.VY] * k + lift * dt; d[o + F.VZ] *= k;
+    if (grow) d[o + F.SIZE] *= 1 + grow * dt;
     keep[i] = 1;
   }
   if (dead) P.compact();

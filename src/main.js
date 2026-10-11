@@ -283,6 +283,8 @@ async function main() {
   if (cfg.cam) settings.cameraMode = cfg.cam;
 
   const stream = new Streaming(stage.world, stage.terrain, stage.road, stage.carveIndex, renderer, stage);
+  // The contact shadow needs the road surface under the car (renderer.js, JOB 3).
+  renderer.setGroundSampler((x, z) => stage.world.groundHeight(x, z));
 
   // ---- stage pre-generation: the loading screen is a real load, not a splash ----
   // Heightfield + surface ids for every chunk the draw distance can ask for, the road
@@ -727,7 +729,7 @@ async function main() {
       if (renderer.post && renderer.post.setFocus) {
         renderer.post.setFocus(renderer.camera.position.distanceTo(car.body.pos));
       }
-      renderer.fitShadow(car.body.pos);
+      renderer.fitShadow(car.body.pos, car.body);
       renderer.render();
       dirt.lens.setAmount(settings.lensDirt);
       lensView.update(dirt.lens);
@@ -769,7 +771,7 @@ async function main() {
     dirt.frame(car);
     syncCarMesh(view, car, 0, dirt);
     sheetCamera();
-    renderer.fitShadow(car.body.pos);
+    renderer.fitShadow(car.body.pos, car.body);
     renderer.render();
     loop.time.paused = true;
   }

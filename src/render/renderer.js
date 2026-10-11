@@ -9,13 +9,32 @@ import { PostComposer, POST_TUNE, TONE_MODE } from './post/composer.js';
 import { surfaceTones } from '../world/palette.js';
 import { ROAD_TONE, RUT_GLOSS } from './road-skin.js';
 
+// Contact shadow (JOB 3): the soft blob welded to the road under the chassis.
+export const CONTACT_GATE = 1.2;   // metres of travel above which there is no contact
+export const CONTACT_REST = 0.34;  // static ride height, chassis centre above the road
+export const CONTACT_LEN = 4.55;   // blob footprint, metres (chassis + a soft skirt)
+export const CONTACT_WID = 2.55;
+
 const SHADOW_PRESET = [
   // LOW / MED / HIGH. `span` is the half-extent of the orthographic shadow frustum
-  // centred on the car: smaller span -> bigger texels of detail -> the contact
+  // around the car, so 60 = a 120 m box in the near view: the car, the ribbon, the
+  // verge posts and the tree line next to the road all stay inside one map instead of
   // shadow and the corner posts read instead of dissolving (PLAN §10 criterion 4).
-  { span: 58, map: 1024, dist: 150, bias: -0.0009, normalBias: 0.055, type: THREE.PCFShadowMap },
-  { span: 36, map: 2048, dist: 150, bias: -0.00045, normalBias: 0.028, type: THREE.PCFSoftShadowMap },
-  { span: 38, map: 2048, dist: 140, bias: -0.00035, normalBias: 0.030, type: THREE.PCFSoftShadowMap },
+  // 1024 at LOW, 2048 at MED/HIGH. Bias/normalOffset are tuned per fit: the near box
+  // puts ~6 cm/texel on the ground (60*2/2048), so a -0.0004 depth bias plus a 0.026 m
+  // normal offset clears the acne without lifting the car off its own shadow.
+  { span: 60, map: 1024, dist: 150, bias: -0.00090, normalBias: 0.052, type: THREE.PCFShadowMap },
+  { span: 60, map: 2048, dist: 150, bias: -0.00040, normalBias: 0.026, type: THREE.PCFSoftShadowMap },
+  { span: 60, map: 2048, dist: 150, bias: -0.00032, normalBias: 0.024, type: THREE.PCFSoftShadowMap },
+];
+// Second fit of the same sun, out to 300 m: a 300 m box on a 1024 map is ~29 cm/texel,
+// so the far band gets its own (looser) bias instead of reusing the near one, which is
+// what made the distant treeline self-shadow into acne. Cheap (one extra 1024 depth
+// pass) and it is the only thing that puts the hill band under the same key light.
+const SHADOW_FAR = [
+  { span: 150, map: 1024, dist: 300, bias: -0.00210, normalBias: 0.110 },
+  { span: 150, map: 1024, dist: 300, bias: -0.00170, normalBias: 0.090 },
+  { span: 150, map: 1024, dist: 300, bias: -0.00150, normalBias: 0.082 },
 ];
 
 export class Renderer {
@@ -53,10 +72,34 @@ export class Renderer {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
+    // Second fit of the same key light, coarse and far (see SHADOW_FAR).
+    this.sunFar = new THREE.DirectionalLight(0xffe3bd, 0.7);
+    this.sunFar.castShadow = true;
+    this.sunFar.shadow.mapSize.set(1024, 1024);
+    this.sunFar.shadow.camera.near = 1;
+    this.sunFar.shadow.camera.far = 620;
+    this.sunFar.shadow.camera.left = -150; this.sunFar.shadow.camera.right = 150;
+    this.sunFar.shadow.camera.top = 150; this.sunFar.shadow.camera.bottom = -150;
+    this.sunFar.shadow.bias = -0.0017;
+    this.sunFar.shadow.normalBias = 0.090;
+    this._shadowSpanFar = 150;
+    this.scene.add(this.sunFar);
+    this.scene.add(this.sunFar.target);
+
     // Cool fill from the opposite side of the key so shadow sides never go black
     // (PLAN §10 "chłodny fill"). No shadows: it costs no shadow map.
     this.fill = new THREE.DirectionalLight(0x9fc0e0, 0.55);
     this.scene.add(this.fill);
+
+    // ---- contact shadow (JOB 3): one soft quad welded to the road under the chassis ----
+    // Neither shadow fit anchors the car: the near box gives a hard raking cast, the far
+    // one is 29 cm/texel. This is the dark patch that makes the car sit on the ground -
+    // one draw call, unlit, multiply-blended, gated off past 1.2 m of travel.
+    this._car = null;
+    this._groundAt = null;
+    this._csE = new THREE.Euler(0, 0, 0, 'YXZ');
+    this._csQ = new THREE.Quaternion();
+    this.contact = this._buildContactShadow();
 
     this.skyColor = new THREE.Color(0x8fb4cc);
     this.fogColor = new THREE.Color(0x9db4c4);
@@ -403,6 +446,10 @@ float fbm1(vec2 p) { return vnoise(p); }
     // for a readable contact shadow is the key/fill ratio, not the shadow map.
     this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.42);
     this.sun.intensity = rig.keyIntensity * 1.40 * (1 - 0.52 * oc);
+    // The far fit carries only a slice of the key: inside the near box both fits land on
+    // the same pixel, and a second full-strength key would brighten the frame by 30 %.
+    this.sunFar.color.copy(this.sun.color);
+    this.sunFar.intensity = this.sun.intensity * 0.30;
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
     // Hemisphere fill up again (1.42 -> 1.58): the forest floor and the shaded flank of
@@ -477,18 +524,29 @@ float fbm1(vec2 p) { return vnoise(p); }
     const scale = q === QUALITY.LOW ? 0.75 : 1.0;
     this.renderer.setPixelRatio(Math.min((window.devicePixelRatio || 1) * scale, 2));
     const p = SHADOW_PRESET[q];
-    this.renderer.shadowMap.enabled = settings.shadows && q !== QUALITY.LOW;
-    this.sun.castShadow = settings.shadows && q !== QUALITY.LOW;
+    const pf = SHADOW_FAR[q];
+    this.renderer.shadowMap.enabled = settings.shadows;
+    this.sun.castShadow = settings.shadows;
+    this.sunFar.castShadow = settings.shadows;
     this.renderer.shadowMap.type = p.type;
     this.sun.shadow.mapSize.set(p.map, p.map);
     this.sun.shadow.bias = p.bias;
     this.sun.shadow.normalBias = p.normalBias;
     this._shadowSpan = p.span;
-    const s = p.span;
+    let s = p.span;
     this.sun.shadow.camera.left = -s; this.sun.shadow.camera.right = s;
     this.sun.shadow.camera.top = s; this.sun.shadow.camera.bottom = -s;
     this.sun.shadow.camera.far = p.dist + 190;
     this.sun.shadow.camera.updateProjectionMatrix();
+    this.sunFar.shadow.mapSize.set(pf.map, pf.map);
+    this.sunFar.shadow.bias = pf.bias;
+    this.sunFar.shadow.normalBias = pf.normalBias;
+    this._shadowSpanFar = pf.span;
+    s = pf.span;
+    this.sunFar.shadow.camera.left = -s; this.sunFar.shadow.camera.right = s;
+    this.sunFar.shadow.camera.top = s; this.sunFar.shadow.camera.bottom = -s;
+    this.sunFar.shadow.camera.far = pf.dist + 320;
+    this.sunFar.shadow.camera.updateProjectionMatrix();
     // The camera far plane has to clear the whole streamed disc or the far hill band is
     // clipped away and the horizon is a hard cut again.
     this.camera.far = Math.max(q === QUALITY.LOW ? 420 : 900, settings.drawDistance * 1.1);
@@ -520,7 +578,8 @@ float fbm1(vec2 p) { return vnoise(p); }
    * grid. Without the snap every camera step re-samples the scene at a sub-texel
    * offset and the shadow edges crawl ("acne/migotanie", PLAN §10 criterion 4).
    */
-  fitShadow(target) {
+  fitShadow(target, car) {
+    if (car) this._car = car;
     const dir = this.rig.sunDir;
     const span = this._shadowSpan;
     const texel = (2 * span) / this.sun.shadow.mapSize.x;
@@ -543,6 +602,20 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.sun.position.copy(this._snap).addScaledVector(dir, dist);
     this.sun.target.updateMatrixWorld();
 
+    // The far fit uses the same snapped centre but its own texel grid (a 300 m box on a
+    // 1024 map), so the distant band stops crawling at the same time it stops dissolving.
+    const texelF = (2 * this._shadowSpanFar) / this.sunFar.shadow.mapSize.x;
+    const xrF = Math.round(this._center.dot(this._right) / texelF) * texelF;
+    const yrF = Math.round(this._center.dot(this._up) / texelF) * texelF;
+    this._snap.copy(this._center)
+      .addScaledVector(this._right, xrF - this._center.dot(this._right))
+      .addScaledVector(this._up, yrF - this._center.dot(this._up));
+    this.sunFar.target.position.copy(this._snap);
+    this.sunFar.position.copy(this._snap).addScaledVector(dir, this.sunFar.shadow.camera.far * 0.42);
+    this.sunFar.target.updateMatrixWorld();
+
+    this._fitContact(target);
+
     // The key light swings with the day; the fill always looks back from the other
     // side so the shadow side keeps a cool read.
     this.fill.position.copy(this.sun.position).multiplyScalar(-0.6);
@@ -551,6 +624,64 @@ float fbm1(vec2 p) { return vnoise(p); }
   }
 
   /** Render-cost probe used by shot mode / the budget harness (docs/07 §Budżety). */
+  /** Ground sampler (world.groundHeight) so the contact shadow can sit on the road and
+   *  know how far the chassis is off it. Wired once from main.js. */
+  setGroundSampler(fn) { this._groundAt = typeof fn === 'function' ? fn : null; }
+
+  _buildContactShadow() {
+    const S = 64;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const g = cv.getContext('2d');
+    const rad = g.createRadialGradient(S / 2, S / 2, 1, S / 2, S / 2, S / 2);
+    rad.addColorStop(0, 'rgba(0,0,0,0.95)');
+    rad.addColorStop(0.42, 'rgba(0,0,0,0.66)');
+    rad.addColorStop(0.78, 'rgba(0,0,0,0.22)');
+    rad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = rad; g.fillRect(0, 0, S, S);
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);                 // lie flat: the mesh quaternion is the pose
+    const mat = new THREE.MeshBasicMaterial({
+      map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false,
+      blending: THREE.MultiplyBlending, toneMapped: false, opacity: 0.92,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.renderOrder = 2;
+    m.frustumCulled = false;
+    m.castShadow = false;
+    m.receiveShadow = false;
+    this.scene.add(m);
+    return m;
+  }
+
+  /** Track the chassis: position, yaw, pitch and roll, squashing and fading with the
+   *  suspension travel, and gone entirely past CONTACT_GATE metres of air. */
+  _fitContact(target) {
+    const m = this.contact;
+    if (!m) return;
+    const b = this._car && this._car.body ? this._car.body : this._car;
+    if (!b || !target) { m.visible = false; return; }
+    const gy = this._groundAt ? this._groundAt(target.x, target.z) : null;
+    const rest = CONTACT_REST;
+    const hgt = (typeof gy === 'number' && Number.isFinite(gy)) ? target.y - gy : rest;
+    const air = hgt - rest;
+    if (air > CONTACT_GATE) { m.visible = false; return; }   // airborne: no contact
+    m.visible = true;
+    const k = 1 - Math.max(0, air) / CONTACT_GATE;           // 1 on the ground -> 0 at the gate
+    const gyDraw = (typeof gy === 'number' && Number.isFinite(gy)) ? gy : target.y - rest;
+    m.position.set(target.x, gyDraw + 0.02, target.z);
+    const f = b.forward;
+    const yaw = (f && (f.x || f.z)) ? Math.atan2(f.z, f.x) : (b.yaw || 0);
+    const pitch = Number.isFinite(b.pitch) ? b.pitch : 0;
+    const roll = Number.isFinite(b.roll) ? b.roll : 0;
+    this._csE.set(roll, yaw, -pitch);
+    this._csQ.setFromEuler(this._csE);
+    m.quaternion.copy(this._csQ);
+    const sq = 1 - 0.34 * (1 - k);                           // squashes as the car rises
+    m.scale.set(CONTACT_LEN * sq, 1, CONTACT_WID * sq);
+    m.material.opacity = 0.92 * (0.45 + 0.55 * k);
+  }
+
   measureFrame(n) {
     const t = new Float64Array(n);
     for (let i = 0; i < n; i++) {

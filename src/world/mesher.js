@@ -20,8 +20,12 @@ import { hash01 } from './noise.js';
 export const LOD_CELL = [1, 2, 4, 8, 16];
 // AO floor: a crevice may be shaded, never black. 0.56 on the deepest corner, times
 // WALL_SHADE, times the shader's crevice band, is what painted a 1-cell square pit.
-const AO_LEVELS = [1.0, 0.90, 0.81, 0.72];
-const AO_MIN = 0.80;                 // combined-darkening clamp (see vertex())
+// 4 occlusion levels over a 5-sample kernel (see aoTop): open face, one neighbour,
+// two, three-plus (concave corner, overhang, foot of a step, ribbon-into-verge joint).
+// Baked into the vertex colour: no texture, no extra pass, and it survives LOD.
+export const AO_LEVELS = [1.00, 0.88, 0.78, 0.70];
+export const AO_RANGE = [0.70, 1.00];
+const AO_MIN = AO_RANGE[0];          // combined-darkening clamp (see vertex())
 const RELIEF_SALT = 0x51b7c3d9;
 const TONE_SALT = 0x2c9a1f7b;
 // Bed lattice for the MESH, in 1/16-block units. A carved road bed has a different
@@ -62,6 +66,11 @@ const ALBEDO_MAX = 0.70;
 // (shoulder lip, terrace shelf) came out ~3x brighter than the surface it sits on - the
 // glowing pale lips of the reference frame. Wall albedo is baked down to compensate and
 // the bright end of the sub-band ramp is moved off the lip onto the crevice side.
+// Per-face value variation budget (pinned by T62): panel lattice term + fine lattice
+// term + per-corner grit, summed as a peak-to-peak percentage.
+export const TONE_SPREAD = { panel: 0.10, fine: 0.04, grit: 0.05 };
+const GRASS_DARK = 0.90;             // one palette step down on the grass/verge tone
+const DIRT_TONE = [0.30, 0.245, 0.175];  // the dirt that shows at the road edge / hollows
 const WALL_SHADE = 0.66;
 const ALBEDO_WALL_MAX = 0.60;
 
@@ -143,7 +152,15 @@ export function meshChunk(world, chunk, lod = 0) {
     const s1 = solidAt(bx + tx, y, bz) ? 1 : 0;
     const s2 = solidAt(bx, y, bz + tz) ? 1 : 0;
     const c = solidAt(bx + tx, y, bz + tz) ? 1 : 0;
-    return (s1 && s2) ? 3 : s1 + s2 + c;
+    // Two more samples, both free (same chunk cache the relief already reads):
+    //  `up`  a solid cell one above the surface column -> an overhang, the foot of a
+    //        step or the bank the road ribbon is cut into;
+    //  `far` the second ring behind the near pair -> a crevice that runs deeper than
+    //        one cell (the trench the old AO left lit in its middle).
+    const up = solidAt(bx, y + 1, bz) ? 1 : 0;
+    const far = (solidAt(bx + tx * 2, y, bz) && solidAt(bx, y, bz + tz * 2)) ? 1 : 0;
+    const n = s1 + s2 + c + up + far;
+    return n > 3 ? 3 : n;
   };
   const aoWallX = (bx, by, bz, ty, tz) => {
     const x = bx + 1;
@@ -261,7 +278,10 @@ export function meshChunk(world, chunk, lod = 0) {
       const pn2 = hash01(ax >> 1, az >> 1, TONE_SALT ^ 0x2f1b3d77);
       // +/-6 % panel variation: enough that a field of one surface is not a dead slab,
       // small enough that neighbouring 1 m panels never read as a checkerboard.
-      const pv = 1 + (pn - 0.5) * 0.06 + (pn2 - 0.5) * 0.02;  // value spread ~ +/-3.5 %
+      // 6-10 % peak-to-peak between neighbouring panels (JOB 4: the verge read as one
+      // flat mint plate at +/-3.5 %). Still coarse-keyed (8 m / 2 m lattice), so it is a
+      // patchwork of tones, never per-cell camo.
+      const pv = 1 + (pn - 0.5) * TONE_SPREAD.panel + (pn2 - 0.5) * TONE_SPREAD.fine;
       const pf = hash01(az + 7, ax - 3, TONE_SALT ^ 0x5bd1e995);
       const ph = (pf - 0.5) * 0.12;                           // warm/cool hue drift
       const pw = wPanel[c0] / 255;                            // 0 natural .. 1 worn bed
@@ -318,11 +338,32 @@ export function meshChunk(world, chunk, lod = 0) {
         // the terrain shader adds its own world-space fbm tone on top.
         // Grit stays *under* the panel tone: a per-cell flicker on top of a per-cell
         // tone is exactly the camo the brief wants gone.
-        const grit = pv * (1 + (h1 - 0.5) * 0.06);
+        const grit = pv * (1 + (h1 - 0.5) * TONE_SPREAD.grit);
         // Worked-vs-natural separation: a carved wheel line is scoured to its pale
         // aggregate and pressed dark, the natural verge next to it is pushed greener,
         // so the racing line reads instantly against the grass (PLAN §10 criterion 1).
         const sep = 1 + (pw - 0.5) * 0.10;
+        // Ground tone (JOB 4): a green-dominant face is grass/verge. It takes one step
+        // off the base tone (the mint plate) and picks up dirt where it is rubbed by the
+        // road (pw), where it borders another material (the road edge) and in a hollow
+        // (a corner ringed by taller ground). Patches, not one colour.
+        if (cg > cr && cg > cb) {
+          cr *= GRASS_DARK; cg *= GRASS_DARK; cb *= GRASS_DARK;
+          let up = 0;
+          if (lod < 2) {
+            if (inside && nh > hq) up++;
+            if (topQ[cj * N + Math.min(N - 1, ci + 1)] > hq) up++;
+            if (topQ[cj * N + Math.max(0, ci - 1)] > hq) up++;
+            if (topQ[Math.min(N - 1, cj + 1) * N + ci] > hq) up++;
+            if (topQ[Math.max(0, cj - 1) * N + ci] > hq) up++;
+          }
+          const mix = Math.min(0.34, pw * 0.20 + (nb !== b ? 0.12 : 0) + (up >= 3 ? 0.18 : 0));
+          if (mix > 0) {
+            cr += (DIRT_TONE[0] - cr) * mix;
+            cg += (DIRT_TONE[1] - cg) * mix;
+            cb += (DIRT_TONE[2] - cb) * mix;
+          }
+        }
         cr = cr * grit * sep * (1 + ph + (h2 - 0.5) * 0.05);
         cg = cg * grit * (1 + (pw - 0.5) * 0.10);
         cb = cb * grit * sep * (1 - ph - (h2 - 0.5) * 0.05);
