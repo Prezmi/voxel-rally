@@ -15,16 +15,16 @@ import * as THREE from 'three';
  */
 const STOPS = [
   { t: 0.00, elev: -6, key: 0.14, keyCol: 0x2b3d5c, amb: 0.60, ambSky: 0x1d2839, ambGround: 0x14171c, fog: 0.55, exposure: 1.55, warm: 0.05 },
-  { t: 0.22, elev: 4, key: 2.35, keyCol: 0xffa866, amb: 1.22, ambSky: 0x86a6c8, ambGround: 0x3f3527, fog: 0.72, exposure: 1.34, warm: 0.95 },
-  { t: 0.38, elev: 22, key: 3.42, keyCol: 0xffe0ae, amb: 1.62, ambSky: 0xb4d1ea, ambGround: 0x464836, fog: 0.44, exposure: 1.31, warm: 0.62 },
-  { t: 0.50, elev: 52, key: 3.58, keyCol: 0xfff7ea, amb: 1.72, ambSky: 0xd2e6f4, ambGround: 0x454d3c, fog: 0.32, exposure: 1.22, warm: 0.28 },
+  { t: 0.22, elev: 4, key: 2.55, keyCol: 0xffa866, amb: 1.30, ambSky: 0x86a6c8, ambGround: 0x3f3527, fog: 0.72, exposure: 1.34, warm: 0.95 },
+  { t: 0.38, elev: 22, key: 3.72, keyCol: 0xffe0ae, amb: 1.74, ambSky: 0xb4d1ea, ambGround: 0x464836, fog: 0.44, exposure: 1.31, warm: 0.62 },
+  { t: 0.50, elev: 52, key: 3.88, keyCol: 0xfff7ea, amb: 1.84, ambSky: 0xd2e6f4, ambGround: 0x454d3c, fog: 0.32, exposure: 1.22, warm: 0.28 },
   // Golden hour (t 0.68-0.80) is the reference look: the key is *low* so shadows
   // stretch across the carriageway (PLAN §10 criterion 1/4) rather than falling
   // straight down under the car the way noon does. Bright, high-key (PLAN §10.2:
   // CMR 2.0 was praised for a brighter palette) - the old values washed the frame
   // to flat grey once the fog was added on top.
-  { t: 0.68, elev: 18, key: 3.95, keyCol: 0xffca92, amb: 1.74, ambSky: 0xbdd4ec, ambGround: 0x4c452f, fog: 0.40, exposure: 1.44, warm: 0.86 },
-  { t: 0.80, elev: 7, key: 2.85, keyCol: 0xff9048, amb: 1.42, ambSky: 0x93a6cc, ambGround: 0x3d3424, fog: 0.72, exposure: 1.40, warm: 1.00 },
+  { t: 0.68, elev: 18, key: 4.20, keyCol: 0xffca92, amb: 1.86, ambSky: 0xbdd4ec, ambGround: 0x4c452f, fog: 0.40, exposure: 1.44, warm: 0.86 },
+  { t: 0.80, elev: 7, key: 3.10, keyCol: 0xff9048, amb: 1.52, ambSky: 0x93a6cc, ambGround: 0x3d3424, fog: 0.72, exposure: 1.40, warm: 1.00 },
   { t: 0.92, elev: -4, key: 0.30, keyCol: 0x38506f, amb: 0.72, ambSky: 0x27324a, ambGround: 0x181b21, fog: 0.80, exposure: 1.48, warm: 0.30 },
   { t: 1.00, elev: -6, key: 0.14, keyCol: 0x2b3d5c, amb: 0.60, ambSky: 0x1d2839, ambGround: 0x14171c, fog: 0.55, exposure: 1.55, warm: 0.05 },
 ];
@@ -62,6 +62,12 @@ export function lightingFor(biome, tod, out) {
 
   out.elevationDeg = lerp(s0.elev, s1.elev, k);
   out.keyIntensity = lerp(s0.key, s1.key, k);
+  // The atmosphere layer reads the sun as a 0..1 amount (post/composer.js shaftAlpha
+  // clamps its `sun` term to that range), so the rig has to emit it: keyIntensity is a
+  // physical-ish 0..4.2 dial, sunAmount is the same number normalised into 0..1.
+  // Without these two the shafts fall back to 1 and time of day never moves them.
+  out.sunIntensity = out.keyIntensity;
+  out.sunAmount = Math.max(0, Math.min(1, out.keyIntensity / 4.2));
   out.ambIntensity = lerp(s0.amb, s1.amb, k);
   out.exposure = lerp(s0.exposure, s1.exposure, k);
   out.warmth = lerp(s0.warm, s1.warm, k);
@@ -102,7 +108,7 @@ export function lightingFor(biome, tod, out) {
 /** Fresh rig object (boot time only). */
 export function createLightRig() {
   return {
-    elevationDeg: 30, keyIntensity: 2, ambIntensity: 1, exposure: 1.05, warmth: 0.5,
+    elevationDeg: 30, keyIntensity: 2, sunIntensity: 2, sunAmount: 0.48, ambIntensity: 1, exposure: 1.05, warmth: 0.5,
     hazeMul: 0.7, saturation: 1, shaftGain: 1,
     sunColor: new THREE.Color(), hemiSky: new THREE.Color(), hemiGround: new THREE.Color(),
     fillColor: new THREE.Color(), groundTint: new THREE.Color(),

@@ -580,6 +580,9 @@ async function main() {
       // as much wall-clock time as at 60 Hz.
       if (cfg.showroom) sheetCamera();
       else view3d.update(car, frameDt || DT, settings.cameraMode);
+      // The composer owns the edge radial blur and only ever sees a speed, so the
+      // frame loop pushes the car's ground speed into it directly (post.setSpeed).
+      if (renderer.post && renderer.post.setSpeed) renderer.post.setSpeed(car.body.groundSpeed);
       renderer.fitShadow(car.body.pos);
       renderer.render();
       dirt.lens.setAmount(settings.lensDirt);

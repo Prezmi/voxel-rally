@@ -16,6 +16,10 @@ export const settings = {
   post: true,
   bloom: 'MEDIUM',           // 'LOW' | 'MEDIUM' | 'HIGH' -> POST_TUNE.bloom row
   grade: true,               // the split-tone / contrast / vignette / grain half
+  // SHAFTS: the one extra eighth-res quad in the composite graph (postGraph gates it).
+  // The renderer passes this through post.setConfig, so it is a real dial and not a
+  // default the composer falls back to. LOW drops it with the cheapest graph.
+  shafts: true,
   drawDistance: 1000,        // m, docs/03 §1 - the outer edge of EVERYTHING streamed:
                              // terrain silhouette bands, hill band and the far vegetation
                              // billboard band. Must stay past vegFarDistance or the
@@ -226,13 +230,13 @@ export function qualityPreset(q) {
   settings.quality = q;
   const far = q === QUALITY.LOW ? FAR_RADII.LOW : (q === QUALITY.MED ? FAR_RADII.MED : FAR_RADII.HIGH);
   if (q === QUALITY.LOW) {
-    settings.renderScale = 0.75; settings.shadows = false; settings.post = true; postForPreset(q);
+    settings.renderScale = 0.75; settings.shadows = false; settings.post = true; settings.shafts = false; postForPreset(q);
     settings.fullRadius = 80; settings.simpleRadius = 160; settings.fxScale = 0.5;
   } else if (q === QUALITY.MED) {
-    settings.renderScale = 1.0; settings.shadows = true; settings.post = true; postForPreset(q);
+    settings.renderScale = 1.0; settings.shadows = true; settings.post = true; settings.shafts = true; postForPreset(q);
     settings.fullRadius = 110; settings.simpleRadius = 220; settings.fxScale = 1.0;
   } else {
-    settings.renderScale = 1.0; settings.shadows = true; settings.post = true; postForPreset(q);
+    settings.renderScale = 1.0; settings.shadows = true; settings.post = true; settings.shafts = true; postForPreset(q);
     settings.fullRadius = 130; settings.simpleRadius = 260; settings.fxScale = 1.0;
   }
   settings.drawDistance = far.drawDistance;

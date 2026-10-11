@@ -6,7 +6,7 @@ export const BLOOM_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
  *  a plain finite number inside the ranges tests.js pins (T33) — nothing else in the
  *  renderer carries a bloom/grade constant, so the look is dialled from one place. */
 export const POST_TUNE = {
-  exposure: 1.34,              // AgX sits darker/softer than ACES at the same key light
+  exposure: 1.46,              // AgX sits darker/softer than ACES at the same key light
   bloom: {
     LOW: { threshold: 1.05, knee: 0.45, intensity: 0.30, radius: 1.00, taps: 3, sigma: 1.10, mips: 1 },
     MEDIUM: { threshold: 0.95, knee: 0.55, intensity: 0.58, radius: 1.35, taps: 5, sigma: 1.30, mips: 2 },
@@ -14,7 +14,7 @@ export const POST_TUNE = {
   },
   grade: {
     contrast: 0.30,            // gentle S curve about the mid grey (band width 1.15)
-    shadowLift: 0.062,         // the shadow side never crushes to black
+    shadowLift: 0.086,         // the shadow side never crushes to black
     warmHi: [1.075, 1.005, 0.885], coolSh: [0.855, 0.940, 1.110],
     warmAmt: 0.60, coolAmt: 0.40,
     satGreen: 0.24, satBrown: 0.12,

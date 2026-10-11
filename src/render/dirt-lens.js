@@ -97,6 +97,12 @@ export function attachDirtLens(renderer) {
       }
     },
     draw(r) {
+      // Exclusive with the composite's sun-keyed lens flare (composer.js COMPOSITE_FRAG,
+      // uLensAmt): with POST on the flare already carries the dirt, so drawing this quad
+      // on top doubles the smudge. With POST off the composite never runs, so the quad
+      // is the only lens there is.
+      const post = r && r.post;
+      if (post && post.enabled) return;
       const gl = r.renderer || r;
       mat.uniforms.uTime.value = performance.now() * 0.001;
       const prev = gl.autoClear;

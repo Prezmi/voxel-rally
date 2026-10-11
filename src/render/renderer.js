@@ -100,8 +100,13 @@ void main() {
   vec3 d = normalize(vDir);
   float h = clamp(d.y, -1.0, 1.0);
   // Graded haze: fog colour ON the horizon, deepening to the zenith colour overhead.
-  float band = pow(1.0 - max(h, 0.0), 3.0);
+  float band = pow(1.0 - max(h, 0.0), 2.2);
   vec3 col = mix(uZenith, uHorizon, band);
+  // Haze gradient: a second, softer ramp stacked on the horizon band, thick at the
+  // horizon and thinning with altitude, so the sky reads as a gradient and not as one
+  // flat pale sheet.
+  float haze = pow(1.0 - max(h, 0.0), 1.35);
+  col = mix(col, uHorizon * 1.06, haze * (0.16 + 0.34 * uHaze));
   // Under the horizon the dome is the haze floor: a carve lip or a hairline crack must
   // never show a hard-cut value through it.
   col = mix(col, uHorizon * 0.86, smoothstep(0.0, -0.14, h));
@@ -113,7 +118,7 @@ void main() {
              + 0.52 * pow(max(c, 0.0), 24.0)
              + 0.16 * pow(max(c, 0.0), 3.2);
   // Warm horizon wash on the sun's side of the sky: the air between camera and sun.
-  col += uSunCol * (0.30 * uHaze) * pow(max(c, 0.0), 2.4) * (1.0 - band * 0.35) * up;
+  col += uSunCol * (0.42 * uHaze) * pow(max(c, 0.0), 2.0) * (1.0 - band * 0.25) * up;
   col += uSunCol * (glow * (0.55 + 0.45 * uHaze) + disc * uSunPow) * up;
   gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
 }
@@ -131,7 +136,7 @@ void main() {
     this._buildMaterials();
 
     this.post = new PostComposer(this.renderer);
-    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, exposure: POST_TUNE.exposure });
+    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, shafts: settings.shafts !== false, exposure: POST_TUNE.exposure });
 
     this.info = { calls: 0, tris: 0 };
     this._time = 0;
@@ -400,9 +405,9 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.sun.intensity = rig.keyIntensity * 1.40 * (1 - 0.52 * oc);
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
-    // Ambient fill up (1.16 -> 1.42): the forest floor and the shaded flank of the
-    // treeline lift out of black while the sun's direct term keeps the contrast.
-    this.hemi.intensity = rig.ambIntensity * 1.42 * (1 + 0.22 * oc);
+    // Hemisphere fill up again (1.42 -> 1.58): the forest floor and the shaded flank of
+    // the treeline kept going near black in the daytime forest shots.
+    this.hemi.intensity = rig.ambIntensity * 1.58 * (1 + 0.22 * oc);
     this.fill.color.copy(rig.fillColor);
     // The fill points back at the shadow side, so it is also the light that erases the
     // car/prop contact shadow. It goes slightly DOWN; the crush lift is carried by the
@@ -413,7 +418,12 @@ float fbm1(vec2 p) { return vnoise(p); }
     // fog stays a tint rather than a grey sheet, so mid-distance terrain still reads as
     // gravel and grass (PLAN §10 criterion 1/4: read the road and the nearest checkpoint
     // in under a second; distant ground may wash out, the racing line may not).
-    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.14).lerp(rig.sunColor, 0.34 * rig.warmth);
+    this.fogColor.copy(this.biomeFog).lerp(rig.hemiSky, 0.22).lerp(rig.sunColor, 0.40 * rig.warmth);
+    // Haze is bright by design: a dark fog sheet is what crushed the forest floor in
+    // the daytime shots. Lift it, then clamp back into 0..1 per channel.
+    this.fogColor.r = Math.min(1, this.fogColor.r * 1.16);
+    this.fogColor.g = Math.min(1, this.fogColor.g * 1.14);
+    this.fogColor.b = Math.min(1, this.fogColor.b * 1.10);
     this.skyColor.copy(this.biomeSky).lerp(rig.hemiSky, 0.30).lerp(rig.sunColor, 0.34 * rig.warmth);
     // Saturated sky (PLAN §10.2 "mocno nasycone niebo"): push the blue away from grey
     // instead of letting the haze wash the whole frame to one value.
@@ -431,10 +441,14 @@ float fbm1(vec2 p) { return vnoise(p); }
     const sku = this.sky.material.uniforms;
     sku.uSunDir.value.copy(rig.sunDir);
     sku.uSunCol.value.copy(rig.sunColor);
-    sku.uHorizon.value.copy(this.fogColor).lerp(rig.sunColor, 0.26).multiplyScalar(1.10);
-    sku.uZenith.value.copy(this.skyColor).multiplyScalar(0.80);
-    sku.uZenith.value.b = Math.min(1.6, sku.uZenith.value.b * 1.45);
-    sku.uHaze.value = 0.42 + 0.58 * rig.warmth;
+    sku.uHorizon.value.copy(this.fogColor).lerp(rig.sunColor, 0.38).multiplyScalar(1.24);
+    // Clearly blue zenith: pull the red/green wash off the top of the dome and push the
+    // blue, so the sky has a saturated top and a warm bright band at the horizon.
+    sku.uZenith.value.copy(this.skyColor).multiplyScalar(0.88);
+    sku.uZenith.value.r *= 0.62;
+    sku.uZenith.value.g *= 0.82;
+    sku.uZenith.value.b = Math.min(1.8, sku.uZenith.value.b * 1.62);
+    sku.uHaze.value = 0.55 + 0.45 * rig.warmth;
     sku.uSunPow.value = 22.0 + 30.0 * Math.max(0, Math.min(1, rig.sunDir.y * 3.0));
     const far = settings.drawDistance;
     // Fog is short by design (PLAN §10.2 "teren jasny, tylko horyzont mglisty"):
@@ -486,7 +500,7 @@ float fbm1(vec2 p) { return vnoise(p); }
 
     // Post stack: POST / GRADE rows plus the driver gate (composer.ok). LOW keeps
     // it on but runs the cheapest graph (one mip, 3 taps); BLOOM sets the row.
-    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, exposure: POST_TUNE.exposure });
+    this.post.setConfig({ post: settings.post, bloom: settings.bloom, grade: settings.grade, shafts: settings.shafts !== false, exposure: POST_TUNE.exposure });
     this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : TONE_MODE;
     this.onResize();
     this.applyRig();
