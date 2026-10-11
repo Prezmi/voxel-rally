@@ -30,6 +30,7 @@ import { startPerfHarness } from './debug/perf-harness.js';
 import { pregenerateStage } from './world/pregen.js';
 import { loadStageCache } from './world/stage-cache.js';
 import { DT } from './core/time.js';
+import { showroomConfig, showroomRoute, showroomPose } from './debug/showroom.js';
 import { settings, applyDifficulty, qualityPreset, cycleDrawDistance, cycleBloom, QUALITY, loadSettings, saveSettings } from './core/settings.js';
 
 // Boot-time yield: the loading steps hand the frame back to the browser so the
@@ -72,10 +73,11 @@ function params() {
   // ?ref=<s> reference time for the stage (docs/03 §6 ghost is not wired yet).
   const ref = Number(q.get('ref') || 0);
   // ?tod=<0..1> time of day for the art-direction shots (PLAN §10 criterion 1/4):
-  // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour, on the low
-  // side of it - the sky dome puts the sun disc at rig.sunDir, so a 0.68-0.70 sun sits
-  // IN the frame down the stage and throws the long key across the carriageway.
-  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.70;
+  // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour but on
+  // the HIGH side of it - the old 0.70 put the sun at 16 deg elevation, behind the
+  // treeline for the whole stage (no disc, gloomy frame). 0.62 puts it at ~29 deg:
+  // above the canopy, still a long warm key across the carriageway.
+  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.62;
   // ?post=0|1 turns the composite off/on (A/B shots for the pass-cost numbers).
   // Read *after* the quality preset below so the flag always wins.
   const postFlag = q.get('post');
@@ -100,6 +102,12 @@ function params() {
     ? Math.max(-1, Math.min(1, Number(steerRaw))) : null;
   // ?q=LOW|MED|HIGH picks the quality preset before the renderer is built, so the
   // quality tiers are testable from a headless shot (docs/07 §Budżety).
+  // ?showroom=1 (+ ?view=side|front|rear|three-quarter): the car-only debug showroom
+  // (src/debug/showroom.js) framed like tools/blender/preview_model.py. Flag-gated:
+  // without it every one of these fields is the normal game.
+  const sheet = showroomConfig(location.search);
+  const showroom = sheet.active ? showroomRoute() : null;
+  if (showroom) settings.hudMode = showroom.hudMode;   // HUD off before the HUD is built
   const qName = (q.get('q') || '').toUpperCase();
   if (qName === 'LOW') qualityPreset(QUALITY.LOW);
   else if (qName === 'MED') qualityPreset(QUALITY.MED);
@@ -118,6 +126,7 @@ function params() {
     hasTod: q.has('tod'),
     surfaceId: SURFACE_KEYS[surfaceKey] !== undefined ? SURFACE_KEYS[surfaceKey] : null,
     surfaceKey, frames, rain, cam, ref, tod, stats, perftest, steerForce,
+    showroom: !!showroom, viewName: sheet.view, sheet,
   };
 }
 
@@ -176,12 +185,14 @@ async function main() {
   // seed falls back to generating the same data now. After either path Streaming only
   // ever builds and destroys render geometry, never terrain data.
   const loadT0 = performance.now();
-  const cached = await loadStageCache(stage.world, cfg.seed, cfg.biome);
+  // Showroom: the world is never streamed, so it is never loaded or generated either.
+  const cached = cfg.showroom ? null : await loadStageCache(stage.world, cfg.seed, cfg.biome);
   hud.boot(cached
     ? `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\nładowanie zapisanego etapu…\n${(cached.bytes / 1e6).toFixed(1)} MB · ${cached.chunks} chunków`
     : `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\ngenerowanie całego etapu…`);
   await nextFrame(cfg.shotBoot);
-  const pre = await pregenerateStage(stream, settings.drawDistance, {
+  const pre = cfg.showroom ? { chunks: 0, filled: 0, carved: 0, props: 0, tiles: 0 }
+    : await pregenerateStage(stream, settings.drawDistance, {
     yieldFn: () => nextFrame(cfg.shotBoot),
     onProgress: (p, done, total) => hud.boot(
       `VOXEL RALLY\nseed ${cfg.seed}  biome ${cfg.biome}\n`
@@ -242,6 +253,11 @@ async function main() {
   const rally = new RallyHud(document, { bus, stages: BIOMES.map((b) => ({ key: b, label: STAGE_LABEL[b] || b })) });
   rally.stageIdx = Math.max(0, BIOMES.indexOf(cfg.biome));
   function restartRun() {
+    // Rolled over: RESET rights the car where it lies instead of re-placing it at the
+    // start line. The stage clock keeps running and the damage already taken stands, so
+    // the recovery costs real time rather than buying a free re-run. 0.35 s is the
+    // "instantly" the player asked for, still a slerp so it reads as motion.
+    if (car.rolled()) { car.rightNow(0.35); return; }
     resetCar();
     view3d.shake = 0;
     voice.reset();
@@ -330,10 +346,42 @@ async function main() {
   const startIdx = 12;
   const startYaw = -stage.road.heading[startIdx];
   function resetCar() {
+    if (cfg.showroom) {
+      // Showroom: a flat pad at the origin, not the start line.
+      car.placeAt(0, 0, 0, 0);
+      car.wheels.forEach((w) => { w.omega = 0; });
+      return;
+    }
     car.placeAt(stage.road.x[startIdx], stage.road.z[startIdx], startYaw, stage.road.h[startIdx]);
     car.wheels.forEach((w) => { w.omega = 0; });
   }
   resetCar();
+
+  // ---- debug showroom (?showroom=1): pad + fixed sheet camera, world never drawn ----
+  const padMesh = cfg.showroom ? buildShowroomPad() : null;
+  if (padMesh) renderer.scene.add(padMesh);
+  const _box = new THREE.Box3();
+  let sheetPose = null;
+  function sheetCamera() {
+    if (!sheetPose) {
+      _box.makeEmpty();
+      _box.expandByObject(view.group);
+      sheetPose = showroomPose(cfg.viewName, {
+        min: { x: _box.min.x, y: _box.min.y, z: _box.min.z },
+        max: { x: _box.max.x, y: _box.max.y, z: _box.max.z },
+      }, renderer.camera.aspect || 16 / 9);
+      // The sheet's 45 mm lens on a 36 mm sensor, converted to three's vertical fov.
+      renderer.camera.fov = sheetPose.fovDeg;
+      renderer.camera.updateProjectionMatrix();
+      console.log(`[showroom] view ${sheetPose.view} dist ${sheetPose.dist.toFixed(2)} m `
+        + `cam ${sheetPose.pos.x.toFixed(2)},${sheetPose.pos.y.toFixed(2)},${sheetPose.pos.z.toFixed(2)} `
+        + `look ${sheetPose.look.x.toFixed(2)},${sheetPose.look.y.toFixed(2)},${sheetPose.look.z.toFixed(2)} fov ${sheetPose.fovDeg.toFixed(1)}`);
+    }
+    const cam = renderer.camera;
+    cam.up.set(0, 1, 0);
+    cam.position.set(sheetPose.pos.x, sheetPose.pos.y, sheetPose.pos.z);
+    cam.lookAt(sheetPose.look.x, sheetPose.look.y, sheetPose.look.z);
+  }
 
   const ctx = { car, stream, stage, input, hud, arc: 0, dirt, renderer };
   // Fixed-frame driver for the screenshots (?frames=...): the same code path the
@@ -506,19 +554,28 @@ async function main() {
       if (driving || cfg.perftest) stageRun.step(dt, car);
       const i = stage.road.nearest(car.body.pos.x, car.body.pos.z);
       ctx.arc = i >= 0 ? stage.road.s[i] : ctx.arc;
-      // Co-driver runs on the same fixed step as the physics: the note a replayed
-      // drive hears is the note the first drive heard (PLAN.md §8 #7).
-      if (driving) voice.advance(ctx.arc, dt);
+      if (driving) {
+        // Co-driver runs on the same fixed step as the physics: the note a replayed
+        // drive hears is the note the first drive heard (PLAN.md §8 #7).
+        // Rolled over, the channel is muted for the duration - the cursor still walks,
+        // so the first note after the recovery is the one the road is actually asking
+        // for. The player's own M mute is restored, never overwritten.
+        const wasMuted = voice.muted;
+        if (car.rolled()) voice.muted = true;
+        voice.advance(ctx.arc, dt);
+        voice.muted = wasMuted;
+      }
     },
     render(alpha, frameDt) {
       syncCarMesh(view, car, alpha, dirt);
       fx.enabled = settings.fx !== false;
       syncFxView(fxView, fx, fx.env);
-      stream.update(car.body.pos, 6);
+      if (!cfg.showroom) stream.update(car.body.pos, 6);
       // Camera smoothing runs on the frame's (already clamped) dt, not on a fixed
       // DT per rendered frame: at 120 Hz a per-frame DT advanced the springs twice
       // as much wall-clock time as at 60 Hz.
-      view3d.update(car, frameDt || DT, settings.cameraMode);
+      if (cfg.showroom) sheetCamera();
+      else view3d.update(car, frameDt || DT, settings.cameraMode);
       renderer.fitShadow(car.body.pos);
       renderer.render();
       dirt.lens.setAmount(settings.lensDirt);
@@ -555,7 +612,17 @@ async function main() {
   // --virtual-time-budget does not drive rAF at 60 Hz on a headless box, so a
   // fixed number of *sim* steps up front is the only reproducible way to get
   // "30 s of driving" into a screenshot.
-  if (cfg.frames > 0 && !cfg.perftest) {
+  // ---- showroom boot: nothing drives, nothing streams, the sim stays frozen ----
+  if (cfg.showroom) {
+    car.setInput({ throttle: 0, brake: 0, steer: 0, handbrake: 1, shiftUp: 0, shiftDown: 0 });
+    dirt.frame(car);
+    syncCarMesh(view, car, 0, dirt);
+    sheetCamera();
+    renderer.fitShadow(car.body.pos);
+    renderer.render();
+    loop.time.paused = true;
+  }
+  if (cfg.frames > 0 && !cfg.perftest && !cfg.showroom) {
     hud.boot(`tryb zrzutu: ${cfg.frames} kroków symulacji (1/120 s)\nnawierzchnia ${cfg.surfaceKey || cfg.biome}`);
     const idle = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
     for (let i = 0; i < cfg.frames; i++) {
@@ -571,7 +638,7 @@ async function main() {
     dirt.frame(car);
     // The shot only renders once, so spend the streaming budget up front: one
     // update(…, 6) per frame would leave the far ring unbuilt in the PNG.
-    for (let k = 0; k < 10; k++) stream.update(car.body.pos, 120);
+    if (!cfg.showroom) for (let k = 0; k < 10; k++) stream.update(car.body.pos, 120);
     // HUD shows the state the drive reached: three calls at the panel rates so the
     // 12 Hz sign strip, the 20 Hz clock and the 8 Hz lists are all flushed in the shot.
     for (let k = 0; k < 3; k++) rally.update(1 / 8, { car, stage: stageRun, notes: notes.notes, voice, stageName });
@@ -581,7 +648,7 @@ async function main() {
     // numbers are printed into the boot overlay so a headless PNG carries them.
     loop.time.paused = true;   // the picture stays exactly where the drive ended
   }
-  if (cfg.frames > 0 && !cfg.perftest) {
+  if (cfg.frames > 0 && !cfg.perftest && !cfg.showroom) {
     // Per-pass cost of the new pipeline: full composite, composite without the
     // sunshafts, raw render (docs/07 "Budżety techniczne": render <= 13 ms).
     const full = renderer.measureFrame(36);
@@ -604,7 +671,7 @@ async function main() {
   // screenshot reads as a black viewport. The render-cost numbers stay available on
   // window.__vrStats + renderer.info for the shot harness.
   applyTouch();
-  if (!cfg.autoStart) {
+  if (!cfg.autoStart && !cfg.showroom) {
     // ?menu=settings / ?menu=controls otwieraja dany ekran (harness zrzutow)
     if (cfg.menuScreen === 'settings' || cfg.menuScreen === 'controls') rally.openScreen(cfg.menuScreen);
     else rally.openMenu();                             // boot -> menu, START odpala odliczanie
@@ -615,7 +682,7 @@ async function main() {
   // frame: every ?frames= PNG came back with NO HUD at all (no countdown modal, no
   // meta strip, no pace boards, no locator bar). Draw the panels again from a real
   // animation frame so the layer is committed before the screenshot.
-  if (cfg.frames > 0 && !cfg.perftest && typeof requestAnimationFrame === 'function') {
+  if (cfg.frames > 0 && !cfg.perftest && !cfg.showroom && typeof requestAnimationFrame === 'function') {
     const flush = () => {
       rally.update(1 / 8, { car, stage: stageRun, notes: notes.notes, voice, stageName });
       rally.update(1 / 8, { car, stage: stageRun, notes: notes.notes, voice, stageName });
@@ -623,7 +690,20 @@ async function main() {
     requestAnimationFrame(() => requestAnimationFrame(flush));
   }
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
-  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice, fx, fxView };
+  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice, fx, fxView, showroom: cfg.showroom ? { view: cfg.viewName, pose: () => sheetPose } : null };
+}
+
+// The showroom's flat pad: a plain quad under the car, no chunks, no props. The dirt
+// road colour from the design sheet (preview_model.py "stage_dirt") so the pad reads
+// the same in both renders.
+function buildShowroomPad() {
+  const g = new THREE.PlaneGeometry(60, 60, 1, 1);
+  g.rotateX(-Math.PI / 2);
+  const m = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.115, 0.078, 0.048), roughness: 0.95, metalness: 0 });
+  const mesh = new THREE.Mesh(g, m);
+  mesh.receiveShadow = true;
+  mesh.name = 'showroom-pad';
+  return mesh;
 }
 
 main().catch((err) => {

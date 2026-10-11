@@ -170,7 +170,9 @@ export class AmbientFx {
     // ---- wheel dust: proportional to slip and speed -------------------------
     let slipSum = 0;
     for (let i = 0; i < 4; i++) slipSum += Math.abs(car.wheels[i].slip || 0);
-    const rate = 4 * slipSum * clamp(spd * 0.14, 0, 1) * (1 - 0.6 * (env.rain || 0));
+    const rate = ((4 + 2.4 * clamp(spd * 0.045, 0, 1)) * slipSum * clamp(spd * 0.14, 0, 1)
+      + 3.2 * clamp(spd * 0.035, 0, 1))            // rolling dust even off throttle: speed feel
+      * (1 - 0.6 * (env.rain || 0));
     this.dacc += rate * dt;
     let n = Math.floor(this.dacc); this.dacc -= n;
     const groundY = b.pos.y - (p.comY || 0.5) + 0.04;
@@ -192,7 +194,7 @@ export class AmbientFx {
       d[o + F.VZ] = -(this._m[6]) * (1.2 + 3.2 * s) + (rnd() - 0.5) * 1.4;
       const ttl = 0.5 + 0.9 * rnd();
       d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = 0.16 + 0.30 * rnd();
+      d[o + F.SIZE] = 0.20 + 0.36 * rnd();
       d[o + F.HEAT] = clamp(0.35 + 0.6 * s + 0.02 * spd, 0, 1);
     }
 
@@ -220,7 +222,7 @@ export class AmbientFx {
     }
 
     // ---- dust motes: a thin field that catches the sunlight -----------------
-    this.macc += 26 * dt * (0.35 + 0.65 * (env.sun || 1));
+    this.macc += (26 + 26 * clamp(spd * 0.035, 0, 1)) * dt * (0.35 + 0.65 * (env.sun || 1));
     n = Math.floor(this.macc); this.macc -= n;
     for (let i = 0; i < n; i++) {
       const o = this.motes.spawn();
@@ -235,7 +237,7 @@ export class AmbientFx {
       d[o + F.VZ] = (rnd() - 0.5) * 0.5;
       const ttl = 2.2 + 2.6 * rnd();
       d[o + F.LIFE] = ttl; d[o + F.TTL] = ttl;
-      d[o + F.SIZE] = 0.018 + 0.03 * rnd();
+      d[o + F.SIZE] = 0.022 + 0.036 * rnd();
       d[o + F.HEAT] = (env.sun || 1) * (0.5 + 0.6 * rnd());
     }
   }

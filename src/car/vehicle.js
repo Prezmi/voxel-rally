@@ -12,6 +12,10 @@ import { applyDrive, applyBrakes } from './diff.js';
 import { Powertrain } from './powertrain.js';
 import { DamageState } from './damage.js';
 import { surface } from '../world/surfaces.js';
+import {
+  createRollover, resetRollover, rolloverStep, gateInput, isDrivable, isRolled,
+  startRighting, spinDownWheels, RIGHT_DURATION_S,
+} from './rollover.js';
 
 const HULL = [
   [1, -1, 1], [1, -1, -1], [-1, -1, 1], [-1, -1, -1],
@@ -64,6 +68,10 @@ export class Vehicle {
     this.slipTotal = 0;
     this.airborneWheels = 0;
     this.lastImpact = 0;
+    // Rollover state (src/car/rollover.js): classification, timers, righting routine.
+    // The gated copy of the input lives here so nothing allocates in the fixed step.
+    this.rollover = createRollover();
+    this._gateIn = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
   }
 
   placeAt(x, z, yaw, groundY) {
@@ -177,6 +185,7 @@ export class Vehicle {
     this.powertrain.rpm = this.params.engine.idle;
     this.powertrain.gear = 1;
     this.powertrain.cut = 0;
+    resetRollover(this.rollover);
   }
 
   /** Convenience: several modules read `car.mass`; the real store is the body. */
@@ -186,15 +195,33 @@ export class Vehicle {
 
   setInput(input) { this.input = input; }
 
+  /** True while the car is on its side, on its roof, or being righted. */
+  rolled() { return isRolled(this); }
+
+  /**
+   * Right the car where it lies (RESET key / restart pad). The stage clock and the
+   * damage already taken are untouched: the recovery costs time, not a free re-run.
+   */
+  rightNow(dur = RIGHT_DURATION_S) { startRighting(this, dur); }
+
   step(dt) {
     const b = this.body;
     b.snapshot();
 
-    // 1) input already read by the caller; 2) engine and gears (docs/02 §9)
-    computeSteer(this, this.input);
-    const shaft = this.powertrain.step(dt, this.input);
-    applyBrakes(this, this.input.brake, this.input.handbrake);
-    applyDrive(this, shaft, this.input.handbrake);
+    // 0) rollover state: angle, timers, and the righting routine, which owns the body
+    // for the length of the slerp (no tyre / suspension work while it runs).
+    rolloverStep(this, dt);
+    if (this.rollover.right) return this.events;
+
+    // 1) input already read by the caller, with drive / steering / handbrake cut while
+    // the car is on its side or its roof; 2) engine and gears (docs/02 §9)
+    const gin = gateInput(this, this.input, this._gateIn);
+    const drivable = isDrivable(this);
+    computeSteer(this, gin);
+    const shaft = this.powertrain.step(dt, gin);
+    applyBrakes(this, gin.brake, gin.handbrake);
+    applyDrive(this, shaft, gin.handbrake);
+    if (!drivable) for (const w of this.wheels) w.driveTorque = 0;
     this.damage.syncWheels(this.wheels);
 
     this.grainPhase += dt * 2 * Math.PI * 24;
@@ -262,6 +289,7 @@ export class Vehicle {
     this.slipTotal = slip;
     this.airborneWheels = air;
     this.tyreTemp = clamp(this.tyreTemp + (slip / 60000 - this.tyreTemp * 0.06) * dt, 0, 1);
+    if (!drivable) spinDownWheels(this, dt);
     this.groundSpeed = b.groundSpeed;
     this.speed = b.speed;
     if (!Number.isFinite(b.pos.y) || !Number.isFinite(b.vel.y)) this.recover();

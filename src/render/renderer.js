@@ -85,7 +85,7 @@ export class Renderer {
           uHorizon: { value: new THREE.Color(0x9db4c4) },
           uSunCol: { value: new THREE.Color(0xffca92) },
           uSunDir: { value: new THREE.Vector3(0.4, 0.3, 0.8) },
-          uSunPow: { value: 26.0 },       // HDR: the composite bloom threshold is ~0.95
+          uSunPow: { value: 34.0 },       // HDR: the composite bloom threshold is ~0.95
           uHaze: { value: 0.62 },
         },
         vertexShader: `
@@ -108,10 +108,10 @@ void main() {
   vec3 sd = normalize(uSunDir);
   float c = dot(d, sd);
   float up = smoothstep(-0.05, 0.09, sd.y);        // sun below the horizon = no disc
-  float disc = smoothstep(0.99932, 0.99976, c);
-  float glow = 1.45 * pow(max(c, 0.0), 420.0)
-             + 0.34 * pow(max(c, 0.0), 24.0)
-             + 0.11 * pow(max(c, 0.0), 3.2);
+  float disc = smoothstep(0.99905, 0.99962, c);
+  float glow = 2.30 * pow(max(c, 0.0), 420.0)
+             + 0.52 * pow(max(c, 0.0), 24.0)
+             + 0.16 * pow(max(c, 0.0), 3.2);
   // Warm horizon wash on the sun's side of the sky: the air between camera and sun.
   col += uSunCol * (0.30 * uHaze) * pow(max(c, 0.0), 2.4) * (1.0 - band * 0.35) * up;
   col += uSunCol * (glow * (0.55 + 0.45 * uHaze) + disc * uSunPow) * up;
@@ -379,11 +379,25 @@ float fbm1(vec2 p) { return vnoise(p); }
     lightingFor(this.biome, this.tod, rig);
 
     const oc = this.overcast || 0;
-    // Warmer key (0.20 -> 0.32 of the warm key tint) and a stronger key gain:
+    // Sun floor: the stage runs under a canopy, and a sun below ~24 deg hides
+    // behind the treeline for the whole stage - no disc, no rim light, gloomy
+    // frame (the default tod used to sit at 16 deg). Raise the rig direction
+    // along the same azimuth: the key light, the sky disc and the shafts all
+    // read rig.sunDir, so they move together.
+    const MIN_SUN_Y = Math.sin(24 * Math.PI / 180);
+    if (rig.sunDir.y < MIN_SUN_Y) {
+      const hy = Math.hypot(rig.sunDir.x, rig.sunDir.z) || 1e-6;
+      const ce = Math.sqrt(1 - MIN_SUN_Y * MIN_SUN_Y);
+      rig.sunDir.x = rig.sunDir.x / hy * ce;
+      rig.sunDir.z = rig.sunDir.z / hy * ce;
+      rig.sunDir.y = MIN_SUN_Y;
+      rig.elevationDeg = Math.asin(MIN_SUN_Y) * 180 / Math.PI;
+    }
+    // Warmer key (0.32 -> 0.42 of the warm key tint) and a stronger key gain:
     // three's directional shadow is already at full attenuation, so the only headroom
     // for a readable contact shadow is the key/fill ratio, not the shadow map.
-    this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.32);
-    this.sun.intensity = rig.keyIntensity * 1.34 * (1 - 0.52 * oc);
+    this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.42);
+    this.sun.intensity = rig.keyIntensity * 1.40 * (1 - 0.52 * oc);
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
     // Ambient fill up (1.16 -> 1.42): the forest floor and the shaded flank of the
@@ -417,11 +431,11 @@ float fbm1(vec2 p) { return vnoise(p); }
     const sku = this.sky.material.uniforms;
     sku.uSunDir.value.copy(rig.sunDir);
     sku.uSunCol.value.copy(rig.sunColor);
-    sku.uHorizon.value.copy(this.fogColor);
-    sku.uZenith.value.copy(this.skyColor).multiplyScalar(0.60);
-    sku.uZenith.value.b = Math.min(1.4, sku.uZenith.value.b * 1.30);
+    sku.uHorizon.value.copy(this.fogColor).lerp(rig.sunColor, 0.26).multiplyScalar(1.10);
+    sku.uZenith.value.copy(this.skyColor).multiplyScalar(0.80);
+    sku.uZenith.value.b = Math.min(1.6, sku.uZenith.value.b * 1.45);
     sku.uHaze.value = 0.42 + 0.58 * rig.warmth;
-    sku.uSunPow.value = 14.0 + 22.0 * Math.max(0, Math.min(1, rig.sunDir.y * 3.0));
+    sku.uSunPow.value = 22.0 + 30.0 * Math.max(0, Math.min(1, rig.sunDir.y * 3.0));
     const far = settings.drawDistance;
     // Fog is short by design (PLAN §10.2 "teren jasny, tylko horyzont mglisty"):
     // mid-distance terrain must stay crisp, only the outer silhouette ring hazes. Both
@@ -436,7 +450,7 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.renderer.toneMapping = this.post.enabled ? THREE.NoToneMapping : TONE_MODE;
     // Post off: the built-in curve carries the whole grade, so AgX gets the same
     // small pull-back the old ACES path had. Post on: the composite owns exposure.
-    const exposure = rig.exposure * (this.post.enabled ? 1 : (TONE_MODE === THREE.AgXToneMapping ? POST_TUNE.exposure : 1.02));
+    const exposure = rig.exposure * 1.06 * (this.post.enabled ? 1 : (TONE_MODE === THREE.AgXToneMapping ? POST_TUNE.exposure : 1.02));
     this.renderer.toneMappingExposure = exposure;
     this.post.exposure = POST_TUNE.exposure;
     this.post.setRig(rig);

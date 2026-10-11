@@ -59,6 +59,14 @@ export const REGIONS = ['hood', 'roof', 'glass', 'flank', 'front', 'bumperF',
 const SIDED_BASE = /^(flank|sill|arch)/;
 const LIV_PARTS = new Set(['car_body', 'car_fender', 'car_panel', 'car_spoiler']);
 
+/** Window glass: near-black, neutral (the glb's pale slate 0.045/0.058/0.080 is
+ *  what read as "slate blue"), written straight into `color` so tests.js can
+ *  identify a glass vertex by its tint. */
+export const GLASS_TINT = [0.026, 0.030, 0.034];
+/** Where glass is parked in the atlas: the unused cross between the four
+ *  quadrants, always outside the painted rects in render/car-livery.js. */
+export const GLASS_UV = [0.5, 0.5];
+
 /** Car-local envelope from params. Heights are ASSET frame (the glb is authored
  *  with the ground at y = 0); `g` is the CoM-frame ground used for the fit. */
 export function assetShape(p) {
@@ -191,12 +199,14 @@ export function buildAssetBody(nodes, params) {
         // Painted parts take the livery. Real window glass (by MATERIAL, not by the
   // geometry region) stays clear of it; the side-facing door decals in car_panel
   // land in the 'glass' region but are paint, so they must still read the map.
-  const glassy = /glass/.test(matName);
+  const glassy = /glass|window/.test(matName)
+    || (region === 'glass' && !/paint|livery|body|decal/.test(matName));
   const liv = (LIV_PARTS.has(name) && !glassy && region !== 'lampFL' && region !== 'lampFR') ? 1 : 0;
         const list = bucket.get(region) || bucket.get('flank');
+        const tr = glassy ? GLASS_TINT[0] : cr, tg = glassy ? GLASS_TINT[1] : cg, tb = glassy ? GLASS_TINT[2] : cb;
         for (let j = 0; j < 3; j++) {
           list.push(tri.x[j], tri.y[j], tri.z[j], tri.nx[j] / nAvg, tri.ny[j] / nAvg, tri.nz[j] / nAvg,
-            cr, cg, cb, panel, liv, lamp);
+            tr, tg, tb, panel, liv, lamp);
         }
         tris++;
       }
@@ -250,6 +260,12 @@ export function buildAssetBody(nodes, params) {
       if (az >= ax && az >= ay) { u = 0.05 + 0.40 * fu; vv = 0.05 + 0.90 * fh; }
       else if (ay >= ax) { u = 0.55 + 0.40 * fu; vv = 0.55 + 0.40 * fw; }
       else { u = 0.55 + 0.40 * fw; vv = 0.05 + 0.40 * fh; }
+      // Glass never reads the painted half of the atlas: park it in the gap
+      // between quadrants, so no mask slip downstream can put a door band or the
+      // roundel on a window (tests.js T35 asserts the rects stay empty).
+      if (list[o + 10] === 0 && Math.abs(list[o + 6] - GLASS_TINT[0]) < 1e-6 && Math.abs(list[o + 8] - GLASS_TINT[2]) < 1e-6) {
+        u = GLASS_UV[0]; vv = GLASS_UV[1];
+      }
       aLivUv[vi * 2] = Math.max(0, Math.min(1, u)); aLivUv[vi * 2 + 1] = Math.max(0, Math.min(1, vv));
       aPanel[vi] = list[o + 9]; aLiv[vi] = list[o + 10]; aLamp[vi] = list[o + 11];
       vi++;

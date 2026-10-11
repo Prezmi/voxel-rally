@@ -24,6 +24,15 @@ const TEAM = {
 const S = 128;
 const INK = '#1a1b1f';
 
+/** Atlas rects the paint occupies (u/v, same space as the projection in
+ *  render/car-asset.js). They sit BELOW the belt line, so the door band, the
+ *  roundel and the sponsor strip can only land on the door / rear quarter
+ *  panel skin, never on the greenhouse. car-asset.js parks every glass face at
+ *  GLASS_UV, and src/debug/tests.js T35 asserts these rects stay glass-free. */
+export const LIVERY_BAND = { u0: 0.150, u1: 0.340, v0: 0.280, v1: 0.460 };
+export const LIVERY_ROUND = { u: 0.255, v: 0.400, r: 9.0 / S };
+export const LIVERY_STRIP = { u0: 0.350, u1: 0.435, v0: 0.250, v1: 0.280 };
+
 const lerp = (a, b, k) => a + (b - a) * k;
 /** Canvas x for a texture u in 0..1. */
 const ux = (u) => u * S;
@@ -45,10 +54,10 @@ export function drawLivery(ctx, carId) {
   // the height of the one band the model carries (rows 6..8, 0.60-0.90 m), so
   // the baked band and the painted band are the same band, not two.
   ctx.fillStyle = t.secondary;
-  ctx.fillRect(ux(0.14), vy(0.56), ux(0.32) - ux(0.14), vy(0.36) - vy(0.56));
+  ctx.fillRect(ux(LIVERY_BAND.u0), vy(LIVERY_BAND.v1), ux(LIVERY_BAND.u1) - ux(LIVERY_BAND.u0), vy(LIVERY_BAND.v0) - vy(LIVERY_BAND.v1));
 
   // 3. One start-number roundel, centred in that band.
-  const cx = ux(0.225), cy = vy(0.46), r = 9.0;
+  const cx = ux(LIVERY_ROUND.u), cy = vy(LIVERY_ROUND.v), r = LIVERY_ROUND.r * S;
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -65,7 +74,7 @@ export function drawLivery(ctx, carId) {
 
   // 4. One thin sponsor strip ahead of the door. A bar, not lettering.
   ctx.fillStyle = t.secondary;
-  ctx.fillRect(ux(0.335), vy(0.335), ux(0.425) - ux(0.335), vy(0.305) - vy(0.335));
+  ctx.fillRect(ux(LIVERY_STRIP.u0), vy(LIVERY_STRIP.v1), ux(LIVERY_STRIP.u1) - ux(LIVERY_STRIP.u0), vy(LIVERY_STRIP.v0) - vy(LIVERY_STRIP.v1));
 }
 
 export function buildLiveryTexture(carId, THREE) {

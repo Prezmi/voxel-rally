@@ -5,10 +5,16 @@ const TABLES = {
   en: {
     'settings.drawDistance': 'Draw distance',
     'settings.farDetail': 'Far detail',
+    'hud.rolled': 'ROLLED OVER',
+    'hud.side': 'ON ITS SIDE',
+    'hud.righting': 'RIGHTING',
   },
   pl: {
     'settings.drawDistance': 'Zasięg rysowania',
     'settings.farDetail': 'Daleki detal',
+    'hud.rolled': 'PRZEWRÓT',
+    'hud.side': 'NA BOKU',
+    'hud.righting': 'PROSTUJE',
   },
 };
 

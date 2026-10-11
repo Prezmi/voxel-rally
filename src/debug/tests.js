@@ -5,12 +5,14 @@
 //   node src/debug/tests.js            all
 //   node src/debug/tests.js 3          only test 3
 import { Vehicle } from '../car/vehicle.js';
+import { settleWheels, UPSIDE_DEG, RIGHT_DURATION_S } from '../car/rollover.js';
 import { VoxelWorld } from '../world/chunk.js';
 import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE, CARS } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
-import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust } from '../render/car-asset.js';
+import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV } from '../render/car-asset.js';
+import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP } from '../render/car-livery.js';
 import { FxSystem } from '../fx/fx.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
@@ -33,6 +35,7 @@ import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
 import { readFileSync } from 'node:fs';
+import { showroomConfig, showroomRoute, showroomPose } from './showroom.js';
 import { fileURLToPath } from 'node:url';
 
 const G = 9.81;
@@ -2082,6 +2085,124 @@ function testPostFallback() {
     `off passes ${passGraph({ post: false, bloom: 'HIGH' }).length} | rows persisted post=${settings.post} bloom=${settings.bloom} grade=${settings.grade} | gaps=[${gaps.join(' ')}]`);
 }
 testPostFallback();
+
+// ---------------------------------------------------------------- test 35
+// Livery/glass separation (shots showed the roundel reading on the rear window):
+// a glass-material panel goes through the real merge, every glass vertex must be
+// masked out (aLiv 0) and parked outside the painted rects, and the painted door
+// skin must still carry the roundel.
+function testLiveryGlassSeparation() {
+  const w = new FlatWorld(SURF.DIRT);
+  const params = makeCar(w, {}).params;
+  const nodes = fakeNodes();
+  nodes.get('car_panel').material = [{ name: 'rally_glass' }];   // the greenhouse
+  const built = buildAssetBody(nodes, params);
+  const inBand = (u, v) => u >= LIVERY_BAND.u0 && u <= LIVERY_BAND.u1 && v >= LIVERY_BAND.v0 && v <= LIVERY_BAND.v1;
+  const inStrip = (u, v) => u >= LIVERY_STRIP.u0 && u <= LIVERY_STRIP.u1 && v >= LIVERY_STRIP.v0 && v <= LIVERY_STRIP.v1;
+  const inRound = (u, v) => ((u - LIVERY_ROUND.u) ** 2 + (v - LIVERY_ROUND.v) ** 2) <= LIVERY_ROUND.r ** 2;
+  let glass = 0, glassBad = 0, parked = 0, painted = 0;
+  let u0 = 9, u1 = -9, v0 = 9, v1 = -9;
+  for (let i = 0; i < built.count; i++) {
+    const u = built.aLivUv[i * 2], v = built.aLivUv[i * 2 + 1];
+    const isGlass = Math.abs(built.color[i * 3] - GLASS_TINT[0]) < 1e-6
+      && Math.abs(built.color[i * 3 + 1] - GLASS_TINT[1]) < 1e-6
+      && Math.abs(built.color[i * 3 + 2] - GLASS_TINT[2]) < 1e-6;
+    if (isGlass) {
+      glass++;
+      if (built.aLiv[i] !== 0 || inBand(u, v) || inStrip(u, v) || inRound(u, v)) glassBad++;
+      if (Math.abs(u - GLASS_UV[0]) < 1e-6 && Math.abs(v - GLASS_UV[1]) < 1e-6) parked++;
+    } else if (built.aLiv[i] === 1 && u >= LIVERY_BAND.u0 && u <= LIVERY_BAND.u1) {
+      painted++;
+      u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+    }
+  }
+  const doorCoversRoundel = painted > 0
+    && u0 <= LIVERY_ROUND.u && u1 >= LIVERY_ROUND.u
+    && v0 <= LIVERY_ROUND.v - LIVERY_ROUND.r && v1 >= LIVERY_ROUND.v + LIVERY_ROUND.r;
+  const rectsOnFlank = LIVERY_BAND.u1 <= 0.45 && LIVERY_STRIP.u1 <= 0.45
+    && LIVERY_BAND.v1 <= 0.50 && LIVERY_ROUND.v + LIVERY_ROUND.r <= 0.50;
+  const ok = glass >= 12 && glassBad === 0 && parked === glass && doorCoversRoundel && rectsOnFlank;
+  check('T35 no glass face reads the livery: glass is masked + parked outside the band/roundel rects, the door skin still carries the roundel',
+    ok,
+    `glassVerts=${glass} glassBad=${glassBad} parked=${parked}/${glass} | door u[${u0.toFixed(3)}..${u1.toFixed(3)}] v[${v0.toFixed(3)}..${v1.toFixed(3)}] roundel(${LIVERY_ROUND.u},${LIVERY_ROUND.v}) r=${LIVERY_ROUND.r.toFixed(3)} | band u[${LIVERY_BAND.u0}..${LIVERY_BAND.u1}] v[${LIVERY_BAND.v0}..${LIVERY_BAND.v1}] strip u[${LIVERY_STRIP.u0}..${LIVERY_STRIP.u1}] v[${LIVERY_STRIP.v0}..${LIVERY_STRIP.v1}]`);
+}
+testLiveryGlassSeparation();
+
+// ---------------------------------------------------------------- test 36
+// Rollover (player report: a car flipped onto its roof still drove, scrubbing along
+// upside down). Roof-down there must be no drive torque and no steering response, the
+// state must classify as rolled, and the righting routine must have the car back on
+// its wheels inside 2 s (0.8..1.2 s slerp + a small drop, then it settles).
+function testRolloverRighting() {
+  const w = new FlatWorld(SURF.DIRT);
+  const car = makeCar(w, {});
+  car.placeAt(0, 0, 0);
+  // Start on its roof: half a turn about the body forward axis, lifted clear so the
+  // hull takes the landing rather than the wheels being dragged through the road.
+  car.body.quat.x = 1; car.body.quat.y = 0; car.body.quat.z = 0; car.body.quat.w = 0;
+  car.body.pos.y += 0.9;
+  car.body.refreshFrame();
+  settleWheels(car);
+
+  const full = { throttle: 1, brake: 0, steer: 1, handbrake: 1, shiftUp: 0, shiftDown: 0 };
+  let rolled = false, maxDrive = 0, maxSteer = 0;
+  drive(car, full, 1.2, (c) => {
+    if (c.rollover.state === 'rolled') rolled = true;
+    for (const wh of c.wheels) maxDrive = Math.max(maxDrive, Math.abs(wh.driveTorque));
+    maxSteer = Math.max(maxSteer, Math.abs(c.steerAngle), Math.abs(c.wheels[0].steer), Math.abs(c.wheels[1].steer));
+  });
+  const deg = car.rollover.angleDeg;
+  const omega = Math.max(...car.wheels.map((wh) => Math.abs(wh.omega)));
+
+  car.rightNow(RIGHT_DURATION_S);
+  let uprightAt = -1;
+  const idle = { throttle: 0, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+  drive(car, idle, 2.0, (c, i) => {
+    if (uprightAt < 0 && c.rollover.state === 'upright' && c.rollover.angleDeg < 40) uprightAt = (i + 1) * DT;
+  });
+
+  const ok = rolled && deg > UPSIDE_DEG && maxDrive === 0 && maxSteer < 1e-3 && omega < 2
+    && uprightAt >= 0 && uprightAt <= 2.0 && car.rollover.angleDeg < 40;
+  check('T36 rollover: a roof-down car gets no drive torque and no steering, classifies as rolled, and righting returns it upright within 2 s',
+    ok,
+    `rolled=${rolled} deg=${deg.toFixed(1)} (>${UPSIDE_DEG}) maxDriveTorque=${maxDrive} maxSteerRad=${maxSteer.toExponential(1)} wheelOmega=${omega.toFixed(2)} uprightAt=${uprightAt < 0 ? 'never' : uprightAt.toFixed(2) + ' s'} finalDeg=${car.rollover.angleDeg.toFixed(1)} finalUp=${car.body.up.y.toFixed(3)}`);
+}
+testRolloverRighting();
+
+// T37 showroom route (?showroom=1): the car-only debug pose has to freeze the sim and
+// hide the world, or the sheet-vs-game comparison compares a moving, cluttered frame.
+// Same camera maths the Blender sheet uses (tools/blender/preview_model.py), asserted here.
+function testShowroomRoute() {
+  const cfg = showroomConfig('?frames=3600&shot=1&showroom=1&view=side');
+  const off = showroomConfig('?shot=1');
+  const route = showroomRoute();
+  const src = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  // The shipped asset's own proportions: length 4.2, width 1.9, height 1.2.
+  const bbox = { min: { x: -2.1, y: 0, z: -0.95 }, max: { x: 2.1, y: 1.2, z: 0.95 } };
+  const side = showroomPose('side', bbox, 1400 / 880);
+  const rear = showroomPose('rear', bbox, 1400 / 880);
+  const tq = showroomPose('three-quarter', bbox, 1400 / 880);
+  // preview_model.py: fw = 36/45, fh = fw * H/W, dist = max(seen/(fill*fw), h/((fill+.1)*fh))
+  const fw = 36 / 45, fh = fw * 880 / 1400;
+  const dSide = Math.max(4.2 / (0.70 * fw), 1.2 / (0.80 * fh));
+  const dRear = Math.max(1.9 / (0.55 * fw), 1.2 / (0.65 * fh));
+  const d3q = Math.max(4.2 / (0.55 * fw), 1.2 / (0.65 * fh));
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  const ok = cfg.active && cfg.view === 'side' && !off.active
+    && route.simFrozen && !route.streamWorld && !route.props && !route.pregen && !route.stageCache
+    && route.hudMode === 'OFF'
+    && near(side.dist, dSide) && near(rear.dist, dRear) && near(tq.dist, d3q)
+    && side.pos.z === dSide && side.pos.x === 0 && near(side.pos.y, 0.90)
+    && rear.pos.x === -dRear && near(rear.pos.y, 0.90)
+    && near(tq.pos.x, d3q * 0.62) && near(tq.pos.z, d3q * 0.72) && near(tq.pos.y, 0.90 + d3q * 0.16)
+    && near(tq.look.y, 4.2 * 0.30)   // aim = zmin + size*0.30, size = the max extent
+    && /if \(!cfg\.showroom\) stream\.update/.test(src)
+    && /cfg\.showroom[\s\S]{0,400}loop\.time\.paused = true/.test(src);
+  check('T37 showroom route: ?showroom=1 freezes the sim, never streams or props the world, hides the HUD, and the sheet camera offsets match preview_model.py (side/front/rear/three-quarter)',
+    ok,
+    `active=${cfg.active} view=${cfg.view} off=${off.active} frozen=${route.simFrozen} stream=${route.streamWorld} hud=${route.hudMode} dist side=${side.dist.toFixed(2)} rear=${rear.dist.toFixed(2)} 3q=${tq.dist.toFixed(2)} (want ${dSide.toFixed(2)}/${dRear.toFixed(2)}/${d3q.toFixed(2)}) fov=${side.fovDeg.toFixed(1)}`);
+}
+testShowroomRoute();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -545,6 +545,7 @@ export class RallyHud {
       this._accSlow = 0;
       this._pollMenu();
       if (this.mode === 'FULL') this._drawMeta(ctx);
+      this._drawRollover(ctx);
       if (this.top() !== 'hud') this._drawModal(ctx);
     }
     this._accWheel += dt;
@@ -579,6 +580,32 @@ export class RallyHud {
     this._clear({ x: r.x, y: r.y, w: r.w, h: r.h });
     frameRect(this.g, r.x, r.y, r.w, r.h, C.PANEL, true);
     drawText(this.g, line, r.x + 5, r.y + 3, 1, C.TEXT);
+  }
+
+  // ---------- 1b. rollover badge (src/car/rollover.js) ----------
+  // Same framed-panel language as the rest of the HUD, text through the translation
+  // layer (src/core/i18n.js) so both builds read it: ROLLED OVER / PRZEWRÓT. Drawn on
+  // the 8 Hz slow pass, under the progress strip, and only when the state changes.
+  _drawRollover(ctx) {
+    if (!this.g || !this.L || !ctx.car) return;
+    const r = ctx.car.rollover;
+    const bad = !!r && (r.state !== 'upright' || !!r.right);
+    const key = bad ? `${r.state}|${r.right ? 1 : 0}|${t('hud.rolled')}` : 'ok';
+    if (this._keys.roll === key) return;
+    this._keys.roll = key;
+    const P = this.L.prog;
+    const x = P.x, y = P.y + P.h + 5;
+    // Erase only what was drawn before, so the badge can never nibble a neighbour.
+    this._clear({ x: x - 3, y: y - 3, w: (this._rollW || 0) + 6, h: 22 });
+    this._rollW = 0;
+    if (!bad) return;
+    const label = r.right ? t('hud.righting') : (r.state === 'rolled' ? t('hud.rolled') : t('hud.side'));
+    const w = Math.max(96, textWidth(label, 1) + 12);
+    this._rollW = w;
+    frameRect(this.g, x, y, w, 16, C.PANEL, true);
+    this.g.fillStyle = r.state === 'rolled' || r.right ? C.RED : C.ORANGE;
+    this.g.fillRect(x + 3, y + 4, 3, 8);
+    drawText(this.g, `${label} ${Math.round(r.angleDeg || 0)}°`, x + 9, y + 4, 1, C.WHITE);
   }
 
   // ---------- 2. pace notes as wooden sign boards ----------
