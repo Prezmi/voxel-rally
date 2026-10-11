@@ -15,7 +15,8 @@ import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
 import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
 import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP, LIVERY_TEXEL, LIVERY_NUM, LIVERY_SAMPLE, liveryNumberRects, buildLiveryTexture } from '../render/car-livery.js';
-import { FxSystem, FX_CAPACITY, DUST_TUNE } from '../fx/fx.js';
+import { FxSystem, FX_CAPACITY, DUST_TUNE, shiftPop, POP_FLOOR, LIFT_THROTTLE } from '../fx/fx.js';
+import { BackfirePop, BACKFIRE, popVoice, crackTrain, shiftRpmN } from '../audio/backfire.js';
 import { bus } from '../core/events.js';
 import { PANEL_COUNT } from '../dirt/panel-dirt.js';
 import { makeTerrain } from '../world/terrain-gen.js';
@@ -3433,6 +3434,230 @@ function testTyreTreadRulerIsTheShippedWheel() {
     `wheels=4 parts=${parts} rubber=${rubberParts} bandTris=${bandTris} flankTris=${flankTris} shaped=${((100 * bandShaped) / Math.max(1, bandTris)).toFixed(0)}% flankCrown shared=${(flankNew / Math.max(1, flankTris)).toFixed(2)} old=${(flankOld / Math.max(1, flankTris)).toFixed(2)} plan=${plans[0] || '-'} | ${rows.slice(0, 5).join(' ')} gaps=[${gaps.join(' ')}]`);
 }
 testTyreTreadRulerIsTheShippedWheel();
+
+// ---------------------------------------------------------------- test 54
+// The backfire has a SOUND (queue P13): src/fx/fx.js has lit the exhaust flame off the
+// gearbox's 'shift' event for ages and nothing in the audio layer ever listened, so the
+// car fired a 150..350 ms fireball in total silence. T21/T26 own the flame side; this
+// check owns the crack, and above all that the two can never disagree: one gate
+// (fx.js shiftPop), one switch (settings.fx), one graph built once, and a pop that is
+// nothing but AudioParam ramps (docs/05 §1 "żadnego createOscillator() w pętli").
+class StubParam {
+  constructor(tag, log, v = 1) { this.tag = tag; this.log = log; this._v = v; }
+  get value() { return this._v; }
+  set value(v) { this._v = v; this.log.push({ tag: this.tag, kind: 'now', v, t: -1 }); }
+  _push(kind, v, t) {
+    if (!Number.isFinite(v) || !Number.isFinite(t)) throw new RangeError(`${this.tag} ${kind} NaN`);
+    this.log.push({ tag: this.tag, kind, v, t });
+    return this;
+  }
+  setValueAtTime(v, t) { return this._push('set', v, t); }
+  linearRampToValueAtTime(v, t) { return this._push('lin', v, t); }
+  // Real WebAudio throws for an exponential ramp to 0 — the stub must too, or the
+  // suite would bless an envelope the browser refuses.
+  exponentialRampToValueAtTime(v, t) {
+    if (!(v > 0)) throw new RangeError(`exponential ramp to ${v} on ${this.tag}`);
+    return this._push('exp', v, t);
+  }
+  setTargetAtTime(v, t, c) { return this._push('target', v, t); }
+  cancelScheduledValues(t) { return this._push('cancel', 0, t); }
+}
+class StubNode {
+  constructor(ctx, kind, params) {
+    this.ctx = ctx; this.kind = kind; this.uid = ctx.uid++;
+    ctx.created.push(kind);
+    for (const p of params) this[p] = new StubParam(`${kind}#${this.uid}.${p}`, ctx.log, p === 'Q' ? 1 : 1);
+  }
+  connect(dst) { this.ctx.wires.push(`${this.kind}#${this.uid}->${dst && dst.kind ? dst.kind + '#' + dst.uid : 'destination'}`); return dst; }
+  disconnect() {}
+  start(t = 0) { this.starts = (this.starts || 0) + 1; this.ctx.starts.push({ tag: `${this.kind}#${this.uid}`, t }); }
+  stop(t = 0) { this.stops = (this.stops || 0) + 1; }
+}
+class StubCtx {
+  constructor() {
+    this.currentTime = 0; this.sampleRate = 48000; this.state = 'suspended';
+    this.created = []; this.log = []; this.wires = []; this.starts = []; this.buffers = 0;
+    this.uid = 0; this.resumeCalls = 0; this.data = null;
+    this.destination = { kind: 'destination', uid: -1, connect() {}, disconnect() {} };
+  }
+  resume() { this.resumeCalls++; this.state = 'running'; return Promise.resolve(); }
+  close() { return Promise.resolve(); }
+  createGain() { return new StubNode(this, 'gain', ['gain']); }
+  createBiquadFilter() { return new StubNode(this, 'biquad', ['frequency', 'Q', 'gain', 'detune']); }
+  createOscillator() { return new StubNode(this, 'osc', ['frequency', 'detune']); }
+  createBufferSource() { return new StubNode(this, 'bufsrc', ['playbackRate']); }
+  createDynamicsCompressor() { return new StubNode(this, 'comp', ['threshold', 'ratio', 'attack', 'release', 'knee']); }
+  createBuffer(ch, len, sr) {
+    this.buffers++;
+    const data = new Float32Array(len);
+    this.data = data;
+    return { numberOfChannels: ch, length: len, sampleRate: sr, getChannelData: () => data };
+  }
+}
+function testBackfireHasASound() {
+  const gaps = [];
+  const V = BACKFIRE;
+
+  // 1) nothing is built until a shift actually wants a pop (no AudioContext at boot).
+  const idle = new BackfirePop({ bus, settings });
+  if (idle.ctx || idle.nodes !== 0) gaps.push('the audio graph is built at boot, not at the first pop');
+
+  // 2) the plume and the crack answer the SAME question for the same event.
+  const car = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  const fx = new FxSystem({ scale: 1, bus });
+  fx.setLocalTips(defaultExhaust(car.params));
+  const ctx = new StubCtx();
+  const bf = new BackfirePop({ bus, settings, engine: car.params.engine, Ctor: function () { return ctx; } });
+  const events = [
+    { up: true, gear: 3, rpm: 6200, throttle: 1.0, demand: 0.80 },   // upshift: pops
+    { up: false, gear: 2, rpm: 3000, throttle: 1.0, demand: 0.60 },  // downshift, open throttle: silent
+    { up: false, gear: 2, rpm: 5200, throttle: 0.0, demand: 0.00 },  // downshift on lift: pops
+    { up: true, gear: 4, rpm: 950, throttle: 0.0, demand: 0.00 },    // idle upshift: the floor pop
+    null,                                                            // junk on the bus
+  ];
+  const agree = [];
+  for (const e of events) {
+    const p0 = fx.exhaust.pending;
+    bus.emit('shift', e);
+    const flame = fx.exhaust.pending > p0;              // what the plume accepted
+    const crack = bf.wants(e) > 0;                      // what the pop accepted
+    agree.push(`${flame === crack ? 'ok' : 'SPLIT'}`);
+    if (flame !== crack) gaps.push(`flame/crack disagree on ${JSON.stringify(e)}`);
+    fx.exhaust.pending = 0;
+  }
+  if (shiftPop({ up: false, throttle: LIFT_THROTTLE - 0.01 }) < POP_FLOOR) gaps.push('the gate floor is not reachable');
+
+  // 3) a driven lap: every shift the gearbox announces is either popped or gated, and
+  //    the pop never lands on a chain that is still ringing.
+  const input = { throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+  let shifts = 0, flameBursts = 0, prevBurst = 0;
+  const p0 = bf.pops, g0 = bf.gated;
+  const off = bus.on('shift', () => { shifts++; });
+  drive(car, input, 8.0, (c) => {
+    fx.step(DT, c, 1);
+    if (fx.exhaust.burst > 0 && prevBurst <= 0) flameBursts++;
+    prevBurst = fx.exhaust.burst;
+    ctx.currentTime += DT;
+  });
+  off();
+  const accepted = shifts - (bf.gated - g0);
+  if (!(shifts > 0 && accepted > 0)) gaps.push(`no shift happened on the reference lap (shifts=${shifts})`);
+  if (bf.pops - p0 !== accepted) gaps.push(`${bf.pops - p0} pops for ${accepted} gate-accepted shifts (${shifts} total)`);
+  if (!(flameBursts > 0)) gaps.push('the plume never lit on the same lap');
+  if (flameBursts !== accepted) gaps.push(`${flameBursts} plume bursts for ${accepted} cracks`);
+  if (bf.stolen !== 0) gaps.push(`${bf.stolen} pops landed on a chain still ringing`);
+
+  // 4) the graph is built ONCE and a pop only moves AudioParams (docs/05 §1).
+  const built = ctx.created.length, starts = ctx.starts.length, evAfterBuild = ctx.log.length;
+  for (let i = 0; i < 30; i++) { bf.pop(0.3 + 0.02 * (i % 5), 0.5); ctx.currentTime += 0.5; }
+  if (bf.builds !== 1) gaps.push(`${bf.builds} graph builds for one layer`);
+  if (ctx.created.length !== built) gaps.push(`a pop created ${ctx.created.length - built} nodes`);
+  if (ctx.starts.length !== starts) gaps.push('a pop started a source: the loops must run continuously');
+  const nodes = ctx.created.length;
+  if (nodes !== bf.nodes) gaps.push(`nodes counted ${bf.nodes} but built ${nodes}`);
+  if (nodes > V.nodeBudget) gaps.push(`${nodes} nodes over the layer budget ${V.nodeBudget}`);
+  if (V.nodeBudget > 60) gaps.push('the layer budget exceeds docs/05 §10 (60 nodes for the whole mix)');
+  if (ctx.buffers !== 1) gaps.push(`${ctx.buffers} noise buffers: the grain is generated once`);
+
+  // 5) the envelope is legal WebAudio and click-free: every gain move ramps (never a
+  //    step to an audible value), the attack is never shorter than the floor, times
+  //    never go backwards, and no gain ever exceeds the bus level.
+  const perParam = new Map();
+  let steps = 0, shortAttack = 0, backTime = 0, hot = 0;
+  for (const e of ctx.log) {
+    if (!/\.gain$/.test(e.tag) || e.kind === 'cancel' || e.kind === 'now') continue;
+    const a = perParam.get(e.tag) || [];
+    a.push(e); perParam.set(e.tag, a);
+  }
+  for (const [tag, evs] of perParam) {
+    for (let i = 0; i < evs.length; i++) {
+      const e = evs[i];
+      if (e.v > V.level + 1e-6) hot++;
+      if (i > 0 && e.t < evs[i - 1].t - 1e-9) backTime++;
+      if (e.kind === 'set' && e.v > 0.001) steps++;
+      if (e.kind === 'exp' && i > 0) {
+        const dt = e.t - evs[i - 1].t;
+        if (dt < V.attackMin - 1e-9) shortAttack++;
+      }
+    }
+    const span = evs[evs.length - 1].t - evs[0].t;
+    if (span > 0 && evs.length > 4 && span / (evs.length / 4) > 40 * V.maxPopS) gaps.push(`${tag} automation ran away`);
+  }
+  if (steps) gaps.push(`${steps} gain steps to an audible value: a click on the bus`);
+  if (shortAttack) gaps.push(`${shortAttack} attacks shorter than ${V.attackMin} s`);
+  if (backTime) gaps.push(`${backTime} out-of-order automation events`);
+  if (hot) gaps.push(`${hot} gain events over the bus level ${V.level}`);
+  if (ctx.resumeCalls === 0) gaps.push('a suspended context was never asked to resume');
+
+  // 6) the voice itself, measured with no audio device at all.
+  let mono = true, bound = true, winMax = 0, trainMax = 0, gprev = -1;
+  for (let i = 0; i <= 10; i++) {
+    const s = i / 10;
+    const v = popVoice(s, s, V);
+    const nums = [v.gain, v.band, v.bandEnd, v.q, v.lowpass, v.thump, v.thumpGain, v.attack, v.decay, v.rate];
+    if (!nums.every(Number.isFinite)) bound = false;
+    if (v.gain < gprev - 1e-9) mono = false;
+    gprev = v.gain;
+    if (v.gain > V.level || v.gain < 0.02) bound = false;
+    if (v.thumpGain >= v.gain || v.bandEnd >= v.band) bound = false;
+    if (v.band < V.crackLo || v.band > V.crackHi) bound = false;
+    if (v.decay < V.decayLo || v.decay > V.decayHi || v.attack < V.attackMin) bound = false;
+    for (let r = 0; r < 20; r++) {
+      const tr = crackTrain(v, V);
+      if (tr.length < 1 || tr.length > V.cracksMax) bound = false;
+      if (tr[0].at !== 0) bound = false;
+      let end = 0;
+      for (let k = 1; k < tr.length; k++) {
+        if (tr[k].at - tr[k - 1].at < Math.max(V.crackGapMin, tr[k - 1].decay) - 1e-9) bound = false;
+      }
+      for (const k of tr) {
+        end = Math.max(end, k.at + k.decay);
+        if (k.gain > V.level || k.thumpGain > V.level) bound = false;
+        if (k.decay > V.maxPopS) bound = false;
+      }
+      if (end > V.maxPopS + 1e-9) bound = false;
+      winMax = Math.max(winMax, end);
+      trainMax = Math.max(trainMax, tr.length);
+    }
+  }
+  if (!mono || !bound) gaps.push('the pop voice is not monotone / out of bounds');
+  if (winMax > V.maxPopS) gaps.push(`a crack train outlasts the plume window (${winMax.toFixed(3)} s)`);
+
+  // 7) the switch is the player's own: settings.fx, read at pop time, no extra wiring.
+  const ev = { up: true, gear: 3, rpm: 6400, throttle: 1.0, demand: 0.9 };
+  const fxWas = settings.fx;
+  settings.fx = false;
+  const popsAtOff = bf.pops, evAtOff = ctx.log.length;
+  ctx.currentTime += 1.0;
+  bus.emit('shift', ev);
+  const offSilent = bf.pops === popsAtOff && ctx.log.length === evAtOff && bf.silenced() === true;
+  settings.fx = true;
+  ctx.currentTime += 1.0;
+  bus.emit('shift', ev);
+  const onHeard = bf.pops === popsAtOff + 1 && ctx.log.length > evAtOff;
+  settings.fx = fxWas;
+  if (!offSilent) gaps.push('the crack plays with fx off');
+  if (!onHeard) gaps.push('the crack does not follow settings.fx back on');
+
+  // 8) the same determinism rule as the particle field: no Math.random in audio.
+  const src = readFileSync(new URL('../audio/backfire.js', import.meta.url), 'utf8');
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  const head = code.slice(0, code.indexOf('_ensure() {'));
+  if (/Math\.random/.test(code)) gaps.push('Math.random in the audio path (a replay must sound identical)');
+  if (/create(Gain|Oscillator|BiquadFilter|BufferSource|DynamicsCompressor)\(/.test(head)) gaps.push('nodes are built outside _ensure()');
+  if (/\bfetch\(|decodeAudioData|\.mp3|\.wav|\.ogg|XMLHttpRequest/.test(code)) gaps.push('the pop loads audio data instead of synthesizing it (docs/05 §0)');
+  const main = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  if (!/new BackfirePop\(\{[^}]*settings/.test(main)) gaps.push('main.js does not hand the pop layer settings.fx');
+  if (!/backfire\.arm\(/.test(main)) gaps.push('main.js never arms the layer on a user gesture');
+  const fxSrc = readFileSync(new URL('../fx/fx.js', import.meta.url), 'utf8');
+  const onShiftBody = fxSrc.slice(fxSrc.indexOf('onShift(e) {'), fxSrc.indexOf('onShift(e) {') + 420);
+  if (!/shiftPop\(/.test(onShiftBody)) gaps.push('ExhaustFx.onShift went back to its own inline throttle rule');
+
+  check('T54 the backfire makes a sound: one gate and one switch with the flame plume, a synthesized crack whose graph is built once at the first pop, no node created per pop, an envelope with no clicks and no stolen chain, and silence with fx off',
+    gaps.length === 0,
+    `shifts=${shifts} accepted=${accepted} pops=${bf.pops} gated=${bf.gated} muted=${bf.muted} stolen=${bf.stolen} flameBursts=${flameBursts} gate=${agree.join('')} nodes=${nodes}/${V.nodeBudget} chains=${V.chains} builds=${bf.builds} buffers=${ctx.buffers} resume=${ctx.resumeCalls} trainMax=${trainMax} window=${winMax.toFixed(3)}s<=${V.maxPopS} gainMax=${V.level} clicks=${steps}/${shortAttack}/${backTime}/${hot} gaps=[${gaps.join(' ')}]`);
+}
+testBackfireHasASound();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

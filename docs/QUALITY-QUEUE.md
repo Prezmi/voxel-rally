@@ -12,6 +12,20 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
+- [ ] P53 · two audio graphs and no mixer: `BackfirePop` ends its chain at `ctx.destination`
+      (`src/audio/backfire.js:245`), while `src/game/voice.js:236` builds its own context on the
+      speechSynthesis-less fallback — so a page can hold **two** AudioContexts with no shared
+      `BUS_MAIN → COMP → LIMITER` (docs/05 §1, §10) and no ducking, i.e. the co-driver never
+      ducks the crack by the 3 dB the docs ask for. One context, one bus, one limiter is owed.
+- [ ] P54 · the crack ignores where the camera is: the pop plays at a fixed `BACKFIRE.level`
+      (`src/audio/backfire.js:36`) for every camera mode and every distance, so `ONBOARD`/`BUMPER`
+      (the lamps and tips sit *behind* the lens) and a `CINEMATIC`/`FREE` view 100 m off hear the
+      same bang as a chase cam at 6 m — the layer needs a camera/distance term fed per pop.
+- [ ] P55 · `settings.fx` is now two switches in one: the EFEKTY row gates the particle field *and*
+      the backfire (`src/audio/backfire.js:152`), so a player cannot have flames off and the exhaust
+      note on, and there is no volume/master row anywhere (no `settings.volume`, no i18n key) — the
+      audio half needs its own row in Ustawienia like every other setting.
+
 - [ ] P50 · the showroom pose is measured from the car bbox at the moment it is asked for, so a slow
       model fetch frames empty ground: the P12 proof pass captured a **sky-only frame** with
       `?showroom=1&view=three-quarter&sheetDist=3` (`[showroom] ... cam 11.96,20.97,2.19 look
@@ -227,6 +241,52 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P13 · backfire flames have no audio cue; add a short procedural pop through the
+      existing audio layer, gated by the same `fx` setting
+      · done — the flame has been firing off the gearbox for ages and the car was silent: `car/powertrain.js:42`
+      shouts `'shift'` on the bus, `src/fx/fx.js` turns it into the plume, and **nothing in the repo ever
+      listened on the audio side** (`src/audio/` did not exist; the only WebAudio in the game is the
+      co-driver's fallback click). So the item was not "add a cue" but "open the layer", and it was built
+      where docs/05 says it must be built: **`src/audio/backfire.js`** (new) synthesizes everything —
+      one generated 2 s noise loop + `chains 3` pop chains (noise → bandpass → lowpass 6 kHz → gain, plus a
+      sine thump per chain) + master gain + limiter, `BACKFIRE` `:32` is the whole voice as data
+      (`crackLo/Hi 900/2400 Hz`, `lowpass 6200`, `thump 52..88 Hz`, `level 0.30`, `decay 55..145 ms`,
+      `nodeBudget 20` against docs/05 §10's 60 for the whole mix). `popVoice(load, rpmN)` `:72` and
+      `crackTrain(v)` `:97` are THREE-free and canvas-free, so node measures the envelope: a backfire is a
+      short **train** of 1-3 cracks (`cracksMax 3`), each starting only after the previous envelope ends
+      (`crackGapMin 0.022` + `gap >= prev.decay`), because two overlapping envelopes on one chain get
+      truncated by the next `setValueAtTime` — which is a click, exactly what docs/05 §10 forbids. The graph
+      is built **once and lazily** at the first pop (`_ensure()` `:213`, `builds`/`buffers` audited), so a
+      stage that never shifts gear never touches WebAudio, and afterwards a pop moves nothing but params:
+      the chains' noise loops and thump oscillators run continuously and the gain owns the sound, so
+      `pop()` `:163` creates 0 nodes and starts 0 sources. The noise is xorshift, not `Math.random`
+      (same determinism rule as `src/fx/fx.js`). **One gate**: `shiftPop()` (`src/fx/fx.js:42`, with
+      `LIFT_THROTTLE` `:20`, `POP_FLOOR` `:23`, `rpmNorm` `:28`) now answers for both media — an upshift
+      always pops, a downshift only on throttle lift — and `ExhaustFx.onShift` `:124` calls it instead of
+      keeping its own inline throttle rule, so a crack without a plume (or the reverse) is now
+      structurally impossible; `POP_FLOOR` also fixed a real defect the old rule had (a lifted clutch at
+      idle passed the gate but priced a 0-gain envelope, i.e. a silent pop). **One switch**: `silenced()`
+      `:152` reads `settings.fx` at pop time — the very flag the render loop re-arms for the pools — so the
+      EFEKTY row silences the bang with no extra wiring; `src/main.js:351` constructs the layer with
+      `bus`/`settings`/`car.params.engine`, `:352` arms it on the first pointer/key gesture (autoplay
+      policy), `:840` exposes it on `__rally`. New check **T54** (`src/debug/tests.js:3497`, check at
+      `:3656`) drives all of it through a stub WebAudio implementation that throws on an exponential ramp
+      to 0 like the real API: flame and crack agree event by event on 5 synthetic shifts *and* on a real
+      8 s driven lap (4 gate-accepted shifts = 4 pops = 4 plume bursts, 2 gated), nothing is built at boot,
+      one build and one noise buffer for the layer's life, 30 further pops create **0 nodes and start 0
+      sources**, 20 nodes stays under the budget (and the budget under docs' 60), and the measured
+      envelope has 0 steps to an audible value, 0 attacks under 5 ms, 0 out-of-order automation, 0 gains
+      over the bus level, 0 chains stolen while still ringing (`stolen 0`) and a 0.338 s worst-case train
+      inside the 0.34 s ceiling; with `settings.fx = false` an accepted shift moves **zero** params, with
+      it back on it moves one pop, and the source guards keep `Math.random`, `fetch`/`decodeAudioData`/
+      `.mp3|.wav|.ogg` and any node construction outside `_ensure()` out of the file. Proof: `node
+      src/debug/tests.js` **65/65 passed** (64 before, +1), `tools/smoke.mjs` drive clean with no NaN, and
+      a browser boot check (headless Chrome console, `?frames=400&shot=1&q=LOW`, no screenshot spent on a
+      non-visual item) logs the streaming/car layers with no uncaught error while the audio layer is wired
+      in, so the context and its noise buffer are created legally. What the same layer exposes is filed as
+      P53-P55: it ends at `ctx.destination` instead of a shared BUS_MAIN next to voice.js's own context, it
+      has no camera/distance term, and `fx` is now a particle *and* an audio switch with no volume row.
 
 - [x] P12 · tyres have no tread relief once caked; add a cheap normal or relief term in
       the tyre dirt shader in `src/render/carMesh.js`

@@ -18,3 +18,32 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T18:00:24.303Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+## Item chosen: P12 (lowest open P number)
+
+> `P12 · tyres have no tread relief once caked; add a cheap normal or relief term in the tyre dirt shader in src/render/carMesh.js`
+
+The relief term itself was already in HEAD (landed unrecorded by `769d1da`) — but measuring it against the **shipped asset** showed it was drawn in the wrong place: `attachTyreDirt` built its own `treadPlan(halfW, rMax)` from the one primitive it patched, and the shader normalizes radius and axial position by that ruler, so the outboard rubber ring (r 0.21–0.25 m, own rMax 0.25) read `rr ≈ 1`, was declared the tread, and drew **27 fat lugs across the flank of every wheel** at a pitch that did not line up with the 38 lugs of the rolling band. The ruler is now the wheel.
+
+## Changes
+
+- `src/render/tyre-tread.js:95` — new `wheelTreadPlan(sizes)`: folds the wheel's rubber-family extents into one bbox (narrowest extent = rolling axis, widest two = tyre radius); degenerate-bbox guard note at `:49`
+- `src/render/carMesh.js:298-299` — the wheel loop collects the rubber family and folds **one plan per wheel**; `:513` `geometrySize()`; `:530` patcher signature now takes `wheelPlan`; `:545` `plan = wheelPlan || wheelTreadPlan(...)`; `:554` `uTyreDims` now reads the folded ruler
+- `src/debug/tests.js:3332` / check at `:3431` — new **T53**: samples every triangle centroid of the shipped `rally_v2.glb` wheels the way the fragment shader does; pins one identical plan across all four wheels (rMax 0.350 m, halfW 0.170 m, 38 lugs), the rolling band keeps its relief, the flank stays smooth, and keeps the per-part ruler as a live counter-proof so reverting the fold fails
+- `src/debug/tests.js:3089` — T46's source guard now demands the shared plan by name (stricter, not weaker)
+- `docs/QUALITY-QUEUE.md` — P12 moved to Done with the measurement; new open items P50 (showroom pose measured before the car is placed → sky-only frame), P51 (voxel-drum corner radius stretches the lug pitch 58→72 mm), P52 (T46 measures a synthetic tyre no shipped wheel has)
+
+Measured effect: flank mean crown **0.49 → 0.12**; the rolling band keeps **47 %** of its 1152 triangles carrying a >0.15 rad normal tilt with the tyre caked 0.9 / wet 0.5 — the state P12 names. **0 added triangles** (asset body still 8412 tris, confirmed live in the browser log).
+
+## Visual pass (one, as allowed)
+
+`shots/quality-tyre-tread.png` (`?showroom=1&view=three-quarter&sheetDist=3&dirtseed=0.9`) — opened and judged: **the frame is empty, sky only.** A console-only follow-up (no second screenshot) showed the cause: the showroom posed `cam 11.96,20.97 look 10.10,27.05` for a car at `-0.06,24.53` — a 10 m pose shift, and in that same clean run `[car] asset car "rally_v2" ACTIVE (body tris=8412 fit=0.929 tyre=0.957 regions=10)`, so the patch builds and the miss is the harness (filed as P50). The tread's after-shot is still owed.
+
+## Test line (verbatim)
+
+```
+64/64 passed
+```
+
+Commit `d08eea2 quality loop: the tyre's tread ruler is the wheel, not the part - 27 lugs off the flank, relief kept on the rolling band (queue P12)` — local only, no push. (`shots/` is gitignored, so the png is not in the commit.)
+To https://github.com/Prezmi/voxel-rally.git
+   12bd431..d08eea2  main -> main

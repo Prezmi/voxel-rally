@@ -14,6 +14,37 @@ import { clamp, quatToMat3, mul3v } from '../core/math3.js';
 import { surface } from '../world/surfaces.js';
 
 export const STRIDE = 10;
+
+/** A downshift only pops below this throttle: an open throttle swallows the
+ *  afterburn (this is the number `ExhaustFx.onShift` used to carry inline). */
+export const LIFT_THROTTLE = 0.25;
+/** The quietest pop the layers voice: a lifted clutch at idle still cracks, just
+ *  barely, so a gate that passed never becomes a 0-gain envelope. */
+export const POP_FLOOR = 0.08;
+/** Fallback engine row for callers that only hold the event, never the car. */
+const SHIFT_ENGINE = { idle: 900, redline: 7000 };
+
+/** idle..redline -> 0..1, the same normalization the plume and the pop both use. */
+export function rpmNorm(rpm, engine) {
+  const e = engine || SHIFT_ENGINE;
+  return clamp((rpm || 0) - e.idle, 0, Math.max(1, e.redline - e.idle))
+    / Math.max(1, e.redline - e.idle);
+}
+
+/**
+ * THE gate a gear change has to pass to make a backfire at all. The flame plume
+ * here and the crack in src/audio/backfire.js both ask this one function, so the
+ * two can never disagree about whether a shift pops. An upshift always pops; a
+ * downshift only on throttle lift. The answer is the burst load (0..1, floored at
+ * POP_FLOOR) — the same 0.55 x rpm + 0.45 x demand blend the plume prices with —
+ * or 0 for "no pop".
+ */
+export function shiftPop(e, engine) {
+  if (!e) return 0;
+  if (!(e.up || (e.throttle || 0) < LIFT_THROTTLE)) return 0;   // downshift needs a lift
+  const load = 0.55 * rpmNorm(e.rpm, engine) + 0.45 * clamp(e.demand || 0, 0, 1);
+  return clamp(Math.max(POP_FLOOR, load), 0, 1);
+}
 export const F = { X: 0, Y: 1, Z: 2, VX: 3, VY: 4, VZ: 5, LIFE: 6, TTL: 7, SIZE: 8, HEAT: 9 };
 
 /** Default exhaust tip offsets (car-group local: x fwd, y up, z lateral, ground
@@ -87,9 +118,10 @@ export class ExhaustFx {
   }
 
   onShift(e) {
-    if (!e) return;
-    const lift = e.up || (e.throttle || 0) < 0.25;   // downshift needs a lift to pop
-    if (!lift) return;
+    // One gate for both media: src/audio/backfire.js asks shiftPop() the same
+    // question, so a plume without a crack (or a crack without a plume) is
+    // structurally impossible.
+    if (!shiftPop(e, this._engine)) return;
     this.pending++;
     if (e.up) this.pUp++;
     this.pRpm = e.rpm || 0;
@@ -99,8 +131,9 @@ export class ExhaustFx {
   /** `tips` is 6 world coords: [lx,ly,lz, rx,ry,rz] of the two exhaust nodes. */
   step(dt, car, tips) {
     const P = this.pool, d = P.data, e = car.params.engine;
+    this._engine = e;
     const rpm = clamp(car.rpm || this.pRpm || e.idle, 0, e.redline);
-    const rpmN = clamp((rpm - e.idle) / Math.max(1, e.redline - e.idle), 0, 1);
+    const rpmN = rpmNorm(rpm, e);
     const thr = this.throttle || 0;
 
     // High load keeps a faint glow alive at the tips even between shifts.

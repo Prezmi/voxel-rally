@@ -24,6 +24,7 @@ import { bus } from './core/events.js';
 import { DirtSystem } from './dirt/dirt.js';
 import { attachDirtLens } from './render/dirt-lens.js';
 import { FxSystem } from './fx/fx.js';
+import { BackfirePop } from './audio/backfire.js';
 import { buildFxView, syncFxView } from './render/fx-view.js';
 import { SURFACE_KEYS } from './world/surfaces.js';
 import { FrameLoop } from './core/loop.js';
@@ -342,6 +343,13 @@ async function main() {
   fx.env.sun = Math.max(0.15, 1 - Math.abs((cfg.hasTod ? cfg.tod : climate.tod) - 0.5) * 1.9);
   const fxView = buildFxView(fx);
   renderer.scene.add(fxView.group);
+  // The sound half of the same backfire (docs/05 §5, queue P13): the gearbox shouts
+  // 'shift' on the bus, src/fx turns it into flames and this turns it into a short
+  // synthesized crack. One gate (fx.js shiftPop) and one switch (settings.fx, read at
+  // pop time), so the EFEKTY row can never leave a bang behind the flames. The graph is
+  // built lazily at the first pop, so a stage that never shifts pays nothing.
+  const backfire = new BackfirePop({ bus, settings, engine: car.params.engine });
+  backfire.arm(window);
   const view3d = new ChaseCamera(renderer);
   const lensView = attachDirtLens(renderer);
   dirt.lens.setAmount(settings.lensDirt);
@@ -829,7 +837,7 @@ async function main() {
     requestAnimationFrame(() => requestAnimationFrame(flush));
   }
   loop.attach((fn) => renderer.renderer.setAnimationLoop(fn));
-  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice, fx, fxView, showroom: cfg.showroom ? { view: cfg.viewName, pose: () => sheetPose } : null };
+  window.__rally = { car, stage, loop, settings, renderer, stream, view, dirt, lensView, stageRun, rally, ghost, notes, voice, fx, fxView, backfire, showroom: cfg.showroom ? { view: cfg.viewName, pose: () => sheetPose } : null };
 }
 
 // The showroom's flat pad: a plain quad under the car, no chunks, no props. The dirt
