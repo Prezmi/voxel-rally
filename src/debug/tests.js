@@ -35,6 +35,7 @@ import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
   radialBlurAmount, sunVisibility } from '../render/post/tune.js';
+import { MODEL_QUEUE, ModelQueue, nextBackoffMs } from '../render/model-queue.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle, shaftWallAlpha, shaftPeak } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
@@ -2807,6 +2808,108 @@ function testTouchLayoutIsMirroredGeometry() {
     `${fits} viewport x handedness configs, ${mirrors} mirrored rects, min tap target ${minHit} px, min edge clearance ${minGapArea} px | 844x390 steer ${rightSteer} -> ${els['tg-steer'].style.left}, hand ${rightHand} -> ${els['tg-hand'].style.left} | placed ${placedRight}/${placedLeft} | gaps=[${gaps.join(' ')}]`);
 }
 testTouchLayoutIsMirroredGeometry();
+
+// -------------------------------------------------- model request scheduling (P41)
+// Two passes in a row recorded "the hero car is not in frame" and each blamed a
+// different thing (P33: the fetch failed although curl says 200; P41: the glb has
+// no named nodes). Both were the same event: at boot the game asks for three glbs
+// at once on a server that accepts with a 5-deep backlog (`LISTEN 0 5` on :8090,
+// HTTP/1.0 so no keep-alive) while ~60 module requests are in flight, so one
+// connection sits out a SYN retransmit and its fetch is aborted when the shot
+// harness stops the page. The scheduling policy is therefore code, not prose, and
+// this check runs it in node with a fake attempt and a fake timer.
+async function testModelRequestsAreQueuedAndRetried() {
+  const assetsSrc = readFileSync(new URL('../render/assets.js', import.meta.url), 'utf8');
+  const carSrc = readFileSync(new URL('../render/carMesh.js', import.meta.url), 'utf8');
+  const gaps = [];
+
+  // ---- 1. the published policy: serialized, retried, and bounded ----
+  if (MODEL_QUEUE.concurrency !== 1) gaps.push(`concurrency ${MODEL_QUEUE.concurrency}, the boot burst needs one model at a time`);
+  if (MODEL_QUEUE.attempts < 3) gaps.push(`only ${MODEL_QUEUE.attempts} attempts per model`);
+  if (MODEL_QUEUE.maxSessionAttempts <= MODEL_QUEUE.attempts) gaps.push('the session attempt budget does not exceed one request');
+  if (MODEL_QUEUE.backoffMs.some((v) => !(v > 0))) gaps.push('a retry backoff is not positive');
+  if (nextBackoffMs(1) >= nextBackoffMs(2)) gaps.push('the backoff does not grow between tries');
+  if (nextBackoffMs(9) !== MODEL_QUEUE.backoffMs[MODEL_QUEUE.backoffMs.length - 1]) gaps.push('the backoff runs off the end of its table');
+
+  // ---- 2. real scheduling behaviour, with an instrumented fake loader ----
+  const waits = [];
+  const q = new ModelQueue({ wait: (ms) => { waits.push(ms); return Promise.resolve(); } });
+  let live = 0, maxLive = 0, calls = 0;
+  const order = [];
+  const slow = (name) => async () => {
+    calls++; order.push(name); live++; maxLive = Math.max(maxLive, live);
+    await Promise.resolve(); live--;
+    return name;
+  };
+  const three = await Promise.all(['rally_v2', 'props', 'stage_blocks'].map((n) => q.run(n, slow(n))));
+  if (maxLive > MODEL_QUEUE.concurrency) gaps.push(`${maxLive} model requests in flight at once`);
+  if (three.join(',') !== 'rally_v2,props,stage_blocks') gaps.push(`the queue returned ${three.join(',')}`);
+  if (order.join(',') !== 'rally_v2,props,stage_blocks') gaps.push('the queue is not FIFO');
+  if (q.inflight !== 0 || q.queued !== 0 || q.waiting !== 0) gaps.push(`the queue left work behind (${q.inflight}/${q.queued}/${q.waiting})`);
+
+  // ---- 3. a transient failure is retried, and the recovery is what resolves ----
+  let flaky = 0;
+  const recovered = await q.run('flaky', async () => {
+    calls++;
+    flaky++;
+    if (flaky === 1) throw new Error('Failed to fetch');
+    return 'ok';
+  });
+  if (recovered !== 'ok') gaps.push('a model that failed once never recovered');
+  if (q.tries('flaky') !== 2) gaps.push(`flaky took ${q.tries('flaky')} tries`);
+  const flakyWaits = waits.slice();
+  if (flakyWaits.length !== 1 || flakyWaits[0] !== nextBackoffMs(1)) {
+    gaps.push(`the retry did not wait exactly one backoff of ${nextBackoffMs(1)} ms (${flakyWaits.join(',')})`);
+  }
+
+  // ---- 4. a hard failure stops after `attempts`, and stays retryable later ----
+  const hard = await q.run('missing', async () => { calls++; throw new Error('404'); }).then(
+    () => { gaps.push('a permanently missing model resolved as if it loaded'); return null; },
+    (e) => e && e.message);
+  if (hard !== '404') gaps.push(`the last error reported was "${hard}"`);
+  const hardTries = q.tries('missing'), hardWaits = waits.length - flakyWaits.length;
+  if (hardTries !== MODEL_QUEUE.attempts) gaps.push(`missing took ${hardTries} tries of ${MODEL_QUEUE.attempts}`);
+  if (hardWaits !== MODEL_QUEUE.attempts - 1) gaps.push(`${hardWaits} backoffs for ${hardTries} tries`);
+  if (!/404/.test(q.lastFailure('missing'))) gaps.push('the recorded failure reason is empty');
+  let revived = 0;
+  const secondShot = await q.run('missing', async () => { revived++; return 'back'; });
+  if (secondShot !== 'back' || revived !== 1) gaps.push('a failed name can never be asked again');
+
+  // ---- 5. the session budget bounds it: no infinite retry loop ----
+  const bounded = new ModelQueue({ attempts: 2, maxSessionAttempts: 3, wait: () => Promise.resolve() });
+  let asks = 0;
+  const fail = async () => { asks++; throw new Error('gone'); };
+  for (let round = 0; round < 3; round++) {
+    await bounded.run('gone', fail).catch(() => {});
+  }
+  const budgetErr = await bounded.run('gone', fail).then(() => '', (e) => e && e.message);
+  if (asks !== 3) gaps.push(`the budget let ${asks} asks through for one name`);
+  if (!/attempt budget/.test(budgetErr)) gaps.push(`past the budget the error was "${budgetErr}"`);
+
+  // ---- 6. two callers asking for one model share one request ----
+  const dup = new ModelQueue({ wait: () => Promise.resolve() });
+  let dupAsks = 0;
+  const [a, b] = await Promise.all([
+    dup.run('props', async () => { dupAsks++; return 1; }),
+    dup.run('props', async () => { dupAsks++; return 2; }),
+  ]);
+  if (dupAsks !== 1 || a !== 1 || b !== 1) gaps.push(`the same name was requested ${dupAsks} times`);
+
+  // ---- 7. the loader wires this up, and stops blaming the asset for a fetch ----
+  if (!/from '\.\/model-queue\.js'/.test(assetsSrc)) gaps.push('assets.js does not use the model queue');
+  if (!/queue\.run\(/.test(assetsSrc)) gaps.push('assets.js fires its request outside the queue');
+  if (!/cache\.delete\(key\)/.test(assetsSrc)) gaps.push('a failed load stays cached: one starved connection pins the fallback for the session');
+  if (!/nodes\.reason\s*=/.test(assetsSrc) || !/nodes\.source\s*=/.test(assetsSrc)) gaps.push('loadModelNodes does not report which failure it was');
+  if (/return new Map\(\);/.test(assetsSrc)) gaps.push('the scan-failure path throws away the reason');
+  if (!/loader: \$\{/.test(carSrc) || /no named nodes in the glb/.test(carSrc)) {
+    gaps.push('carMesh still guesses at the cause instead of reporting the loader reason');
+  }
+
+  check('T44 model requests are serialized, retried and bounded, and a failed load reports WHICH failure it was: one model fetch at a time, >= 3 tries with a growing backoff, a transient failure recovers, a hard failure stops at its session budget, one name is asked once, a failure is never cached, and the car log quotes the loader reason instead of blaming the glb',
+    gaps.length === 0,
+    `concurrency ${MODEL_QUEUE.concurrency}, attempts ${MODEL_QUEUE.attempts}, backoff ${MODEL_QUEUE.backoffMs.join('/')}, budget ${MODEL_QUEUE.maxSessionAttempts} | max in flight ${maxLive}, order ${order.join('>')} | flaky recovered in 2 tries after ${flakyWaits.join('/')} ms | hard failure after ${hardTries} tries and ${hardWaits} backoffs | budget asks ${asks}, error "${budgetErr}" | dup asks ${dupAsks} | ${calls} fake loads | gaps=[${gaps.join(' ')}]`);
+}
+await testModelRequestsAreQueuedAndRetried();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

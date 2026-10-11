@@ -1,0 +1,20 @@
+2026-10-11T14:00:16.864Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+Warning: Extension package "builtin:mcp": Extension /home/patryk/.pi/agent/npm/node_modules/pi-mcp-extension/src/index.ts registers command `/mcp`, so built-in extension `mcp` was not loaded. To use `mcp`, run `pi config` and make sure it is enabled under Built-in extensions, then disable or remove the existing extension. We recommend only having one or the other loaded at a time.
+bili: spawned proxy exited before becoming healthy — re-checking for a late-publishing listener on port 18787 before failing
+2026-10-11T14:00:17.502Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:17.703Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:17.905Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:18.105Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:18.306Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:18.508Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:18.710Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:18.912Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:19.272Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:19.473Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:19.674Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:19.875Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:20.076Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:20.277Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+2026-10-11T14:00:20.478Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
+bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
+bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions

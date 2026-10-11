@@ -17,3 +17,17 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T13:00:20.675Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen (lowest open P): P10** — "the left-handed touch layout is CSS-only and unverified; make it a real mirrored layout and prove it with a shot".
+
+**Changes**
+
+- `src/game/touch-layout.js` (new, 282 lines) — the overlay as pure geometry: `MIN_HIT`/`TOUCH_BAND`/`BAND_MAX` `:30,:35,:38`, one table per orientation with *derived* offsets `PAD_TABLE :78`, `layoutDefects() :132`, `padRects() :160` (bounded fit search `:224`, analog-plank-only squeeze `:214`), the exact mirror `x' = W − x − w` applied once `:237`, `applyPadLayout() :254`.
+- `src/game/touch.js` — STYLE now holds material only, every `#touch-ui.lefty` rule, `scaleX(-1)`, `--sa-*`, `--edge` and the pad widths/anchors are gone (`:53`, `:69`); `band() :188`, safe-area probe `:191`, resolve-and-apply `_layout() :208`, `?hand=` hook `:243`, resize/orientation re-layout `:289`, `setHandedness()` re-lays out instead of toggling a class `:386`.
+- `src/main.js:348` — HUD lifts by `input.touch.band()` instead of a bare 240; `:516` re-applies on resize.
+- `src/debug/tests.js:2723` check at `:2805` — new **T43**: 11 real viewport configs × both handednesses (198 mirrored rects) with zero defects from the model's own validator, pixel-exact mirror, sides really swap, nothing past `TOUCH_BAND + bottom inset`, band 240..280, min tap target 72 px, stub DOM receives the rects (9/9; steer 55px → 575px on flip), and the CSS banned from taking geometry back. Two real bugs found and fixed by the numbers: at `--s:.8` the portrait throttle and brake overlapped, and a 44 px notch inset slid the utility rail across the brake pad.
+- `docs/QUALITY-QUEUE.md` — P10 moved to Done; three new open items filed from the same frame: **P41** (`rally_v2` INACTIVE with "no named nodes", `src/render/carMesh.js:191` — a second failure mode on top of P33), **P42** (no HUD at all at 844x390 with the overlay on), **P43** (the solver's one unsatisfiable portrait config, 320x568 + 44 px side insets).
+- Visual proof, one headless pass, read back and judged: `shots/quality-touch-lefty.png` (844x390, driving, `?touch=on&hand=left&q=LOW`) — throttle/brake/handbrake under the left thumb, STEER plank with knob and dead zone on the right, RESET/CAM/MENU mirrored above it, no overlap, every label legible.
+
+Commit `30d1e9e quality loop: the thumb overlay is geometry now - left hand is a computed mirror, 72 px floor, band reported to the HUD (queue P10)` (local only, no push). Tests, verbatim: `54/54 passed` (53 before, +1); `tools/smoke.mjs` drive clean, no NaN.
+To https://github.com/Prezmi/voxel-rally.git
+   ac77f69..30d1e9e  main -> main

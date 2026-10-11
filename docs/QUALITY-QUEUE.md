@@ -12,13 +12,22 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P41 · the hero car is *still* not in frame, for a second and different reason: this
-      run's capture logs `[car] asset car "rally_v2" INACTIVE -> procedural car (no named
-      nodes in the glb)` (`src/render/carMesh.js:191`), where P33 recorded
-      `unavailable (Failed to fetch)` (`src/render/assets.js:23`). Two failure modes, one
-      symptom: either the shipped `assets/models/rally_v2.glb` lost its node names in the
-      last re-export, or the loader's node lookup and `car-asset.js` disagree. Every visual
-      pass since has been judging the procedural fallback
+- [ ] P44 · the dev server is what the new model queue is working around: `"dev": "python3 -m http.server 8090"`
+      (`package.json:8`) is an `HTTPServer` with a **5-deep accept queue** (`ss` shows `LISTEN 0 5`) speaking
+      HTTP/1.0 (no keep-alive), and a boot opens ~60 module requests - 60 concurrent requests all answer
+      200 but the slowest took **1.3 s**, i.e. every connection past the backlog waits out a SYN
+      retransmit. The client now queues and retries, but every boot still pays ~1 s of module stalls;
+      a stdlib threaded handler with a bigger backlog + HTTP/1.1 keep-alive removes the cause, not the symptom
+- [ ] P45 · nothing in the game ever re-asks for a model: `loadModel` no longer caches a failure
+      (`src/render/assets.js:79`), but `streaming.js:199,208` asks for `props`/`stage_blocks` exactly once per
+      session and `carMesh.js:218` once per car view, so a failure that outlives the queue's 3 attempts still
+      leaves everything procedural with no second chance - a settle/retry hook at the consumer (or on the next
+      quality or camera change) would recover instead of waiting for a page reload
+- [ ] P46 · the shot harness still ends on a timer, and the hero car now wins it by 13 ms: in the P41 proof
+      pass the `[car] ... ACTIVE` line landed at +13.4 s of page life and the run's last log line 13 ms later,
+      so a slightly heavier boot puts the frame back on the procedural car **with no failure logged at all**.
+      Publish a "models settled" flag for `?frames=N&shot=1` to wait on (the sibling of P31's world-ready flag)
+
 - [ ] P42 · at a phone-landscape viewport (844x390, `?frames=700&shot=1&q=LOW`, the
       left-handed shot read back this run) the frame carries **no HUD at all**: no dial,
       no clock, no pace-note boards, with `hudMode` left at FULL and the touch band only
@@ -188,6 +197,47 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P41 · the hero car is *still* not in frame, for a second and different reason: this run's capture logs `[car] asset car "rally_v2" INACTIVE -> procedural car (no named nodes in the glb)` (`src/render/carMesh.js:191`), where P33 recorded `unavailable (Failed to fetch)` (`src/render/assets.js:23`). Two failure modes, one symptom: either the shipped `assets/models/rally_v2.glb` lost its node names in the last re-export, or the loader's node lookup and `car-asset.js` disagree. Every visual pass since has been judging the procedural fallback
+      · done - the item's own diagnosis was the third wrong one, and it kept reading as three different bugs
+      because the loader answers with the SAME empty node map for a lost fetch, for a scan that threw, and for
+      a file whose meshes carry no names. Measured, in order: parsing `assets/models/rally_v2.glb` headless
+      with the vendored three r169 `GLTFLoader.parse` plus the exact primitive fold `loadModelNodes` does
+      returns all 18 named nodes, 0 missing, merge fine - the glb never lost its names - and the same URL also
+      loads fine in a `?showroom=1` pass. The *driving* boot is what loses it: the page asks for `rally_v2.glb`
+      (698 kB), `props.glb` (255 kB) and `stage_blocks.glb` (1.25 MB) in one burst on top of ~60 ES-module
+      requests, on a server with a 5-deep accept queue and no keep-alive (filed as P44), so one connection
+      waits out a SYN retransmit and its fetch is still pending when the shot harness ends the page - that
+      abort is exactly what P33 recorded as `Failed to fetch`. `loadModel` then cached the rejection forever
+      and `carMesh` printed "no named nodes in the glb", which sent two passes hunting an asset bug that did
+      not exist. All three layers that were wrong are fixed: (1) **`src/render/model-queue.js`** (new,
+      THREE-free) makes the request policy data - `MODEL_QUEUE` `:31` concurrency **1** (one model fetch at a
+      time, so three glbs can no longer stack onto a boot that already saturates the accept queue),
+      `attempts 3` with a growing backoff (`nextBackoffMs` `:39`, 150/600 ms) and `maxSessionAttempts 6` so a
+      genuinely missing file cannot loop; `ModelQueue.run()` `:80` dedupes by name and `_pump` `:96` /
+      `_attempt` `:106` keep exactly `concurrency` attempts in flight, re-queueing a retry after its backoff
+      instead of parking a slot; (2) **`src/render/assets.js`** - one request is now `fetchModel()` `:33`,
+      which *rejects* on a lost fetch or an empty scene instead of resolving the fallback (that is what makes
+      a retry possible at all), `loadModel` `:63` runs it through the queue `:67` and reports the reason, and
+      any non-`glb` result is dropped from the cache `:79`, so one starved connection no longer pins the
+      procedural car for the session; `loadModelNodes` `:90` stamps the Map with `source`/`reason` `:97-98`,
+      separates fetch-lost from scan-threw `:138` from a file with no names `:147`, and stops throwing the
+      reason away on the scan path; (3) **`src/render/carMesh.js:223`** logs `loader: <reason>` - the cause the
+      loader actually saw - instead of guessing about the file. New check **T44** (`src/debug/tests.js:2821`,
+      check at `:2908`) runs the policy in node with an injected attempt and timer: concurrency is 1 and never
+      exceeded, order FIFO, a model that fails once recovers on try 2 after exactly `nextBackoffMs(1)`, a hard
+      failure rejects after exactly `attempts` tries with its reason recorded, a failed name can be asked
+      again later, the session budget stops the asking at 3 (`attempt budget (3) spent`), two callers asking
+      for one name get one request, and the loader and car sources still route through the queue, still
+      `cache.delete` a failure and never go back to blaming the glb. Proof, one headless pass read back:
+      `shots/quality-hero-car.png` - the exact route that used to fail (`?frames=700&shot=1&cam=CHASE&q=LOW`,
+      1600x900, fresh profile) - logs `[car] asset car "rally_v2" ACTIVE (body tris=8412 fit=0.929
+      tyre=0.957 regions=10)` with no `[assets] ... unavailable` line at all, and the frame carries the hero
+      car under the banner arch: boxy cabin with its roof hatch, snorkel on its own flank, white rear flap and
+      diffuser, wheels in their own materials. Frame cost untouched - no geometry path was edited, the asset
+      body is the same 8,412 tris the showroom passes already measured. What the pass exposed is filed as
+      P44-P46: the server is still the cause the client works around, nothing re-asks for a model once the
+      queue's attempts are spent, and the swap landed 13 ms before the harness ended the run.
 
 - [x] P10 · the left-handed touch layout is CSS-only and unverified; make it a real
       mirrored layout and prove it with a shot

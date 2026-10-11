@@ -216,7 +216,13 @@ function makeWheelPivots(pivots) {
 
 function adoptAssetCar(view, proceduralWheels) {
   return loadModelNodes(ASSET_CAR_MODEL).then((nodes) => {
-    if (!nodes || !nodes.size) { logAssetCar(false, 'no named nodes in the glb'); return false; }
+    if (!nodes || !nodes.size) {
+      // An empty map says nothing about the file - it is what the loader returns
+      // for a lost fetch just as much as for a nameless glb. Report the reason
+      // the loader recorded instead of re-blaming the asset every pass (P41).
+      logAssetCar(false, `loader: ${(nodes && nodes.reason) || 'empty node map'}`);
+      return false;
+    }
     const built = buildAssetBody(nodes, view.carParams);
     const wheelRecs = WHEEL_NODES.map((n) => nodes.get(n));
     const gone = WHEEL_NODES.filter((n, i) => !wheelRecs[i] || !wheelRecs[i].geometry || !wheelRecs[i].node);
