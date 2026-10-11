@@ -130,6 +130,21 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       `src/core/settings.js:149-163`) are re-derived only for `?q=` (`src/main.js:102-104`)
       — a player who saved LOW boots on MED render scale and keeps most of the cost
 
+- [ ] P15 · the sky reads as a pale near-white sheet in forest lanes with no blue and no visible sun,
+      see `shots/day-pass.png`; deepen the zenith blue, push the horizon haze and make the sun disc
+      and its glow bright enough that bloom is obvious through canopy gaps
+- [ ] P16 · block tiles on the verge still read as paving slabs along the right edge of the road;
+      shrink their span and lift there, or drop them entirely past the carriageway edge
+- [ ] P17 · with composer post on, `src/render/dirt-lens.js` is skipped entirely, so the wiper band and
+      the wet-film colour shift are lost; fold them into the composite or run the quad for those parts
+- [ ] P18 · `camera.js:102` and `main.js:585` both write the composer speed, pick one owner
+- [ ] P19 · shot-mode A/B probe in `src/main.js:659-662` pokes the dead `composer.shafts` shim instead of
+      the live `shaftsOn` flag
+- [ ] P20 · the procedural fallback car body `src/render/car-body.js` still uses the old planar livery UVs
+      and slate-blue glass, so a glb load failure smears the new livery
+- [ ] P21 · `src/debug/tests.js` T32 wording pins a four extra pass budget while the honest total is six
+      since the atmosphere pass landed, restate the pin explicitly
+
 ## Done
 
 <!-- the loop appends completed items here -->
