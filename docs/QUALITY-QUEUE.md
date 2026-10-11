@@ -12,6 +12,25 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
+- [ ] P41 · the hero car is *still* not in frame, for a second and different reason: this
+      run's capture logs `[car] asset car "rally_v2" INACTIVE -> procedural car (no named
+      nodes in the glb)` (`src/render/carMesh.js:191`), where P33 recorded
+      `unavailable (Failed to fetch)` (`src/render/assets.js:23`). Two failure modes, one
+      symptom: either the shipped `assets/models/rally_v2.glb` lost its node names in the
+      last re-export, or the loader's node lookup and `car-asset.js` disagree. Every visual
+      pass since has been judging the procedural fallback
+- [ ] P42 · at a phone-landscape viewport (844x390, `?frames=700&shot=1&q=LOW`, the
+      left-handed shot read back this run) the frame carries **no HUD at all**: no dial,
+      no clock, no pace-note boards, with `hudMode` left at FULL and the touch band only
+      214 px of 390. Something between `settings.hudMode`, `rally.setTouchInset` and
+      `uiScale` 2 drops the whole panel layer on a small landscape screen
+- [ ] P43 · the layout solver has no answer for a 320x568 portrait screen that also
+      reports 44 px side insets: 232 usable px cannot hold a 200 px drive cluster plus an
+      88 px steering plank, and `padRects` returns its best-effort layout with
+      `steer/hand` overlapping (`layoutDefects` reports it, which is why that config is
+      not in the T43 device table). Needs one more fit lever — a narrower portrait
+      handbrake, or moving the utility rail into the leftover column — not a wider floor
+
 - [ ] P38 · the livery sampler clamps the WHOLE atlas, not the sub-rect: `texture2D(uLivery,
       clamp(vLivUv, 0.03, 0.97))` (`src/render/carMesh.js:385`) against `FLANK_UV.u0 = 0.02`
       (`src/render/car-asset.js:77`) — the flank starts 0.01 atlas units *under* the clamp floor,
@@ -67,8 +86,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       ghost blobs (upper right and lower left of `shots/quality-night-beams.png`) sit in a
       frame where the key is already at dusk strength — `lensFlareAlpha` gates on the sun
       (`sunVis`/`sun`) with no dark-stage term
-- [ ] P10 · the left-handed touch layout is CSS-only and unverified; make it a real
-      mirrored layout and prove it with a shot
 - [ ] P11 · quality LOW now streams chunks to 250 m for the far vegetation band; confirm
       LOW frame time is not worse than MEDIUM and clamp if it is
 - [ ] P12 · tyres have no tread relief once caked; add a cheap normal or relief term in
@@ -171,6 +188,51 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P10 · the left-handed touch layout is CSS-only and unverified; make it a real
+      mirrored layout and prove it with a shot
+      · done — the item was right that nothing verified the overlay, and the reason was
+      structural: pad geometry lived in `#touch-ui` CSS (anchors, two `--s:.8` media
+      queries, and five `#touch-ui.lefty` rules whose cluster mirror was
+      `transform: scaleX(-1)` plus a counter-flip on every button). No layout engine runs
+      in node, so the suite could only ever assert that a class had been toggled. The
+      geometry moved into a pure module: **`src/game/touch-layout.js`** — one table per
+      orientation (`PAD_TABLE` `:78`) whose offsets are *derived* (`{after, gap}` /
+      `{above, gap}`, not coordinates, so a gap stays a gap once the 72 px floor
+      (`MIN_HIT` `:30`) starts disagreeing with a scaled number), resolved per viewport by
+      `padRects()` (`:160`), mirrored once at the end as an exact rect reflection
+      `x' = W - x - w` (`:237`), and validated by `layoutDefects()` (`:132`) inside a
+      bounded fit search that spends gaps then scale before it touches a pad size
+      (`GAP_STEPS`/`SCALE_STEPS` `:52`, `:47`; the analog plank may be squeezed, a tap
+      target never — `squeezeSteer` `:214`). `applyPadLayout()` (`:254`) writes the result
+      as inline `left/bottom/width/height`; **`src/game/touch.js`** no longer positions a
+      pad at all (STYLE `:53` keeps only material + in-pad parts, every `.lefty` rule,
+      `scaleX(-1)`, `--sa-*` and `--edge` gone), resolves on enable/resize/rotate
+      (`_layout()` `:208`, insets read through a probe `:191`), re-lays out on handedness
+      instead of toggling a class (`setHandedness` `:386`), and gained the `?hand=left`
+      verification hook (`:243`, `parseHandedness`); **`src/main.js:348`** now lifts the HUD
+      by what the layout reports (`input.touch.band()`, `:188`) instead of a bare 240, and
+      re-applies it on resize (`:516`). New check **T43** (`src/debug/tests.js:2723`, check
+      at `:2805`) walks 11 real viewport configs (notch landscape 844x390 with 47 px side
+      insets, notch portrait 390x844 with a 34 px home bar, 320x568, 915x412, tablets,
+      desktops) x both handednesses = 198 mirrored rects and pins: zero defects from the
+      model's own validator, left == mirror(right) pixel-exact for pads *and* group boxes,
+      drive pads really swap sides, no pad climbs past `TOUCH_BAND + bottom inset`, the
+      declared band stays in 240..280, the smallest tap target stays 72 px, the stub DOM
+      really receives the rects (9/9 boxes, steer 55px -> 575px when handedness flips), and
+      the CSS can never take ownership back (bans `scaleX(-1)`, `.lefty`, `--edge`,
+      `--sa-*`, the old pad widths). Two real bugs the numbers exposed and fixed on the
+      way: at `--s:.8` the portrait throttle and brake landed *on top of each other*, and a
+      44 px notch inset pushed the utility rail straight across the brake pad. Proof: one
+      headless pass read back — `shots/quality-touch-lefty.png` (844x390, driving, seed
+      default, `?touch=on&hand=left&q=LOW`) shows throttle + brake + handbrake under the
+      left thumb, the STEER plank with its knob and dead zone on the right, the
+      utility row above it with RESET/CAM/MENU in mirrored order, nothing overlapping and
+      every label legible over the road. Proof: `node src/debug/tests.js` **54/54 passed**
+      (53 before, +1), `tools/smoke.mjs` drive clean, no NaN. Filed from the same frame:
+      P41 (the asset car is out of frame again, now for *missing node names*, so P33's
+      fetch-failure diagnosis needs splitting), P42 (no HUD at all on that small landscape
+      frame), P43 (the solver's one known unsatisfiable portrait configuration).
 
 - [x] P9 · livery number roundel is hard to read past ~15 m; raise the decal resolution or draw
       the number as geometry so it reads at distance

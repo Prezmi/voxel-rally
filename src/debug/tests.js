@@ -24,6 +24,7 @@ import { buildPaceNotes, selectNotes } from '../game/pace-notes.js';
 import { signWord, bendKind } from '../game/sign-board.js';
 import { Input } from '../game/input.js';
 import { steerCurve, STEER_DEADZONE, dragToSteer, knobOffset } from '../game/touch.js';
+import { padRects, rectMap, applyPadLayout, layoutDefects, parseHandedness, TOUCH_BAND, BAND_MAX, MIN_HIT, PAD_CLS, GROUP_CLS } from '../game/touch-layout.js';
 import { settings, SETTINGS_KEY, LEGACY_SETTINGS_KEY, loadSettings, saveSettings, migrateSettings, qualityPreset, QUALITY, FAR_RADII, DRAW_DISTANCE_STEPS, cycleDrawDistance, cycleBloom, fogNearFor, fogFarFor } from '../core/settings.js';
 import { RallyHud } from '../game/hud-rally.js';
 import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguages, TEXT_BOXES } from '../core/i18n.js';
@@ -2710,6 +2711,102 @@ function testLiveryNumberReadsAtDistance() {
     `atlas ${LIVERY_TEXEL} | roundel ${disc.toFixed(1)} texels = ${(LIVERY_ROUND.r * 2 / (0.46 / 4.114)).toFixed(3)} m | min cap ${(capFrac * 100).toFixed(0)}% of the roundel, min stroke ${stroke} texels, cover ${(coverMin * 100).toFixed(0)}-${(coverMax * 100).toFixed(0)}%, spill ${spill.toFixed(2)}, rects ${rectsTotal} | min ${LIVERY_TEXEL >= 1024 ? 'ok' : 'low'} | aniso ${tex && tex.anisotropy} minFilter ${tex && tex.minFilter} mag ${tex && tex.magFilter} | drawn ${drawn.length} | sheetDist ${sc.dist} vs ${poseDefault.dist.toFixed(2)} | ${detail.join(' ')} | gaps=[${gaps.join(' ')}]`);
 }
 testLiveryNumberReadsAtDistance();
+
+// ---------------------------------------------------------------- touch layout (P10)
+// The left-handed overlay used to be five `#touch-ui.lefty` rules plus a scaleX(-1)
+// cluster and a counter-flip on its buttons: nothing could prove it, because no layout
+// engine runs in node. The geometry now lives in src/game/touch-layout.js, so the whole
+// overlay contract is assertable: real phone viewports x both handednesses must hold
+// every pad inside the screen and inside the band the HUD owns, never under the 72 px
+// minimum target, never on top of another pad, and the left-handed overlay must be the
+// exact mirror of the right-handed one, pad for pad.
+function testTouchLayoutIsMirroredGeometry() {
+  const touchSrc = readFileSync(new URL('../game/touch.js', import.meta.url), 'utf8');
+  const mainSrc = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  // Real configurations with the safe-area insets each one actually reports: a notch
+  // costs the left/right edges in landscape, a home bar costs the bottom in portrait.
+  const DEVICES = [
+    ['phone 667x375', 667, 375, {}],
+    ['phone 320x568', 320, 568, {}],
+    ['notch 844x390', 844, 390, { left: 47, right: 47, bottom: 0 }],
+    ['notch 390x844', 390, 844, { left: 0, right: 0, bottom: 34 }],
+    ['notch 896x414', 896, 414, { left: 44, right: 44, bottom: 0 }],
+    ['android 915x412', 915, 412, {}],
+    ['android 412x915', 412, 915, { left: 0, right: 0, bottom: 24 }],
+    ['tablet 1024x768', 1024, 768, {}],
+    ['tablet 768x1024', 768, 1024, {}],
+    ['desktop 1280x720', 1280, 720, {}],
+    ['desktop 1920x1080', 1920, 1080, {}],
+  ];
+  const gaps = [];
+  let minHit = 1e9, minGapArea = 1e9, mirrors = 0, fits = 0;
+  for (const [name, W, H, safe] of DEVICES) {
+    for (const hand of ['right', 'left']) {
+      const L = padRects({ width: W, height: H, handedness: hand, safe });
+      const R = padRects({ width: W, height: H, handedness: hand === 'left' ? 'right' : 'left', safe });
+      for (const g of layoutDefects(L)) gaps.push(`${name}/${hand}: ${g}`);
+      // exact mirror, every pad and both group boxes
+      const m = rectMap(L), r = rectMap(R);
+      for (const k in m) {
+        if (!r[k]) { gaps.push(`${name}/${hand}: ${k} has no mirror counterpart`); continue; }
+        if (m[k].x !== W - r[k].x - r[k].w || m[k].y !== r[k].y || m[k].w !== r[k].w || m[k].h !== r[k].h) {
+          gaps.push(`${name}/${hand}: ${k} is not the mirror (${m[k].x} vs ${W - r[k].x - r[k].w})`);
+        }
+      }
+      mirrors += Object.keys(m).length;
+      // the band the HUD is told about: never lower than the contract, never absurd
+      if (L.band < TOUCH_BAND || L.band > BAND_MAX) gaps.push(`${name}/${hand}: band ${L.band} outside ${TOUCH_BAND}..${BAND_MAX}`);
+      // the only thing allowed to push a pad up is the bottom inset it sits on
+      if (L.top > TOUCH_BAND + (safe.bottom || 0)) gaps.push(`${name}/${hand}: pads climb to ${L.top} px`);
+      if (L.handedness !== hand) gaps.push(`${name}: handedness reported as ${L.handedness}`);
+      // handedness is a real swap of sides, not a container turned inside out
+      if ((m.throttle.x - m.steer.x > 0) !== (hand === 'right')) gaps.push(`${name}: drive pads did not change side`);
+      for (const p of L.pads) if (p.hit) minHit = Math.min(minHit, p.w, p.h);
+      for (let i = 0; i < L.pads.length; i++) {
+        for (let j = i + 1; j < L.pads.length; j++) {
+          const a = L.pads[i].y + L.pads[i].h <= L.pads[j].y || L.pads[j].y + L.pads[j].h <= L.pads[i].y
+            ? Math.abs(L.pads[i].x - (L.pads[j].x + L.pads[j].w))
+            : Math.abs(L.pads[i].x + L.pads[i].w - L.pads[j].x);
+          minGapArea = Math.min(minGapArea, a);
+        }
+      }
+      fits++;
+    }
+  }
+  // the model has to reach the DOM, and handedness has to move it (stub root, no browser)
+  const els = {};
+  for (const cls of Object.values(PAD_CLS)) els[cls] = { style: {} };
+  for (const cls of Object.values(GROUP_CLS)) els[cls] = { style: {} };
+  const root = { style: {}, querySelector: (sel) => els[sel.slice(1)] || null };
+  const placedRight = applyPadLayout(root, padRects({ width: 844, height: 390, handedness: 'right', safe: { left: 47, right: 47 } }));
+  const rightSteer = els['tg-steer'].style.left, rightHand = els['tg-hand'].style.left;
+  const placedLeft = applyPadLayout(root, padRects({ width: 844, height: 390, handedness: 'left', safe: { left: 47, right: 47 } }));
+  if (placedRight !== 9 || placedLeft !== 9) gaps.push(`applyPadLayout placed ${placedRight}/${placedLeft} boxes of 9`);
+  if (rightSteer === els['tg-steer'].style.left || rightHand === els['tg-hand'].style.left) gaps.push('handedness did not move the pad boxes');
+  const lm = rectMap(padRects({ width: 844, height: 390, handedness: 'left', safe: { left: 47, right: 47 } }));
+  if (els['tg-steer'].style.left !== `${lm.steer.x}px` || els['tg-throttle'].style.left !== `${lm.throttle.x - lm.cluster.x}px`) {
+    gaps.push(`the DOM did not get the modelled rects (steer ${els['tg-steer'].style.left}, throttle ${els['tg-throttle'].style.left})`);
+  }
+  if (root.style['--s'] == null && root.style.setProperty === undefined) gaps.push('--s was never written from the resolved scale');
+  // the CSS must stop owning pad geometry, or the two owners can disagree again
+  const css = (touchSrc.match(/const STYLE = `([\s\S]*?)`;/) || [''])[1];
+  if (!css) gaps.push('the overlay style block is gone');
+  for (const forbidden of ['scaleX(-1)', '.lefty', 'width:calc(214px', 'width:calc(318px', 'width:calc(248px', '--sa-l', '--edge']) {
+    if (css.includes(forbidden)) gaps.push(`CSS still owns geometry: "${forbidden}"`);
+  }
+  if (!/padRects\(/.test(touchSrc) || !/applyPadLayout\(/.test(touchSrc)) gaps.push('touch.js no longer resolves and applies the layout');
+  if (!/this\._layout\(\)/.test(touchSrc.match(/setHandedness\([\s\S]{0,400}/)?.[0] || '')) gaps.push('setHandedness no longer re-lays out the overlay');
+  if (!/input\.touch\.band\(\)/.test(mainSrc)) gaps.push('main.js does not ask the layout how much band the HUD must keep');
+  if (parseHandedness('?touch=on&hand=left') !== 'left' || parseHandedness('?hand=RIGHT') !== 'right' || parseHandedness('?q=LOW') !== null) {
+    gaps.push('the ?hand= verification hook does not parse');
+  }
+  if (minHit < MIN_HIT) gaps.push(`a tap target shrank to ${minHit} px`);
+
+  check('T43 the thumb overlay is modelled geometry, not CSS: across real phone viewports and both handednesses no pad overlaps, leaves the screen, climbs over the HUD band or falls under the 72 px target, the left-handed layout is the exact mirror of the right-handed one, the boxes reach the DOM, and no scaleX(-1) mirror hack is left',
+    gaps.length === 0,
+    `${fits} viewport x handedness configs, ${mirrors} mirrored rects, min tap target ${minHit} px, min edge clearance ${minGapArea} px | 844x390 steer ${rightSteer} -> ${els['tg-steer'].style.left}, hand ${rightHand} -> ${els['tg-hand'].style.left} | placed ${placedRight}/${placedLeft} | gaps=[${gaps.join(' ')}]`);
+}
+testTouchLayoutIsMirroredGeometry();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -18,3 +18,30 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T12:00:20.887Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen:** P9 (lowest open P number) — “livery number roundel is hard to read past ~15 m; raise the decal resolution or draw the number as geometry so it reads at distance.”
+
+**Diagnosis first (measured, not assumed):** in a 512 atlas the 0.35 m roundel is only **20 texels across**, the digit 11–14 texels with **1–2 texel strokes**, and the texture was built with `minFilter = NearestFilter`, `generateMipmaps = false` — so past ~15 m the sampler dropped whole strokes at random. Resolution was only one of three faults.
+
+**Changes**
+- `src/render/car-livery.js:38` — `LIVERY_TEXEL` 512 → **1024** (roundel 40 texels; 4 MB + 1.3 MB mips per car instead of 1 MB).
+- `src/render/car-livery.js:57` — `LIVERY_NUM` (block/gap/bold/margin) + `LIVERY_SAMPLE` (mips, aniso) dials.
+- `src/render/car-livery.js:104` — `liveryNumberRects(carId)`: the number as **geometry**, one rect per lit cell of the HUD’s own 5×7 bitmap at the biggest integer pitch that still fits the disc, drawn bold (rect = cell+1 ⇒ 4–5 texel strokes). Pure/no-canvas, so node can measure it.
+- `src/render/car-livery.js:175` — `drawLivery` paints those rects; `ctx.font`/`fillText` are gone (no more platform-font digit).
+- `src/render/car-livery.js:186-192` — sampler: `minFilter = LinearMipmapLinear`, `generateMipmaps true`, `anisotropy 8`, magnification kept Nearest.
+- `src/game/pixel-font.js:150` — exports `glyphRows()` (pure bitmap read-out, no DOM).
+- `src/debug/showroom.js:36`, `:75` + `src/main.js:376` — `?sheetDist=<m>` knob, because the design sheet always frames at 7.5 m and cannot answer a distance question.
+- `src/debug/tests.js:2598` (check at `:2703`) — new **T42**: atlas ≥1024 / roundel ≥36 texels, lit box inside the disc (spill 0.00) and centred ≤1 texel, cap ≥ half the roundel (55–72 %), stroke ≥4 texels (the 4×4 mip box at ~18–20 m), ink share 19–28 %, the built texture really asks for a mip minFilter + chain + aniso while staying nearest on magnify, `drawLivery` really paints 11–24 rects, and no font path returns.
+- `tools/livery-read.mjs` — node-only legibility sheet (no canvas/libs): the same door minified **two ways** (mip box vs nearest) at 24/16/12/9 px.
+
+**Self-review (both images opened with my read tool)**
+- `shots/livery-read.png`: at 1:1 all four numbers (7, 3, 12, 5) are crisp; the mip column still reads at 12 px (~24 m), while the nearest column — same texture, the old sampler — loses strokes by 16 px and is confetti by 12 px. My first sheet render was wrong (digit missing, a float-index bug in my own tool); I found it by reading the png, fixed it, and re-read.
+- One Chrome pass: `shots/quality-roundel-22m.png` (`?showroom=1&view=side&sheetDist=22`) — asset car ACTIVE, ring and digit clear on the door at 22 m, band and sponsor strip intact. Note for P33: the glb fetched fine here, so that failure is a race, not a permanent state.
+- No triangle change (no geometry added); T10/T35/T37/T38 untouched and still green.
+
+**Queue updated:** P9 moved to Done with the note; three new opens — P38 (the atlas-wide `clamp(vLivUv, 0.03, 0.97)` at `src/render/carMesh.js:385` vs `FLANK_UV.u0 = 0.02` smears the rear 0.089 m of both flanks), P39 (atlas not quality-gated), P40 (roundel ceiling ~24–28 m: past that only the ring survives).
+
+**Committed locally** (no push): `ac77f69 quality loop: the door number is geometry now - 1024 atlas, pixel-bitmap blocks with 4-5 texel strokes, mip-sampled (queue P9)`
+
+**Verbatim test line:** `53/53 passed` (52 before, +1; `tools/smoke.mjs` drive clean, `nan false`).
+To https://github.com/Prezmi/voxel-rally.git
+   954e130..ac77f69  main -> main

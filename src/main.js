@@ -343,7 +343,9 @@ async function main() {
     const want = settings.touchOverlay;
     if (want === 'on') input.touch.enable(window);
     else if (want === 'off' && input.touch.enabled) input.touch.disable();
-    rally.setTouchInset(input.touch.enabled ? 240 : 0);   // HUD podnosi dolne panele
+    // The HUD lifts its bottom panels by exactly what the overlay costs, which the
+    // layout model reports (src/game/touch-layout.js) instead of a bare 240.
+    rally.setTouchInset(input.touch.enabled ? input.touch.band() : 0);   // HUD podnosi dolne panele
   }
 
   // A few metres along the arc: at arc 0 the rear axle still straddles the uncarved terrain behind the start line.
@@ -511,7 +513,7 @@ async function main() {
     else if (code === 'Digit3') { qualityPreset(QUALITY.HIGH); renderer.setQuality(QUALITY.HIGH); }
   });
 
-  window.addEventListener('resize', () => renderer.onResize());
+  window.addEventListener('resize', () => { renderer.onResize(); applyTouch(); });
 
   let padsShown = true;
   function framePads() {

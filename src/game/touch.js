@@ -7,14 +7,19 @@
 //   far left  = ANALOG steering (drag from where the thumb landed),
 //   far right = throttle + brake in a thumb arc, handbrake between them & lower,
 //   above the steering pad = menu / camera / restart, small.
-// Every pad stays inside the bottom band main.js reserves with
-// rally.setTouchInset(240), so no pad can ever cover the dial, the gear readout,
-// the wheel-condition strip, the revs bar or the pace-note boards (all of which
-// are lifted above that band), and every offset carries an env(safe-area-*) term.
+// That contract is not CSS any more: every pad rect, and the left-handed mirror of
+// the whole overlay, is computed in src/game/touch-layout.js and written inline, so
+// the suite can prove no pad overlaps another, none leaves the screen, none falls
+// under the 72 px minimum target, and left-handed is the exact mirror of right-handed
+// (queue P10). Every pad also stays inside the bottom band main.js reserves with
+// rally.setTouchInset(input.touch.band()), which is where the HUD lifts the dial, the
+// gear readout, the wheel-condition strip, the revs bar and the pace-note boards.
+// Every offset carries the env(safe-area-*) inset for the edge it belongs to.
 import { drawText, textWidth } from './pixel-font.js';
 import { settings } from '../core/settings.js';
 import { t } from '../core/i18n.js';
-const MIN_HIT = 72;                 // px, WCAG 2.5.5 minimum target (tg-mini = exactly 72)
+import { padRects, applyPadLayout, parseHandedness, TOUCH_BAND, MIN_HIT } from './touch-layout.js';
+export { TOUCH_BAND, MIN_HIT };
 
 export const STEER_DEADZONE = 0.08;  // 8 % of thumb travel is nothing (settings.deadzone)
 
@@ -37,12 +42,18 @@ export function steerCurve(raw, dz = STEER_DEADZONE) {
 // dark asphalt comes from a solid dark 2 px halo around every control (0 0 0 2px), not
 // from translucency. No rounded corners, no font: labels are canvases painted with the
 // game's own pixel font (pixelLabel below).
+//
+// NOTHING HERE POSITIONS A PAD. Box geometry (left/bottom/width/height, and the
+// handedness mirror) is computed in src/game/touch-layout.js and written as inline
+// styles, because a CSS override cannot be verified: no layout engine runs in node, so
+// the old `#touch-ui.lefty { transform: scaleX(-1) } + counter-flip` overlay could
+// silently overlap, leave the screen or fall under the 72 px target and nothing would
+// notice (queue P10, pinned by T43). `--s` is written from the same resolved scale so
+// the in-pad parts below stay proportional to the box they live in.
 const STYLE = `
 #touch-ui{position:fixed;inset:0;z-index:12;pointer-events:none;touch-action:none;
   overscroll-behavior:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
-  opacity:0;transition:opacity .2s;display:none;
-  --sa-l:env(safe-area-inset-left,0px);--sa-r:env(safe-area-inset-right,0px);
-  --sa-b:env(safe-area-inset-bottom,0px);--s:1;--edge:8px}
+  opacity:0;transition:opacity .2s;display:none;--s:1}
 #touch-ui.on{display:block;opacity:1}
 #touch-ui button{position:absolute;pointer-events:auto;touch-action:none;display:flex;
   align-items:center;justify-content:center;padding:0;
@@ -55,8 +66,7 @@ const STYLE = `
 #touch-ui canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
 #touch-ui .tg-box{position:absolute}
 /* ---- steering: oak plank + analog track + knob that reads the live steer ---- */
-#touch-ui .tg-steer{left:calc(var(--edge) + var(--sa-l));bottom:calc(var(--edge) + var(--sa-b));
-  width:calc(214px*var(--s));height:calc(118px*var(--s));pointer-events:auto;touch-action:none;
+#touch-ui .tg-steer{pointer-events:auto;touch-action:none;
   border:3px solid #14120F;background:#9C7E4E
     repeating-linear-gradient(90deg,rgba(0,0,0,0) 0 14px,rgba(58,42,22,.55) 14px 15px);
   box-shadow:0 0 0 2px rgba(16,13,10,.9),inset 2px 2px 0 #B4915C,inset -2px -2px 0 #7A6138}
@@ -70,42 +80,10 @@ const STYLE = `
   border:3px solid #14120F;background:#C6C6C6;
   box-shadow:0 0 0 2px rgba(16,13,10,.9),inset 2px 2px 0 #FDFDFD,inset -2px -2px 0 #555555}
 #touch-ui .tg-knob.on{background:#C77B2A;box-shadow:0 0 0 2px rgba(16,13,10,.9),inset 2px 2px 0 #E0A45C,inset -2px -2px 0 #7A4A18}
-/* ---- right cluster: throttle / brake arc, handbrake between & lower ---- */
-#touch-ui .tg-cluster{right:calc(var(--edge) + var(--sa-r));bottom:calc(var(--edge) + var(--sa-b));
-  width:calc(318px*var(--s));height:calc(196px*var(--s))}
-#touch-ui .tg-throttle{right:0;bottom:calc(88px*var(--s));width:calc(96px*var(--s));height:calc(96px*var(--s))}
-#touch-ui .tg-brake{left:calc(6px*var(--s));bottom:calc(96px*var(--s));width:calc(88px*var(--s));height:calc(88px*var(--s))}
-#touch-ui .tg-hand{left:calc(100px*var(--s));bottom:0;width:calc(116px*var(--s));height:calc(90px*var(--s));
-  background:#8E3A22 repeating-linear-gradient(135deg,rgba(0,0,0,0) 0 9px,rgba(20,12,8,.5) 9px 11px);
+/* ---- the handbrake reads as oxblood with a diagonal hatch, wherever it lands ---- */
+#touch-ui .tg-hand{background:#8E3A22 repeating-linear-gradient(135deg,rgba(0,0,0,0) 0 9px,rgba(20,12,8,.5) 9px 11px);
   color:#FFF4E2}
 #touch-ui .tg-hand.held,#touch-ui .tg-hand:active{background:#C77B2A}
-/* ---- small utility row, above the steering pad, out of every HUD panel's way ---- */
-#touch-ui .tg-rail{left:calc(var(--edge) + var(--sa-l));bottom:calc(142px*var(--s) + var(--sa-b));
-  width:calc(248px*var(--s));height:calc(72px*var(--s))}
-#touch-ui .tg-mini{width:calc(72px*var(--s));height:calc(72px*var(--s))}
-#touch-ui .tg-menu{left:0}
-#touch-ui .tg-camera{left:calc(88px*var(--s))}
-#touch-ui .tg-restart{left:calc(176px*var(--s))}
-/* ---- phone portrait: right column stacks, cluster narrows, nothing overlaps ---- */
-@media (orientation:portrait){
-  #touch-ui{--s:.8}
-  #touch-ui .tg-steer{width:calc(200px*var(--s));height:calc(118px*var(--s))}
-  #touch-ui .tg-cluster{width:calc(236px*var(--s));height:calc(200px*var(--s))}
-  #touch-ui .tg-throttle{right:0;bottom:calc(104px*var(--s));width:calc(84px*var(--s));height:calc(96px*var(--s))}
-  /* left:auto matters: with left+right+width all set the browser drops the right
-     offset, and the brake slid back under the handbrake. */
-  #touch-ui .tg-brake{left:auto;right:0;bottom:calc(16px*var(--s));width:calc(84px*var(--s));height:calc(88px*var(--s))}
-  #touch-ui .tg-hand{left:0;bottom:calc(16px*var(--s));width:calc(120px*var(--s));height:calc(84px*var(--s))}
-  /* the utility row rides above the right column, still inside the 240 px HUD band */
-  #touch-ui .tg-rail{left:auto;right:calc(var(--edge) + var(--sa-r));bottom:calc(176px + var(--sa-b))}
-}
-@media (orientation:landscape) and (max-width:640px){#touch-ui{--s:.8}}
-/* ---- left-handed: the whole overlay mirrors (settings.touchHandedness) ---- */
-#touch-ui.lefty .tg-steer{left:auto;right:calc(var(--edge) + var(--sa-r))}
-#touch-ui.lefty .tg-cluster{right:auto;left:calc(var(--edge) + var(--sa-l));transform:scaleX(-1)}
-#touch-ui.lefty .tg-cluster>button{transform:scaleX(-1)}
-#touch-ui.lefty .tg-rail{left:auto;right:calc(var(--edge) + var(--sa-r))}
-@media (orientation:portrait){#touch-ui.lefty .tg-rail{left:calc(var(--edge) + var(--sa-l));right:auto}}
 @media (min-width:1000px) and (pointer:fine){#touch-ui{opacity:.6}}
 `;
 
@@ -188,6 +166,9 @@ export function createTouchInput() {
     oneshot: [], pointers: new Map(),
     analogSteer: null,       // live analog steer from the thumb (curved), null = no thumb
     steerVisual: 0,          // the value the car actually got -> drives the knob
+    layout: null,            // resolved pad rects for the live viewport (touch-layout.js)
+    placed: 0,               // DOM boxes the last layout wrote
+    handOverride: null,      // ?hand=left|right verification hook, else follow settings
     _raw: 0, _raf: 0,
     // Vehicle convention: POSITIVE steer = a LEFT turn (see car/steering.js: a
     // positive angle turns the front wheels towards body -X, i.e. to the left).
@@ -202,6 +183,37 @@ export function createTouchInput() {
     setAction(name, on) { actions[name] = on ? 1 : 0; },
     tap(action) { this.oneshot.push(action); },
     drain(action) { const i = this.oneshot.indexOf(action); if (i < 0) return false; this.oneshot.splice(i, 1); return true; },
+    // ---- geometry: the resolved pad rects for the live viewport (touch-layout.js) ----
+    /** px along the bottom the HUD has to keep clear (src/game/hud-rally.js lift). */
+    band() { return this.layout ? this.layout.band : TOUCH_BAND; },
+    /** env(safe-area-inset-*) read through a throwaway probe: CSS owns those values,
+     *  and the layout needs them as numbers. 0 anywhere the browser will not tell us. */
+    _safeInsets() {
+      const out = { left: 0, right: 0, bottom: 0 };
+      if (typeof document === 'undefined' || !document.createElement) return out;
+      let probe = null;
+      try {
+        probe = document.createElement('div');
+        probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+          'padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);' +
+          'padding-bottom:env(safe-area-inset-bottom,0px)';
+        document.body.appendChild(probe);
+        const cs = getComputedStyle(probe);
+        for (const k of ['left', 'right', 'bottom']) out[k] = parseFloat(cs['padding' + k[0].toUpperCase() + k.slice(1)]) || 0;
+      } catch { /* headless or unsupported env(): the insets are zero, the layout still fits */ }
+      probe?.remove?.();
+      return out;
+    },
+    /** Resolve + apply the whole overlay. Called on enable, on handedness, on resize. */
+    _layout() {
+      if (!this.root) return null;
+      const w = Math.max(1, window.innerWidth || (typeof document !== 'undefined' && document.documentElement?.clientWidth) || 1);
+      const h = Math.max(1, window.innerHeight || (typeof document !== 'undefined' && document.documentElement?.clientHeight) || 1);
+      const want = this.handOverride || settings.touchHandedness;
+      this.layout = padRects({ width: w, height: h, handedness: want, safe: this._safeInsets() });
+      this.placed = applyPadLayout(this.root, this.layout);
+      return this.layout;
+    },
     // ---- analog steering: raw = thumb displacement / travel, -1..1 ----
     setSteerRaw(raw) {
       this._raw = Math.max(-1, Math.min(1, raw || 0));
@@ -226,6 +238,10 @@ export function createTouchInput() {
       // settings toggle: ?touch=on forces the overlay, ?touch=off suppresses it, else auto-detect
       const want = typeof location !== 'undefined' ? (location.search.match(/[?&]touch=(on|off)/) || [])[1] : null;
       if (want === 'on') go(); else if (want === 'off') live = true;
+      // ?hand=left|right: the verification hook for the mirrored overlay (same family
+      // as ?touch= / ?steer=), so a headless shot can show the left-handed layout.
+      const hand = typeof location !== 'undefined' ? parseHandedness(location.search) : null;
+      if (hand) this.handOverride = hand;
     },
     enable(target = window) {
       if (this.enabled || typeof document === 'undefined' || !document.body) return;
@@ -269,7 +285,12 @@ export function createTouchInput() {
       pixelLabel(root.querySelector('.tg-steer'), { text: t('touch.steer') }, '#2A2118');
       this._track = root.querySelector('.tg-track');
       this._knob = root.querySelector('.tg-knob');
-      this.setHandedness(settings.touchHandedness);
+      this.setHandedness(this.handOverride || settings.touchHandedness);
+      if (!this._onResize) {
+        this._onResize = () => { if (this.root) this._layout(); };
+        window.addEventListener('resize', this._onResize);
+        window.addEventListener('orientationchange', this._onResize);
+      }
       // Verification hook: ?steer=<-1..1> pins an analog thumb value so the knob
       // position (requirement: the pad must show the current steer) is checkable in a
       // headless shot without faking a finger. Never set in normal play.
@@ -362,12 +383,19 @@ export function createTouchInput() {
         this._raf = requestAnimationFrame(tick);
       }
     },
-    setHandedness(h) { this.root?.classList.toggle('lefty', h === 'left'); },
+    setHandedness(h) {
+      this.handOverride = (h === 'left' || h === 'right') ? h : null;
+      if (!this.root) return;
+      // Not a class toggle any more: the rects themselves are mirrored, so the hit
+      // areas, the visuals and the suite all agree on one geometry.
+      this.root.classList.toggle('lefty', (this.handOverride || settings.touchHandedness) === 'left');
+      this._layout();
+    },
     disable() {
       if (this._raf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._raf);
       this._raf = 0;
       this.root?.remove(); this.root = null; this.enabled = false; this.pointers.clear();
-      this._knob = this._track = null;
+      this._knob = this._track = null; this.layout = null; this.placed = 0;
     },
     /** Hide the pads while a menu modal owns the screen (main.js screen stack). */
     setVisible(on) {
