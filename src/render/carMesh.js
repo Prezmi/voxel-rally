@@ -523,8 +523,8 @@ float vnoise(vec3 p) {
     * (1.0 - 0.7 * smoothstep(0.0, ${glslFloat(DUST_FILM.veilHeight)}, gHeight));
   // Streaky, never a uniform haze: the dry veil rides the same airflow bands as
   // the wet runs, so it reads as brushed-off streaks with clean panel between.
-  float haze = ${DUST_FILM.streakKeep} + (1.0 - ${DUST_FILM.streakKeep}) * clamp(across * 1.8, 0.0, 1.0);
-  veil *= mix(1.0, haze, ${DUST_FILM.streakMix});
+  float haze = ${glslFloat(DUST_FILM.streakKeep)} + (1.0 - ${glslFloat(DUST_FILM.streakKeep)}) * clamp(across * 1.8, 0.0, 1.0);
+  veil *= mix(1.0, haze, ${glslFloat(DUST_FILM.streakMix)});
   col = mix(col, dirtCol * 1.22 + vec3(0.14), veil);
 
   // Damage as a surface state of the panel (docs/02 §8): pixel cracks, not a bar.
