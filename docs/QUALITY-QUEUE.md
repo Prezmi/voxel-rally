@@ -12,9 +12,20 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P6 · prop and glb materials export with `doubleSided` true from Blender
-      (`build_stage_props.py:518` `make_material`); set `use_backface_culling` so the
-      FrontSide override in `streaming.js` is not needed
+- [ ] P29 · the same export defect is still live for the hero model: neither car builder
+      sets `use_backface_culling`, so `assets/models/rally_v2.glb` (45 materials) and
+      `rally_a.glb` (51) all land `doubleSided`, and `src/render/carMesh.js` /
+      `car-asset.js` apply no `side` patch at all — the body interior faces are shaded and
+      depth-written every frame. Re-export has to re-prove the `car_*` node contract (T10)
+      and be read back in a shot, which is why props and tiles were fixed first
+- [ ] P30 · `tools/blender/build_stage_blocks.py:78` `REQUIRED` names 8 of the 10 tiles the
+      script builds (no `snow`, no `ice`), so the export gate silently guards 8 nodes and
+      its own summary under-reports: `nodes found : 10 (...)` next to `OK all 8 expected
+      nodes present`
+- [ ] P31 · a headless capture races the world build: `tools/shot-run.mjs` waits a fixed
+      wall-clock time while the stage needs ~12 s to generate (this run's first pass
+      captured the `generowanie etapu: 41% 3450 / 8379 chunks` boot screen, costing a
+      screenshot pass); publish a "world ready" flag the harness waits for instead of a timer
 - [ ] P7 · road surface still shows over-light patches in the near field because
       `src/render/renderer.js` applies `tone = 0.82 + 0.40 * tile`; narrow that spread
       to about 12 percent and let ruts get slightly glossier
@@ -111,6 +122,40 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P6 · prop and glb materials export with `doubleSided` true from Blender
+      (`build_stage_props.py:518` `make_material`); set `use_backface_culling` so the
+      FrontSide override in `streaming.js` is not needed
+      · done — the queue line pointed at one line and the defect was the whole asset layer:
+      the glTF exporter writes `doubleSided = not material.use_backface_culling`, and with
+      the Blender default left alone **every** material in both files the streaming layer
+      adopts landed doubleSided — props.glb 38/38, stage_blocks.glb 10/10 — so the far wall
+      of every closed voxel drew on the same depth as the face in front of it (the banner
+      board checkerboard that P1 rebuilt the geometry for was only half the story) and the
+      tile layer that carpets the whole road band paid double the fill. Now single-sided at
+      the source: `mat.use_backface_culling = True` in `make_material`
+      (`tools/blender/build_stage_props.py:579`, `tools/blender/build_stage_blocks.py:463`),
+      both files re-exported headless (`blender --background --python
+      tools/blender/build_stage_props.py -- --out assets/models/props.glb`, same for blocks)
+      with **geometry proven identical** — 4728 / 16814 triangles and every vertex of all 20
+      prop and 10 block nodes byte-equal against the previous files, only the material flags
+      and 724 bytes of JSON went away (`props.manifest.json` `file_bytes` 284420 -> 283696),
+      and 0 of 21,542 exported triangles wind against the normal they ship with, so culling
+      can only ever remove a face that was already shading away from the camera (no hole or
+      vanishing surface traded for the checkerboard). The engine workaround is deleted:
+      `c.side = THREE.FrontSide` is gone from `_buildStartProps` (`src/world/streaming.js:653`
+      `opaque()`), the comment there now names the export as the guarantee. Both builders now
+      fail their own export gate on a doubleSided material (`build_stage_props.py:616` + `:729`,
+      `build_stage_blocks.py:595` + `:611`), and the new suite check **T27**
+      (`src/debug/tests.js:1601`, check at `:1679`) re-reads the shipped glbs and pins 0 doubleSided materials,
+      every primitive mapped to one of them, and 0 backfacing windings, with floors (30 nodes /
+      48 materials / 30 mapped primitives) so a truncated asset cannot pass vacuously. Visual
+      proof, one CDP pass, read back: `shots/quality-single-sided.png` (seed 12345, start
+      line) shows the arch bands as one clean striped board at 34 m, both marshal tents and
+      both fence lines solid with no hollow or missing face after culling, and the dirt tile
+      layer continuous. Proof: `node src/debug/tests.js` **38/38 passed** (37 before, +1).
+      Not touched, filed as P29: the two car glbs still export every material doubleSided
+      (the car builders never set culling and the car layer has no `side` patch either).
 
 - [x] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
       setting); add a row in the same wood-banner style so mobile users can reach it

@@ -642,11 +642,14 @@ export class Streaming {
       const geo = rec.geometry;
       // A baked node can carry one material or one per primitive: clone whichever shape
       // the loader handed over, otherwise the whole start layer dies on .clone of an array.
-      // A baked prop is a solid stack of closed boxes: force the adopted materials
-      // opaque and single-sided. glTF exports every prop material doubleSided, and a
-      // double-sided interior face lands on the same depth as the face in front of it
-      // (the banner board dithered into a white/red checker that way). FrontSide plus
-      // no alpha makes the board one surface.
+      // Force the adopted materials opaque: a baked prop is a solid stack of closed boxes
+      // and must have no alpha channel in the depth pass. It no longer has to be patched
+      // single-sided too - props.glb and stage_blocks.glb now export with Blender backface
+      // culling on, so every material arrives FrontSide from the file (the exporter writes
+      // doubleSided = not use_backface_culling). The double-sided interior faces that used
+      // to land on the same depth as the face in front of them - the banner board dithered
+      // into a white/red checker - cannot come back without failing the export gate
+      // (tools/blender/build_stage_props.py) or T27 in src/debug/tests.js.
       const opaque = (m) => {
         if (!m || !m.clone) return this.renderer.propMaterial;
         const c = m.clone();
@@ -654,7 +657,6 @@ export class Streaming {
         c.transparent = false;
         c.opacity = 1;
         c.alphaTest = 0;
-        c.side = THREE.FrontSide;
         return c;
       };
       let mat;

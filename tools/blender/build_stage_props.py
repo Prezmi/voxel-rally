@@ -567,6 +567,16 @@ def make_material(name):
     bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
     set_in("Roughness", rough)
     set_in("Metallic", 0.0)
+    # Single-sided is part of the export contract, not a shading preference. The glTF
+    # exporter writes doubleSided = not use_backface_culling, and left at the Blender
+    # default (culling off) EVERY material in this file exported doubleSided. A prop is
+    # a stack of closed boxes, so the far wall of each face drew on the same depth as
+    # the face in front of it - that is what dithered the 9 m banner board into a
+    # white/red checker. The engine had to paper over it (side = FrontSide in
+    # src/world/streaming.js); with culling on here, that override is dead code and the
+    # checkerboard cannot come back. The verify() gate below fails the export if any
+    # material still lands doubleSided.
+    mat.use_backface_culling = True
     return mat
 
 
@@ -602,6 +612,12 @@ def accessor_bbox(doc, blob, bin_off, acc_idx):
     return struct.unpack("<%d%s" % (n, fmt), data)
 
 
+def double_sided_materials(doc):
+    """Materials the export marks doubleSided (queue P6). A solid prop must never land
+    doubleSided: the engine must be able to draw the adopted node as it comes."""
+    return [m.get("name", "?") for m in doc.get("materials", []) if m.get("doubleSided")]
+
+
 def verify(path):
     blob, doc, bin_off = read_glb(path)
     meshes, accessors = doc.get("meshes", []), doc.get("accessors", [])
@@ -630,7 +646,7 @@ def verify(path):
                          instance=PROPS[name[len("prop_"):]]["instance"]))
     rows.sort(key=lambda r: r["name"])
     missing = [n for n in EXPECTED if n not in found]
-    return blob, rows, found, missing
+    return blob, rows, found, missing, doc
 
 
 # ------------------------------------------------------------------------ main
@@ -682,7 +698,7 @@ def main():
         bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True,
                                   export_apply=True, export_yup=True)
 
-    blob, rows, found, missing = verify(out)
+    blob, rows, found, missing, doc = verify(out)
     size = len(blob)
     glb_tris = sum(r["triangles"] for r in rows)
 
@@ -693,6 +709,8 @@ def main():
         print("node %-22s w=%6.2f m  h=%6.2f m  d=%6.2f m  tris=%5d  %s"
               % (r["name"], r["width_m"], r["height_m"], r["depth_m"], r["triangles"], solid))
     print("nodes found      : %d / %d" % (len(found), len(EXPECTED)))
+    dbl = double_sided_materials(doc)
+    print("doubleSided mats : %d / %d" % (len(dbl), len(doc.get("materials", []))))
     print("total triangles  : %d (glb) / %d (built)" % (glb_tris, total))
     print("file size bytes  : %d" % size)
 
@@ -706,6 +724,10 @@ def main():
     ok = True
     if missing:
         print("FAIL missing nodes: %s" % ", ".join(missing))
+        ok = False
+    if dbl:
+        print("FAIL %d materials export doubleSided (backface culling off in "
+              "make_material): %s" % (len(dbl), ", ".join(dbl[:8])))
         ok = False
     if glb_tris > MAX_TRIS_TOTAL:
         print("FAIL total triangles %d > %d" % (glb_tris, MAX_TRIS_TOTAL))

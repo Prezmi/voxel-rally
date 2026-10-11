@@ -29,6 +29,8 @@ import { buildCarveIndex, prewarmArea } from '../world/road-carve.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const G = 9.81;
 
@@ -1582,6 +1584,103 @@ function testFxSwitchIsReachableFromSettings() {
     + `| rows/boxes/focus ${perScreen.join(' ')} | gaps=[${gaps.join(' ')}]`);
 }
 testFxSwitchIsReachableFromSettings();
+
+// ---------------------------------------------------------------- test 27
+// Everything the streaming layer adopts out of a glb must be single-sided AT THE SOURCE
+// (queue P6). The glTF exporter writes doubleSided = not material.use_backface_culling,
+// and with the Blender default left alone every material in props.glb and
+// stage_blocks.glb landed doubleSided: the far wall of a closed voxel drew on the same
+// depth as the face in front of it (that is what checkerboarded the 9 m banner board),
+// the tile layer that carpet the whole road band paid double the fill, and the only thing
+// standing between the player and that mess was an engine-side `side = FrontSide` patch
+// in src/world/streaming.js. Pin the contract instead of the patch: the shipped prop and
+// block materials are single-sided, every primitive resolves to one of them, and the
+// winding of every exported triangle agrees with the normal it ships with - so backface
+// culling can only ever remove a face that was already shading away from the camera, and
+// no hole or vanishing surface can be traded for the checkerboard.
+function readGlbDoc(name) {
+  const blob = readFileSync(fileURLToPath(new URL(`../../${name}`, import.meta.url)));
+  if (blob.readUInt32LE(0) !== 0x46546C67) throw new Error(`${name}: not a GLB`);
+  let off = 12, doc = null, binOff = -1;
+  while (off + 8 <= blob.length) {
+    const clen = blob.readUInt32LE(off);
+    const ctype = blob.readUInt32LE(off + 4);
+    off += 8;
+    if (ctype === 0x4E4F534A) doc = JSON.parse(blob.toString('utf8', off, off + clen));
+    else if (ctype === 0x004E4942) binOff = off;
+    off += clen;
+  }
+  if (!doc || binOff < 0) throw new Error(`${name}: no JSON or BIN chunk`);
+  const acc = (i) => {
+    const a = doc.accessors[i];
+    const v = doc.bufferViews[a.bufferView];
+    const comp = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 }[a.componentType];
+    const per = a.type === 'VEC3' ? 3 : (a.type === 'VEC2' ? 2 : 1);
+    const base = binOff + (v.byteOffset || 0) + (a.byteOffset || 0);
+    const n = a.count * per;
+    const out = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+      const p = base + k * comp;
+      out[k] = a.componentType === 5126 ? blob.readFloatLE(p)
+        : a.componentType === 5125 ? blob.readUInt32LE(p)
+        : a.componentType === 5123 ? blob.readUInt16LE(p)
+        : a.componentType === 5122 ? blob.readInt16LE(p)
+        : a.componentType === 5121 ? blob.readUInt8(p) : blob.readInt8(p);
+    }
+    return out;
+  };
+  return { doc, acc };
+}
+
+function testShippedGlbsAreSingleSided() {
+  const gaps = [];
+  let mats = 0, sided = 0, tris = 0, backfacing = 0, nodes = 0;
+  for (const name of ['assets/models/props.glb', 'assets/models/stage_blocks.glb']) {
+    const { doc, acc } = readGlbDoc(name);
+    const list = doc.materials || [];
+    mats += list.length;
+    if (!list.length) { gaps.push(`${name}: exports no material at all`); continue; }
+    const dbl = list.filter((m) => m.doubleSided === true).map((m) => m.name || '?');
+    if (dbl.length) gaps.push(`${name}: ${dbl.length} doubleSided material(s): ${dbl.slice(0, 4).join(',')}`);
+    for (const nd of doc.nodes || []) {
+      if (!nd.name || !/^(prop|block)_/.test(nd.name)) continue;
+      nodes++;
+      const mesh = (doc.meshes || [])[nd.mesh];
+      if (!mesh) { gaps.push(`${name}: ${nd.name} has no mesh`); continue; }
+      for (const pr of mesh.primitives) {
+        if (pr.material === undefined || !list[pr.material]) gaps.push(`${name}: ${nd.name} primitive has no material`);
+        else sided++;
+        if (pr.attributes.POSITION === undefined || pr.attributes.NORMAL === undefined) {
+          gaps.push(`${name}: ${nd.name} primitive has no POSITION/NORMAL`);
+          continue;
+        }
+        const P = acc(pr.attributes.POSITION), N = acc(pr.attributes.NORMAL);
+        const I = pr.indices === undefined ? null : acc(pr.indices);
+        const t = I ? I.length / 3 : (P.length / 3) / 3;
+        tris += t;
+        for (let k = 0; k < t; k++) {          // winding normal vs the shipped shading normal
+          const i0 = I ? I[k * 3] : k * 3, i1 = I ? I[k * 3 + 1] : k * 3 + 1, i2 = I ? I[k * 3 + 2] : k * 3 + 2;
+          const ux = P[i1 * 3] - P[i0 * 3], uy = P[i1 * 3 + 1] - P[i0 * 3 + 1], uz = P[i1 * 3 + 2] - P[i0 * 3 + 2];
+          const vx = P[i2 * 3] - P[i0 * 3], vy = P[i2 * 3 + 1] - P[i0 * 3 + 1], vz = P[i2 * 3 + 2] - P[i0 * 3 + 2];
+          const gx = uy * vz - uz * vy, gy = uz * vx - ux * vz, gz = ux * vy - uy * vx;
+          const nx = N[i0 * 3] + N[i1 * 3] + N[i2 * 3];
+          const ny = N[i0 * 3 + 1] + N[i1 * 3 + 1] + N[i2 * 3 + 1];
+          const nz = N[i0 * 3 + 2] + N[i1 * 3 + 2] + N[i2 * 3 + 2];
+          if (gx * nx + gy * ny + gz * nz < 0) backfacing++;
+        }
+      }
+    }
+  }
+  // Floors: a file emptied of its nodes or materials must not pass this vacuously.
+  if (!(nodes >= 30)) gaps.push(`only ${nodes} prop/block nodes`);
+  if (!(mats >= 40)) gaps.push(`only ${mats} materials`);
+  if (!(sided >= 30)) gaps.push(`only ${sided} primitives carry a material`);
+  if (backfacing) gaps.push(`${backfacing} triangles wind against their own normal`);
+  check('T27 the shipped props and block tiles are single-sided at the source: no doubleSided material, no backfacing winding, so the engine never patches side',
+    gaps.length === 0,
+    `nodes=${nodes} materials=${mats} primitives=${sided} tris=${tris} doubleSided=0 backfacing=${backfacing} | gaps=[${gaps.join(' ')}]`);
+}
+testShippedGlbsAreSingleSided();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

@@ -454,6 +454,13 @@ def make_material(name, spec):
     set_in("Metallic", spec["metal"])
     if spec.get("coat"):
         set_in("Coat Weight", spec["coat"])
+    # A block tile is a closed slab (top grid + skirt walls + underside plug), so its
+    # back faces are never visible. Leaving the Blender default would export every
+    # tile material doubleSided, which doubles the depth work of the layer that covers
+    # the whole road band and puts interior faces at the same depth as the worn top
+    # face. Same contract as build_stage_props.py: single-sided at the source, so no
+    # engine-side side = FrontSide patch is needed anywhere (queue P6).
+    mat.use_backface_culling = True
     return mat
 
 
@@ -525,7 +532,7 @@ def verify(path):
     for key in REQUIRED:
         if key not in found:
             missing.append(key)
-    return blob, rows, found, missing
+    return blob, rows, found, missing, doc
 
 
 # -------------------------------------------------------------------- main
@@ -574,7 +581,7 @@ def main():
                               export_cameras=False, export_lights=False,
                               export_yup=True)
 
-    blob, rows, found, missing = verify(out)
+    blob, rows, found, missing, doc = verify(out)
     size = len(blob)
     print("\n--- self-check: %s ---" % out)
     glb_tris = 0
@@ -584,6 +591,8 @@ def main():
               % (row["name"], row["w"], row["d"], row["zmin"], row["zmax"],
                  row["zmax"] - row["zmin"], row["tris"]))
     print("nodes found      : %d (%s)" % (len(found), " ".join(sorted(found))))
+    dbl = [m.get("name", "?") for m in doc.get("materials", []) if m.get("doubleSided")]
+    print("doubleSided mats : %d / %d" % (len(dbl), len(doc.get("materials", []))))
     print("edge continuity  : %d non-periodic edge samples (must be 0)" % seams)
     print("total triangles  : %d (glb) / %d (built)" % (glb_tris, total_tris))
     print("file size bytes  : %d" % size)
@@ -597,6 +606,10 @@ def main():
         ok = False
     if size < MIN_BYTES:
         print("FAIL file size %d < %d" % (size, MIN_BYTES))
+        ok = False
+    if dbl:
+        print("FAIL %d tile materials export doubleSided (backface culling off in "
+              "make_material): %s" % (len(dbl), ", ".join(dbl[:8])))
         ok = False
     for key in REQUIRED:
         r = next((x for x in rows if x["key"] == key), None)
