@@ -8,7 +8,7 @@
 // (path length without any normal maths, no texture, no post pass).
 //
 // Cost is bounded and counted: 2 lamps x (rings-1) bands x `segments` quads x 2 tris.
-// At 3 rings / 12 segments that is 96 triangles on a frame budget of ~220k (docs/07
+// At 4 rings / 12 segments that is 144 triangles on a frame budget of ~220k (docs/07
 // §Budżety), one extra draw call per lamp, and no shadow map: a shadowed spot would
 // buy a 20 m pool of light a whole extra depth pass.
 //
@@ -47,14 +47,24 @@ export const BEAM = {
 
   // The visible volume: rings run from the lens to `reach` (must stay inside the spot
   // cut-off, or the shaft would reach past the light that is supposed to be causing
-  // it). Alpha peaks at the middle ring so the beam does not start as a hard disc at
-  // the lens and dies to nothing at the far end instead of a cut in mid-air.
+  // it). The ramp is the whole look, and the first night frame (seed 95, DUSK,
+  // bumper cam, queue P8) showed what the old one did wrong: it opened at a=0.34 *at
+  // the lens*, and every driver camera sits at lamp height *inside* the cone, so the
+  // near wall of both shells filled the lower half of the frame as two solid pale
+  // cards welded to the nose - geometry, not light - while the far half, where the
+  // pool actually is, was the dim part of the ramp.
+  //
+  // So the ramp now starts at nothing at the lens, peaks at 55 % of the reach (over
+  // the middle of the light pool, 11 m out) and dies to nothing at the far end. One
+  // more band costs 48 triangles and buys both ends of the curve.
   reach: 20,
-  rings: [{ t: 0, r: 0.10, a: 0.34 }, { t: 0.30, r: 0.95, a: 1.0 }, { t: 1, r: 2.35, a: 0 }],
+  rings: [{ t: 0, r: 0.10, a: 0 }, { t: 0.20, r: 0.70, a: 0.40 },
+          { t: 0.55, r: 1.55, a: 0.85 }, { t: 1, r: 2.35, a: 0 }],
   segments: 12,
   // Peak additive alpha per shell wall. A ray down the axis crosses every band twice,
-  // so the core lands near (rings-1) * 2 * this.
-  gain: 0.16,
+  // so the core lands near 2 * peak ring alpha * this = 0.22 (was 0.32: brighter than
+  // the road it was drawing over). T41 pins the core band, not this number alone.
+  gain: 0.13,
   // Smashed lamp cluster (car/damage.js -> carMesh applyDamage `lightsOut`): the beam
   // does not go fully black (one bulb survives) but it stops throwing a shaft.
   dimmed: 0.10,
@@ -126,6 +136,36 @@ export function beamFootprint(shape, step = 0.25) {
     return hit ? hi - lo : 0;
   };
   return { area, near, far, peak, spanAt };
+}
+
+/** Ring-space alpha one shell wall carries at `t` (0..1 along `reach`), the rings
+ *  interpolated - the shader multiplies this by `uGain` per fragment. A view down the
+ *  beam crosses the shell twice, so double it (times gain) for the core brightness. */
+export function shaftWallAlpha(t) {
+  const rings = BEAM.rings;
+  if (!(t > 0)) return rings[0].a;
+  if (t >= 1) return rings[rings.length - 1].a;
+  for (let i = 1; i < rings.length; i++) {
+    if (t <= rings[i].t) {
+      const a = rings[i - 1], b = rings[i];
+      const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
+      return a.a + (b.a - a.a) * k;
+    }
+  }
+  return rings[rings.length - 1].a;
+}
+
+/** Where the shaft is brightest, and how bright: `{ t, wall, core }` with `core` the
+ *  alpha down the axis (two shell walls, both gain-scaled). The night frame is judged
+ *  on these two numbers: `t` says whether the bright part of the shaft sits over the
+ *  light pool or on the dashboard, `core` says whether the shaft outranks the road. */
+export function shaftPeak() {
+  let best = { t: 0, wall: -1 };
+  for (let i = 0; i <= 200; i++) {
+    const t = i / 200, wall = shaftWallAlpha(t);
+    if (wall > best.wall) best = { t, wall };
+  }
+  return { t: best.t, wall: best.wall * BEAM.gain, core: 2 * best.wall * BEAM.gain };
 }
 
 /** Half-angle the drawn shaft fans out to at its far ring, in radians: the cone of

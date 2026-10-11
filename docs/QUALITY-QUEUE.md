@@ -40,8 +40,20 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       (`src/render/renderer.js:255`) covers asphalt / gravel / mud / dirt but not PEAT (8),
       while the colour pass `roadish` (`:210`) and the new rut gloss (`:246`) do — a rain
       stage loses roughness on a dirt road and keeps full roughness on a peat one
-- [ ] P8 · night stages have no headlight beams; add two cheap cone volumes or a spot
-      light plus road decals that stay inside the frame budget
+- [ ] P35 · the night frame is a lit box: past the 26 m pool cut-off the carriageway is
+      unlit black all the way to the fog wall (`shots/quality-night-beams.png`, read back),
+      so a DUSK stage has a hard visibility wall at ~30 m with nothing marking the road
+      beyond it — the beam needs a longer throw dial, or the road edge needs markers that
+      catch the pool
+- [ ] P36 · no stage is ever truly dark: `stageClimate` (`src/world/road-spline.js:283-287`)
+      caps DUSK at tod 0.80-0.87 while the rig's night stop sits at 0.92-1.00 (key 0.14,
+      `src/render/lighting.js:28-29`), so the deep-night half of the STOPS table and the whole
+      `tod < 0.22` half of the beam gate (`src/render/headlights.js:23-24`) are dead code that
+      T29 only asserts in the abstract (`isDark(0.05)`)
+- [ ] P37 · the lens flare fires at night off the headlights instead of the sun: two white
+      ghost blobs (upper right and lower left of `shots/quality-night-beams.png`) sit in a
+      frame where the key is already at dusk strength — `lensFlareAlpha` gates on the sun
+      (`sunVis`/`sun`) with no dark-stage term
 - [ ] P9 · livery number roundel is hard to read past ~15 m; raise the decal resolution
       or draw the number as geometry so it reads at distance
 - [ ] P10 · the left-handed touch layout is CSS-only and unverified; make it a real
@@ -148,6 +160,40 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P8 · night stages have no headlight beams; add two cheap cone volumes or a spot
+      light plus road decals that stay inside the frame budget
+      · done — the item was **half landed and half wrong**, and only a frame could see it.
+      The volumes and the pool already exist (added in `099c8c4`, pinned by T29/T30 — that
+      run never recorded the item here), so this pass spent itself on the first night frame
+      ever captured (seed 95, the DUSK stage `stageClimate` rolls at tod 0.85, bumper cam,
+      `shots/quality-night-beams.png`, read back): the pool does land corridor-sized on the
+      road, but the shaft drew as **two solid pale cards welded to the nose** — the ramp
+      opened at `a: 0.34` *at the lens* (`rings[0]`), and every driver camera (BUMPER,
+      ONBOARD, close CHASE) sits at lamp height *inside* the cone, so the near wall of both
+      shells filled the lower half of the screen as geometry while the far half, where the
+      pool actually lights the road, was the dim part of the curve, and the doubled core
+      (`2 * 1.0 * gain 0.16` = 0.32 additive) was brighter than the road it drew over.
+      Reshaped the ramp, not the light: four rings `t 0 / 0.20 / 0.55 / 1`, alpha
+      `0 / 0.40 / 0.85 / 0` (`src/render/headlights.js:61-63`), gain 0.16 -> 0.13 (`:67`) —
+      nothing at the lens, peak at 11 m which is the middle of the pool, nothing at the far
+      end — 96 -> 144 triangles for one more band, still inside the 160 a cheap volume may
+      cost. The SpotLight, its cone and its footprint were left alone (T30 already proved
+      them). The ramp is now readable headless: `shaftWallAlpha(t)` (`:144`) is the ring
+      interpolation the shader does per fragment and `shaftPeak()` (`:162`) reports where
+      the shaft is brightest and by how much. New check **T41** (`src/debug/tests.js:2542`,
+      check at `:2584`) pins it: shell alpha exactly 0 at both ends, the first 4 m of the
+      cone the camera sits inside stay under 50 % of peak (47 % now, was >100 % from the
+      first ring), exactly one rise and one fall (a banded shaft reads as geometry), the
+      peak sits at 35-75 % of the reach *and* over ground the pool lights (2.14 of
+      illuminance under it), core additive held to 0.10..0.26 against the old 0.32, rings
+      monotone with a lens-sized first ring, and cost re-pinned at <= 160 tris. Proof:
+      `node src/debug/tests.js` **52/52 passed** (51 before, +1), `tools/smoke.mjs` drive
+      clean, no NaN, T29/T30 unchanged. Not done, deferred: the one allowed screenshot pass
+      went to the diagnostic frame, so this ramp has **no after-shot yet** — the next night
+      capture must read it back; what that same frame shows wrong about the rest of the
+      night is filed as P35-P37 (lit box past the pool, no stage ever rolls the rig's dark
+      half, lens flare firing off the lamps).
 
 - [x] P7 · road surface still shows over-light patches in the near field because
       `src/render/renderer.js` applies `tone = 0.82 + 0.40 * tile`; narrow that spread

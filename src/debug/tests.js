@@ -34,7 +34,7 @@ import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
   radialBlurAmount, sunVisibility } from '../render/post/tune.js';
-import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle } from '../render/headlights.js';
+import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle, shaftWallAlpha, shaftPeak } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { CHUNK } from '../world/chunk.js';
@@ -2526,6 +2526,68 @@ function testRallyAtmosphereBudget() {
     `LOW ${per.LOW.n} [${per.LOW.names}] | MED ${per.MED.n} [${per.MED.names}] | HIGH ${per.HIGH.n} [${per.HIGH.names}] | budget ${MAX_POST_PASSES} passes / ${MAX_OFFSCREEN_PASSES} offscreen | shaft max ${shMax.toFixed(3)} blur max ${full.toFixed(4)} | dust ${DUST_TUNE.hardMul}/${DUST_TUNE.looseMul} ttl ${DUST_TUNE.ttlMin}+${DUST_TUNE.ttlSpan} caps ${Object.keys(FX_CAPACITY).map((k) => fxS[k].capacity).join('/')} | gaps=[${gaps.join(' ')}]`);
 }
 testRallyAtmosphereBudget();
+
+// ------------------------------------------------ night beam ramp (queue P8, third half)
+// T29 proved the beams run, T30 proved the pool is the size of the shaft. Neither one
+// looked at the frame: the first night capture (seed 95, DUSK tod 0.85, bumper cam)
+// showed the shafts as two solid pale cards welded to the nose - the ramp opened at
+// a=0.34 *at the lens*, and every driver camera (BUMPER/ONBOARD, and CHASE close in)
+// sits at lamp height *inside* the cone, so the near wall of both shells filled the
+// lower half of the screen while the far half, where the pool actually lights the
+// road, was the dim part of the curve. The shaft also outranked the road it drew over.
+// Pinned: the shell contributes nothing at the lens, stays quiet through the part of
+// the cone the camera is inside, peaks over the lit ground rather than on the
+// dashboard, is a single rise and fall (banded = geometry), never outranks the pool it
+// belongs to, and still costs one cheap volume.
+function testShaftRampReadsAsLightNotAsGeometry() {
+  const p = CARS.A;
+  const shape = { hx: p.hull.x, hz: p.hull.z, floor: -p.comY + 0.15 };
+  const gaps = [];
+  const peak = shaftPeak();
+
+  // ends: nothing at the lens, nothing at the far end, one rise and one fall
+  if (shaftWallAlpha(0) !== 0) gaps.push(`the shell starts at alpha ${shaftWallAlpha(0)} on the lens: the camera is inside the cone`);
+  if (shaftWallAlpha(1) !== 0) gaps.push(`the shell ends at alpha ${shaftWallAlpha(1)}: a hard cut in mid-air`);
+  let nearWall = 0;
+  for (let i = 0; i <= 40; i++) nearWall = Math.max(nearWall, shaftWallAlpha(0.2 * i / 40) * BEAM.gain);
+  if (!(nearWall <= peak.wall * 0.5)) gaps.push(`the first ${(0.2 * BEAM.reach).toFixed(0)} m run at ${((100 * nearWall) / peak.wall).toFixed(0)} % of peak: a pale card on the nose`);
+  let turns = 0, sgn = 0;
+  for (let i = 1; i <= 200; i++) {
+    const d = shaftWallAlpha(i / 200) - shaftWallAlpha((i - 1) / 200);
+    const s = Math.sign(d);
+    if (s && sgn && s !== sgn) turns++;
+    if (s) sgn = s;
+  }
+  if (turns > 1) gaps.push(`the ramp changes direction ${turns} times: a banded shaft reads as geometry`);
+
+  // brightest part of the shaft stands over ground the pool actually lights
+  if (!(peak.t >= 0.35 && peak.t <= 0.75)) gaps.push(`the shaft peaks ${(peak.t * BEAM.reach).toFixed(1)} m into a ${BEAM.reach} m beam, not over the middle of the pool`);
+  const under = poolIlluminance(shape, shape.hx + peak.t * BEAM.reach, 0);
+  if (!(under >= 0.8)) gaps.push(`the shaft peaks over ground that only gets ${under.toFixed(2)} of light: the shaft and its pool are two separate blobs`);
+
+  // brightness: visible haze, never a wall, and never brighter than the lit road
+  if (!(peak.core >= 0.10 && peak.core <= 0.26)) gaps.push(`the core of the shaft adds ${peak.core.toFixed(3)} of light: a fog bank or invisible`);
+  let worst = 0;
+  for (let i = 0; i <= 100; i++) worst = Math.max(worst, 2 * shaftWallAlpha(i / 100) * BEAM.gain);
+  if (!(worst <= 0.30)) gaps.push(`the shaft core reaches ${worst.toFixed(3)} at its worst sample`);
+  if (!(BEAM.gain >= 0.05 && BEAM.gain <= 0.2)) gaps.push(`per-wall gain ${BEAM.gain} is outside the pinned haze band`);
+
+  // the cone still opens out from a lens-sized first ring, still costs one volume
+  let rPrev = -1, rOpen = true;
+  for (const r of BEAM.rings) { if (r.r < rPrev) rOpen = false; rPrev = r.r; }
+  if (!rOpen) gaps.push('the shell rings do not open out along the beam');
+  if (!(BEAM.rings[0].r <= 0.15)) gaps.push(`the first ring is ${BEAM.rings[0].r} m across, not a lens`);
+  const tris = beamTriangleCount();
+  if (!(tris > 0 && tris <= 160)) gaps.push(`${tris} tris is not a cheap volume`);
+  if (beamGeometry().tris * 2 !== tris) gaps.push(`the ramp costs ${tris} tris, geometry built ${beamGeometry().tris * 2}`);
+
+  check('T41 the night shaft reads as light, not as geometry: nothing at the lens, peak over the lit pool, one rise and fall, brighter haze never outranks the road',
+    gaps.length === 0,
+    `rings t ${BEAM.rings.map((r) => r.t).join('/')} r ${BEAM.rings.map((r) => r.r).join('/')} a ${BEAM.rings.map((r) => r.a).join('/')} gain ${BEAM.gain} `
+    + `| peak ${(peak.t * BEAM.reach).toFixed(1)} m of ${BEAM.reach} m core ${peak.core.toFixed(3)} max ${worst.toFixed(3)} near-quarter ${(100 * nearWall / peak.wall).toFixed(0)}% turns=${turns} `
+    + `| lit ground under peak ${under.toFixed(2)} | tris=${tris} (budget 160) | gaps=[${gaps.join(' ')}]`);
+}
+testShaftRampReadsAsLightNotAsGeometry();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
