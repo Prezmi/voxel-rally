@@ -10,6 +10,7 @@ import { SURF } from './surfaces.js';
 import { PALETTE } from './palette.js';
 import { GeoBuilder } from '../render/primitives.js';
 import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries, buildNearLodVariantGeometries, vegToneJitter } from './props.js';
+import { PROP_CAPACITY as CAPACITY, vegBandPlan } from './veg-bands.js';
 import { settings, QUALITY } from '../core/settings.js';
 import { loadModelNodes } from '../render/assets.js';
 
@@ -34,12 +35,6 @@ const ASSET_NODES = {
 // Start-line furniture (tools/blender/build_stage_props.py): glb node -> instance cap.
 const START_NODES = {
   prop_start_gantry: 1, prop_banner_arch: 1, prop_marshal_tent: 2, prop_spectator_fence: 30,
-};
-
-const CAPACITY = {
-  [PROP.OAK]: 1400, [PROP.PINE]: 1400, [PROP.DEAD]: 700,
-  [PROP.SPECTATOR]: 1000, [PROP.POST]: 900, [PROP.MARSHAL]: 40, [PROP.GATE]: 24,
-  [PROP.BIRCH]: 900, [PROP.BUSH]: 1400, [PROP.FERN]: 1600,
 };
 
 // ---- block tile layer (visual only) ---------------------------------------
@@ -864,13 +859,9 @@ export class Streaming {
    * buffers are reused, and each buffer is uploaded once per rebuild (not per frame).
    */
   _rebuildProps(focus) {
-    const q = settings.quality;
-    const low = q === QUALITY.LOW, high = q === QUALITY.HIGH;
-    // Band radii. LOW keeps the baked voxel/glb tree only within 18 m of the car, which
-    // is where a viewer can actually read a trunk; past that the sprite/quad carries it.
-    // (Measured at MEDIUM: the old 45 m near band put 230 k of the 309 k frame
-    // triangles into trees that were too far away to read anything.)
-    const nearR = low ? 18 : (high ? 34 : 24);
+    // Band radii + instance caps live in src/world/veg-bands.js as data, so node can ask
+    // "which preset pays more for its treeline?" without a GPU, and so a cheaper preset
+    // can never buy a heavier one (the clamp in vegBandPlan).
     // Near-band triangle arithmetic (why the raised NEAR_LOD_TRIS caps do not blow the
     // frame): placement yields ~17 props per 16x16 chunk (T19 measures 1535 props over
     // 90 chunks), so a 24 m near disc inside the frustum holds ~110 tree instances at
@@ -881,29 +872,8 @@ export class Streaming {
     // Mid band pulled in 104 -> 96 m: everything past that handovers to the 2-tri
     // billboard band, which is what pays for the rebuilt vegetation carrying more blocks
     // per tree inside the near band (vegetation ~90 k, frame ~220 k at MED).
-    const midR = low ? 62 : (high ? 140 : 96);
-    // Far band: ONE camera-facing billboard quad = 2 triangles per tree, so the radius
-    // is the cheap axis and the INSTANCE CAP is what bounds the cost (the old 135 m far
-    // ring faded the forest out inside a short radius: the drive read as a clearing).
-    // `settings.vegFarDistance` is the knob; drawDistance clamps it, because a prop only
-    // exists in a chunk that was actually streamed in, and FAR DETAIL off pulls the band
-    // back hard - that is the frame-rate half of the row.
-    const vegFar = Math.max(240, Math.min(1200, settings.vegFarDistance || 620));
-    const farR = Math.min(settings.farDetail
-      ? (low ? vegFar : (high ? vegFar + 200 : vegFar + 80))
-      : vegFar * 0.55, settings.drawDistance);
-    // Posts and spectators have no sprite/billboard variant (they are too small to
-    // billboard) but they are ~100 tris each, so they keep a longer single band: corner
-    // markers have to be readable early or the corner reads as empty air.
-    // Absolute per-species instance budgets (the CAPACITY arrays are allocated once).
-    const nearCapMul = low ? 0.22 : (high ? 0.45 : 0.3);
-    // The two alpha-quad bands are capped instead of open-ended: widening midR/farR adds
-    // instances, the caps decide how many of them survive, and the cap spend is already
-    // distance-prioritised, so a cut always drops the far edge of a species, not a
-    // random hole in the middle of the stand.
-    const midCapMul = low ? 0.45 : (high ? 0.9 : 0.7);
-    const farCapMul = !settings.farDetail ? 0.45 : (low ? 0.5 : (high ? 0.95 : 0.8));
-    const nearRHard = low ? 70 : (high ? 110 : 90);
+    const bands = vegBandPlan(settings.quality, settings);
+    const { nearR, midR, farR, nearRHard, nearCapMul, midCapMul, farCapMul } = bands;
     const cam = this.renderer.camera;
     this._projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
     this._frustum.setFromProjectionMatrix(this._projScreen);

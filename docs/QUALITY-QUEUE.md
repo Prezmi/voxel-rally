@@ -12,6 +12,22 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
+- [ ] P47 · the LOW far band collapses to `vegFar x farDetailOffMul` = **253 m inside a 700 m view**
+      (`src/world/veg-bands.js` `VEG_BANDS[LOW].farDetailOffMul = 0.55`, applied in `vegBandPlan`): the row reads
+      "LOW veg 460" in T31 because that check only compares the *knob* `settings.vegFarDistance` to
+      `drawDistance`, never the effective `farR` — measured 253 m = 36 % of the streamed disc, and
+      `shots/quality-veg-low.png` (LOW, chase cam, read back) shows the forest thinning to bare terrain
+      through the middle of the corridor. Either a LOW `farDetailOffMul` that keeps the treeline at half
+      the view, or make T31 check the effective radius
+- [ ] P48 · the cost ladder is pinned for one biome only: `vegCostFromDensity` is fed 48 corridor chunks
+      of FOREST at `stage.density 1` (`src/debug/tests.js` T45). SWAMP/CANYON (P16: 55-70 % DEAD in the
+      stand) and any non-default `stage.density` are never measured, and a snag costs a third of a pine in
+      the near band — the ladder could invert on a map the check never samples
+- [ ] P49 · furniture is free in the cost model and in the budget table: `NEAR_LOD_TRIS` has no
+      `POST` / `SPECTATOR` / `MARSHAL` row, so `vegTrisPerInstance` returns 0 and `vegCostFromDensity`
+      drops them (`src/world/veg-bands.js`), while the renderer does draw them out to `nearRHard`
+      (70 m at LOW) at ~100 tris each — the posts and fence lines in that disc are ~30 k tris of cost the
+      new T45 figure does not include
 - [ ] P44 · the dev server is what the new model queue is working around: `"dev": "python3 -m http.server 8090"`
       (`package.json:8`) is an `HTTPServer` with a **5-deep accept queue** (`ss` shows `LISTEN 0 5`) speaking
       HTTP/1.0 (no keep-alive), and a boot opens ~60 module requests - 60 concurrent requests all answer
@@ -95,8 +111,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       ghost blobs (upper right and lower left of `shots/quality-night-beams.png`) sit in a
       frame where the key is already at dusk strength — `lensFlareAlpha` gates on the sun
       (`sunVis`/`sun`) with no dark-stage term
-- [ ] P11 · quality LOW now streams chunks to 250 m for the far vegetation band; confirm
-      LOW frame time is not worse than MEDIUM and clamp if it is
 - [ ] P12 · tyres have no tread relief once caked; add a cheap normal or relief term in
       the tyre dirt shader in `src/render/carMesh.js`
 - [ ] P13 · backfire flames have no audio cue; add a short procedural pop through the
@@ -197,6 +211,50 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P11 · quality LOW now streams chunks to 250 m for the far vegetation band; confirm LOW frame
+      time is not worse than MEDIUM and clamp if it is
+      · done — **confirmed: LOW does not pay more than MEDIUM, and the ladder is now a pinned
+      invariant instead of a perftest reading.** The question could not be asked from node at all:
+      every band radius and every per-species instance cap was inline inside
+      `Streaming._rebuildProps`, mixed into the instance-writing loop, so the only way to compare
+      presets was to boot the game with `?perftest=1` and read `PERF_BD` off a SwiftShader run.
+      The table moved out as data — **`src/world/veg-bands.js`**: `PROP_CAPACITY` `:34` (the
+      InstancedMesh capacities, which `src/world/streaming.js:13` now imports instead of keeping its
+      own copy), `VEG_BANDS` `:46` (radii + cap multipliers per preset, values unchanged),
+      `vegBandPlan(quality, settings)` `:98` (resolves `vegFarDistance`/`farDetail`/`drawDistance`
+      into `nearR / midR / nearRHard / farR / nearCapMul / midCapMul / farCapMul`) and
+      `vegCostFromDensity(plan, density)` `:141` (the same three bands integrated over a measured
+      prop density, caps applied, priced with `vegTrisPerInstance` `:106`: near = the `NEAR_LOD_TRIS`
+      build, mid = `SPRITE_SPEC.planes x 2`, far = one 2-tri quad). `src/world/streaming.js:875`
+      now calls `vegBandPlan` — one table, renderer and suite reading the same numbers.
+      **The measurement** (whole disc, no frustum cull — it cuts every preset the same way,
+      `tools/vegcost.mjs` reproduces it): over 48 real corridor chunks of the seed-12345 FOREST
+      stage (790 props, 16.5 per chunk) the treeline costs **LOW 27,181 tris / 3,607 instances
+      (near 17,851 + mid 3,648 + far 5,681), MED 51,410 / 7,198, HIGH 94,750 / 10,143** — LOW sits
+      47 % under MED and under-cuts it in every band separately (far 5,681 vs 10,720, mid 3,648 vs
+      8,955, near 17,851 vs 31,735), so no clamp was owed and the frame budget is untouched (no
+      geometry path was edited, the asset car is still 8,412 tris). What was owed is the guard:
+      `vegBandPlan` clamps every cheaper preset under the next one (`clampUnder` `:88`, over the 7
+      band keys), so raising a LOW radius or cap can never buy a heavier frame at LOW than at MED;
+      the clamp is live, not decorative — poisoning the LOW row to `nearR 90 / midCapMul 0.95 /
+      farAdd 900 / nearCapMul 0.9` comes back as `nearR 24 / midCapMul 0.7 / farR 700 / nearCapMul
+      0.3`. New check **T45** (`src/debug/tests.js:2923`, check at `:3002`) measures that ladder from
+      real placement data and pins: LOW <= MED <= HIGH in each of near/mid/far/total, every radius and
+      cap multiplier monotone across the three presets, the far band still exactly one quad per tree
+      (the reason its radius is the cheap axis) while the near band still carries a per-tree budget,
+      LOW's near band (its dominant cost, 66 % of its total) inside 26,000 tris, LOW's total kept at
+      least 25 % under MED so the cheap preset actually buys something, its far band never pulled
+      under 240 m, the poisoned-row clamp above, and that `streaming.js` really reads the table
+      instead of keeping an inline copy. Proof: `node src/debug/tests.js` **56/56 passed** (55 before,
+      +1), `tools/smoke.mjs` drive clean with no NaN, `tools/stagetest.mjs` ALL PASS (E1-E4 unchanged),
+      one headless Chrome pass read back: `shots/quality-veg-low.png` (`?q=LOW&cam=CHASE`, 1600x900)
+      logs no page error with the streaming layer live (`[start] prop_start_gantry=1 ...`,
+      `[blocks] block tile layer: active`, `[car] asset car "rally_v2" ACTIVE`) and the LOW frame still
+      carries both forest flanks, the fence lines and the bushes. What the same frame and the same
+      table expose is filed as **P47-P49**: LOW's effective far band is 253 m inside a 700 m view
+      (T31 checks the knob, not the radius), the ladder is pinned for FOREST density 1 only, and
+      posts/spectators/fences cost nothing in the model because `NEAR_LOD_TRIS` has no row for them.
 
 - [x] P41 · the hero car is *still* not in frame, for a second and different reason: this run's capture logs `[car] asset car "rally_v2" INACTIVE -> procedural car (no named nodes in the glb)` (`src/render/carMesh.js:191`), where P33 recorded `unavailable (Failed to fetch)` (`src/render/assets.js:23`). Two failure modes, one symptom: either the shipped `assets/models/rally_v2.glb` lost its node names in the last re-export, or the loader's node lookup and `car-asset.js` disagree. Every visual pass since has been judging the procedural fallback
       · done - the item's own diagnosis was the third wrong one, and it kept reading as three different bugs

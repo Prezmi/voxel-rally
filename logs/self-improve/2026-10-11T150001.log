@@ -18,3 +18,21 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T14:00:20.478Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Item chosen: P41** — "the hero car is *still* not in frame … `[car] asset car "rally_v2" INACTIVE -> procedural car (no named nodes in the glb)`".
+
+**Diagnosis (measured, not guessed):** the glb is fine. Parsing `assets/models/rally_v2.glb` headless with the vendored three r169 `GLTFLoader.parse` + the exact primitive fold `loadModelNodes` does returns all 18 named nodes, 0 missing, merge fine. It is the *driving* boot that loses the fetch: `rally_v2.glb` (698 kB) + `props.glb` (255 kB) + `stage_blocks.glb` (1.25 MB) are requested in one burst on top of ~60 module requests against a dev server with a 5-deep accept queue (`ss`: `LISTEN 0 5`, HTTP/1.0 no keep-alive) — 60 concurrent requests all answer 200 but the slowest took 1.3 s (SYN retransmit past the backlog). The car's request is still pending when the shot harness ends the page, the abort reads `Failed to fetch`, that rejection was **cached forever**, and the empty Map is the same value a nameless file returns — so P33 and P41 were one bug wearing two masks.
+
+**Changes**
+- `src/render/model-queue.js` (new, 136 lines, THREE-free): `MODEL_QUEUE` `:31` (concurrency **1**, attempts 3, backoff 150/600 ms, `maxSessionAttempts` 6), `nextBackoffMs` `:39`, `ModelQueue.run()` `:80` (dedupe by name), `_pump` `:96`, `_attempt` `:106` (retry re-queued, never parks a slot; session budget stops the asking)
+- `src/render/assets.js:18` queue; `:33` `fetchModel()` now *rejects* on a lost fetch / empty scene instead of resolving a fallback; `:63`,`:67` `loadModel` runs through the queue and reports the reason; `:79` a non-`glb` result is dropped from the cache (one starved connection no longer pins the procedural car for the session); `:90`,`:97-98` `loadModelNodes` stamps `source`/`reason`; `:138` scan-threw and `:147` file-with-no-names are now distinct from fetch-lost
+- `src/render/carMesh.js:223` logs `loader: <reason>` instead of "no named nodes in the glb"
+- `src/debug/tests.js:2821` test, `:2908` check **T44** (policy run in node with injected attempt + injected timer; also pins that a failure is never cached and that the sources keep the wiring)
+- `docs/QUALITY-QUEUE.md` P41 → Done; new Open items **P44** (the 5-deep dev-server backlog is the cause being worked around), **P45** (nothing re-asks for a model after the queue's attempts), **P46** (the swap won the harness timer by 13 ms — needs a "models settled" flag)
+
+**Visual proof (one headless pass, opened and judged):** `shots/quality-hero-car.png` — the previously failing route (`?frames=700&shot=1&cam=CHASE&q=LOW`, 1600x900, fresh profile) now logs `[car] asset car "rally_v2" ACTIVE (body tris=8412 fit=0.929 tyre=0.957 regions=10)` with **no** `[assets] … unavailable` line, and the frame carries the hero car under the banner arch: boxy cabin with roof hatch, snorkel on its own flank, white rear flap/diffuser, wheels in their own materials. Geometry path untouched, so the frame budget is unchanged (asset body = the same 8,412 tris the showroom passes already measured).
+
+**Verbatim test line:** `55/55 passed` (54 before, +1; `tools/smoke.mjs` drive clean, `nan false`). New check: `PASS  T44 model requests are serialized, retried and bounded, … concurrency 1, attempts 3, backoff 150/600, budget 6 | max in flight 1, order rally_v2>props>stage_blocks | flaky recovered in 2 tries after 150 ms | hard failure after 3 tries and 2 backoffs | budget asks 3, error "attempt budget (3) spent" | dup asks 1 | 8 fake loads | gaps=[]`
+
+Committed locally, not pushed: `265b6c9 quality loop: the hero car lands in the frame - one model fetch at a time, retried, and the loader says WHICH failure it was (queue P41)`.
+To https://github.com/Prezmi/voxel-rally.git
+   30d1e9e..265b6c9  main -> main

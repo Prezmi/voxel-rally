@@ -30,6 +30,7 @@ import { RallyHud } from '../game/hud-rally.js';
 import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguages, TEXT_BOXES } from '../core/i18n.js';
 import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries } from '../world/props.js';
+import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
@@ -2910,6 +2911,99 @@ async function testModelRequestsAreQueuedAndRetried() {
     `concurrency ${MODEL_QUEUE.concurrency}, attempts ${MODEL_QUEUE.attempts}, backoff ${MODEL_QUEUE.backoffMs.join('/')}, budget ${MODEL_QUEUE.maxSessionAttempts} | max in flight ${maxLive}, order ${order.join('>')} | flaky recovered in 2 tries after ${flakyWaits.join('/')} ms | hard failure after ${hardTries} tries and ${hardWaits} backoffs | budget asks ${asks}, error "${budgetErr}" | dup asks ${dupAsks} | ${calls} fake loads | gaps=[${gaps.join(' ')}]`);
 }
 await testModelRequestsAreQueuedAndRetried();
+
+// ------------------------------------------------------------------ test 45
+// The quality ladder, in triangles. "Does the cheap preset pay more than the expensive
+// one?" used to be answerable only by running the game with ?perftest=1, and the whole
+// band/cap table was inline inside Streaming._rebuildProps where node could not read it.
+// It now lives in src/world/veg-bands.js, so this check integrates the real bands over a
+// real measured prop density and pins that LOW never draws a heavier treeline than MED
+// and MED never heavier than HIGH - band by band, not just in total, because a preset
+// can hide an inversion inside one band while the total still steps up.
+function testVegetationCostLadderNeverInverts() {
+  const gaps = [];
+  // ---- 1. measure a real placement: props per square metre, per species ----
+  const SEED = 12345;
+  const terrain = makeTerrain(SEED, 'FOREST');
+  const road = buildRoad({ seed: SEED, lengthTarget: 4200, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const carveIndex = buildCarveIndex(road);
+  const stage = { road, carveIndex, terrain, biome: 'FOREST', density: 1, seed: SEED, world: null };
+  const seen = new Set(); const chunks = [];
+  for (let i = 0; i < road.n; i += 16) {
+    const k = `${Math.floor(road.x[i] / CHUNK)},${Math.floor(road.z[i] / CHUNK)}`;
+    if (!seen.has(k)) { seen.add(k); chunks.push(k); }
+  }
+  const sample = chunks.slice(0, 48);
+  const counts = {}; let placed = 0;
+  for (const k of sample) {
+    const [cx, cz] = k.split(',').map(Number);
+    for (const p of generateChunkProps(cx, cz, stage)) { placed++; counts[p.prop] = (counts[p.prop] || 0) + 1; }
+  }
+  if (sample.length < 30 || placed < 400) gaps.push(`placement sample too small to carry a cost: ${sample.length} chunks, ${placed} props`);
+  const density = vegDensity(counts, sample.length, CHUNK * CHUNK);
+
+  // ---- 2. the three preset plans, integrated over that density ----
+  // Whole-disc, no frustum cull: it is the upper bound and cuts every preset the same
+  // way, so the ladder comparison stands without a camera.
+  const ROWS = [['LOW', QUALITY.LOW], ['MED', QUALITY.MED], ['HIGH', QUALITY.HIGH]];
+  const plan = {}; const cost = {};
+  for (const [n, q] of ROWS) {
+    qualityPreset(q);
+    plan[n] = vegBandPlan(q, settings);
+    cost[n] = vegCostFromDensity(plan[n], density);
+    if (!(cost[n].total > 0)) gaps.push(`${n}: vegetation cost measured as ${cost[n].total}`);
+  }
+  qualityPreset(QUALITY.MED);
+
+  // ---- 3. the ladder, band by band ----
+  for (let i = 1; i < ROWS.length; i++) {
+    const lo = ROWS[i - 1][0], hi = ROWS[i][0];
+    for (const b of ['near', 'mid', 'far', 'total']) {
+      if (cost[lo][b] > cost[hi][b]) gaps.push(`${b} band costs more at ${lo} (${cost[lo][b].toFixed(0)}) than at ${hi} (${cost[hi][b].toFixed(0)})`);
+    }
+    for (const k of ['nearR', 'midR', 'nearRHard', 'farR', 'nearCapMul', 'midCapMul', 'farCapMul']) {
+      if (plan[lo][k] > plan[hi][k]) gaps.push(`${k} is larger at ${lo} (${plan[lo][k]}) than at ${hi} (${plan[hi][k]})`);
+    }
+  }
+
+  // ---- 4. why the far radius is the cheap axis: 2 tris vs a whole tree ----
+  if (vegTrisPerInstance(PROP.PINE, 'far') !== 2) gaps.push('the far band is no longer one quad per tree, so its radius is not the cheap axis');
+  if (!(vegTrisPerInstance(PROP.PINE, 'near') >= 100)) gaps.push('the near band carries no per-tree budget, so nearR is the axis that eats the frame');
+  if (!(vegTrisPerInstance(PROP.PINE, 'mid') === SPRITE_SPEC[PROP.PINE].planes * 2)) gaps.push('the mid band is not the crossed-quad sprite');
+
+  // ---- 5. the near band at LOW is pinned, not merely cheaper than MED ----
+  const LOW_NEAR_CEIL = 26000;
+  if (cost.LOW.near > LOW_NEAR_CEIL) gaps.push(`LOW near band ${cost.LOW.near.toFixed(0)} tris over its ${LOW_NEAR_CEIL} budget`);
+  if (cost.LOW.total > cost.MED.total * 0.75) gaps.push(`LOW vegetation ${cost.LOW.total.toFixed(0)} is within ${((cost.LOW.total / cost.MED.total) * 100).toFixed(0)}% of MED: the cheap preset buys almost nothing`);
+  // the clamp must not be able to erase the treeline either
+  if (plan.LOW.farR < 240) gaps.push(`LOW far band pulled in to ${plan.LOW.farR.toFixed(0)} m: the forest ends inside the near field`);
+
+  // ---- 6. the clamp binds: poison the LOW row, the plan must still sit under MED ----
+  const row = VEG_BANDS[QUALITY.LOW];
+  const saved = { ...row };
+  row.nearR = 90; row.midCapMul = 0.95; row.farAdd = 900; row.nearCapMul = 0.9;
+  const poisoned = vegBandPlan(QUALITY.LOW, settings);
+  const med = vegBandPlan(QUALITY.MED, settings);
+  const poisonedCost = vegCostFromDensity(poisoned, density);
+  if (poisoned.nearR > med.nearR || poisoned.midCapMul > med.midCapMul || poisoned.nearCapMul > med.nearCapMul) {
+    gaps.push(`a poisoned LOW row stays above MED (nearR ${poisoned.nearR}, capMul ${poisoned.nearCapMul}/${poisoned.midCapMul})`);
+  }
+  if (poisoned.farR > med.farR) gaps.push(`a poisoned LOW row reaches ${poisoned.farR} m past MED's ${med.farR} m`);
+  if (poisonedCost.total > cost.MED.total) gaps.push(`a poisoned LOW row costs ${poisonedCost.total.toFixed(0)} over MED's ${cost.MED.total.toFixed(0)}`);
+  Object.assign(row, saved);
+  if (vegBandPlan(QUALITY.LOW, settings).nearR !== plan.LOW.nearR) gaps.push('the LOW row was not restored after poisoning');
+
+  // ---- 7. the renderer reads this table instead of keeping its own copy ----
+  const streamSrc = readFileSync(new URL('../world/streaming.js', import.meta.url), 'utf8');
+  if (!/vegBandPlan\(/.test(streamSrc)) gaps.push('streaming.js still resolves its own band radii inline');
+  if (/nearCapMul = low|midCapMul = low \?|farCapMul = !settings\.farDetail/.test(streamSrc)) gaps.push('the band table is still duplicated in streaming.js');
+
+  const line = (n) => `${n} near ${plan[n].nearR}m/mid ${plan[n].midR}m/far ${plan[n].farR}m caps ${plan[n].nearCapMul}/${plan[n].midCapMul}/${plan[n].farCapMul} = ${cost[n].near.toFixed(0)}+${cost[n].mid.toFixed(0)}+${cost[n].far.toFixed(0)} = ${cost[n].total.toFixed(0)} tris / ${cost[n].instances.toFixed(0)} inst`;
+  check('T45 the vegetation cost ladder never inverts: measured over a real FOREST placement, LOW draws a cheaper treeline than MED and MED than HIGH band by band, the far band stays one quad per tree, the LOW near band sits inside its budget, and a poisoned LOW row is clamped under MED',
+    gaps.length === 0,
+    `${sample.length} chunks / ${placed} props = ${(placed / sample.length).toFixed(1)} per chunk | ${line('LOW')} | ${line('MED')} | ${line('HIGH')} | gaps=[${gaps.join(' ')}]`);
+}
+testVegetationCostLadderNeverInverts();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
