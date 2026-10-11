@@ -35,7 +35,7 @@ import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguag
 import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, SPRITE_TONES, hasFarCell, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance, vegBandHas } from '../world/veg-bands.js';
-import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, ROAD_COVER_INSET, RIBBON_EDGE_BAND } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, ROAD_COVER_INSET, RIBBON_EDGE_BAND, ribbonBedLevel } from '../world/road-carve.js';
 import { meshChunk } from '../world/mesher.js';
 import { ribbonChunk, ribbonHeight, terrainTopBilinear, ribbonHalf, STEP_ALONG, STEP_ACROSS, RIBBON_DROP, EDGE_BLOCK_BAND } from '../world/road-ribbon.js';
 import { TILE_ON_CARRIAGEWAY, chunkTiles, TILE_SURFACE_IDS, TILE_CAP_CHUNK } from '../world/block-tiles.js';
@@ -4245,6 +4245,52 @@ function testRoadRibbonIsOneContinuousSurface() {
       }
     }
   }
+  // (3) SHOULDER SHAVE (the pale cards lying along both road edges): a terrain column
+  // inside the shoulder + ribbon-edge band must not stand over the ribbon edge it is
+  // carved into (that overhang is a down-facing face the hemisphere light paints sky
+  // pale), and the shave must not leave a step taller than 0.20 m inside the band.
+  const bandCol = (gx, gz) => {
+    const q = world.columnTopQAt(gx, gz);
+    if (q < 0) return null;
+    const px = gx + 0.5, pz = gz + 0.5;
+    const iN = road.nearest(px, pz);
+    const lat = (px - road.x[iN]) * road.nx[iN] + (pz - road.z[iN]) * road.nz[iN];
+    const hw = road.width[iN] / 2, ad = Math.abs(lat);
+    if (ad <= hw || ad > hw + SHOULDER + RIBBON_EDGE_BAND) return null;
+    const y = q / 16, bed = ribbonBedLevel(road, iN, px, pz);
+    return { y, bed, over: y - bed };
+  };
+  let bandN = 0, bandOver = 0, maxOver = 0, bandStep = 0, bandRaw = 0, worstBandStep = 0;
+  for (const key of index.keys()) {
+    const bx = keyToCx(key) * CHUNK, bz = keyToCz(key) * CHUNK;
+    for (let lz = 0; lz < CHUNK; lz++) {
+      for (let lx = 0; lx < CHUNK; lx++) {
+        const a = bandCol(bx + lx, bz + lz);
+        if (!a) continue;
+        bandN++;
+        if (a.over > maxOver) maxOver = a.over;
+        if (a.over > 0.02 && a.over < 1.30) bandOver++;
+        for (const [dx, dz] of [[1, 0], [0, 1]]) {
+          // Along the corridor only: the lateral step IS the bank/camber of the corner and
+          // is wanted; the shave must not stair the corridor as it runs.
+          const iA = road.nearest(bx + lx + 0.5, bz + lz + 0.5);
+          if (Math.abs(dx * road.tx[iA] + dz * road.tz[iA]) < 0.5) continue;
+          const b = bandCol(bx + lx + dx, bz + lz + dz);
+          if (!b) continue;
+          const st = Math.abs(a.y - b.y);
+          // The shave may only stair the corridor beyond the gradient of the ribbon bed it
+            // is shaving to: anything wider than that plus both residuals is a bank/cut, wanted.
+          if (st > 0.20) bandRaw++;
+          const lim = Math.max(0.20, Math.abs(a.bed - b.bed) + Math.abs(a.over) + Math.abs(b.over));
+          if (st > lim) bandStep++;
+          if (st > worstBandStep) worstBandStep = st;
+        }
+      }
+    }
+  }
+  if (bandN < 200) gaps.push(`shave probe saw only ${bandN} shoulder/edge band columns`);
+  if (bandOver) gaps.push(`${bandOver}/${bandN} shoulder-band columns still overhang the ribbon edge (worst ${maxOver.toFixed(3)} m)`);
+  if (bandStep) gaps.push(`${bandStep}/${bandN} corridor steps in the shoulder band exceed the bed gradient by over 0.20 m (worst ${worstBandStep.toFixed(3)} m)`);
   if (edgeTopMissing) gaps.push(`${edgeTopMissing}/${edgeCellN} boundary columns (centre within 0.6 m of the lane boundary) lost their terrain top face`);
   if (halfMismatch) gaps.push(`${halfMismatch} road samples disagree between road-ribbon.js ribbonHalf and road-carve.js RIBBON_EDGE_BAND`);
   if (coverBits === 0) gaps.push('no column carries the baked road-cover bit');
@@ -4262,9 +4308,9 @@ function testRoadRibbonIsOneContinuousSurface() {
   if (cover < coverWanted * 0.98) gaps.push(`${coverWanted - cover} lane samples are not covered by the ribbon on the ground`);
   if (!(quads > 4000 && verts > 4000)) gaps.push(`ribbon too small: ${quads} quads / ${verts} verts`);
   if (!(STEP_ALONG === 1 && STEP_ACROSS === 0.5)) gaps.push(`ribbon grid ${STEP_ALONG}/${STEP_ACROSS} m, want 1.0 along / 0.5 across`);
-  check('T59 the lane is one continuous ribbon mesh, not stepped voxel columns: no voxel top face or riser is drawn inside the lane band, the 1 m x 0.5 m ribbon grid is welded across chunk borders, it never stands proud of the terrain top and adds no step along the lane the ground does not have',
+  check('T59 the lane is one continuous ribbon mesh, not stepped voxel columns: no voxel top face or riser is drawn inside the lane band, the 1 m x 0.5 m ribbon grid is welded across chunk borders, it never stands proud of the terrain top and adds no step along the lane the ground does not have, no column in the shoulder band overhangs the ribbon edge and no corridor step exceeds 0.20 m',
     gaps.length === 0,
-    `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} coverBits=${coverBits} keptCovered=${coverKept} coverHole=${coverHole} coverMiss=${coverMiss} ribbonHalfMismatch=${halfMismatch} coverInset=${ROAD_COVER_INSET} edgeTopMissing=${edgeTopMissing}/${edgeCellN} edgeSurfaceMax=${edgeSurfaceMax.toFixed(3)}m gaps=[${gaps.join(' ')}]`);
+    `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} coverBits=${coverBits} keptCovered=${coverKept} coverHole=${coverHole} coverMiss=${coverMiss} ribbonHalfMismatch=${halfMismatch} coverInset=${ROAD_COVER_INSET} edgeTopMissing=${edgeTopMissing}/${edgeCellN} edgeSurfaceMax=${edgeSurfaceMax.toFixed(3)}m shaveBand=${bandN} shaveOverhang=${bandOver} worstOver=${maxOver.toFixed(3)}m shaveSteps=${bandStep} bandStepsOver0.2=${bandRaw} worstBandStep=${worstBandStep.toFixed(3)}m gaps=[${gaps.join(' ')}]`);
 }
 testRoadRibbonIsOneContinuousSurface();
 

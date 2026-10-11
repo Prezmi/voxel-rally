@@ -89,6 +89,36 @@ const scratchH = new Float32Array(COLS);      // road bed height at that sample 
 const scratchHW = new Float32Array(COLS);     // carriageway half-width at that sample
 const scratchBlock = new Uint8Array(COLS);
 const scratchUsed = new Uint8Array(COLS);
+const scratchShaved = new Uint8Array(COLS);
+
+// ---- SHOULDER SHAVE (JOB: white cards lying along both road edges, shots/crowns.png) ----
+// The voxel terrain steps at the corridor edge overhang the road ribbon by a few cm: the
+// step goes UP away from the lane, the down-facing face of that overhang is lit by the
+// hemisphere sky term and reads as a pale card on the verge. Fixed by removing the
+// overhang, not the colour: a shoulder/edge-band column that stands between SHAVE_MIN and
+// SHAVE_MAX above the ribbon edge over it is dropped to that edge, so the step falls away
+// from the lane instead of over it. Genuine cuts and banked corner walls (over SHAVE_MAX)
+// are untouched, and the shave is chained through the neighbouring columns so it never
+// leaves a single step taller than SHAVE_STEP anywhere in the corridor.
+export const SHAVE_MIN = 0.02;                       // m: below this the ribbon is already flush
+export const SHAVE_MAX = 1.30;                       // m: above this it is a real cut / bank wall
+export const SHAVE_STEP = 0.20;                      // m: biggest step the shave may leave
+export const SHAVE_BAND = SHOULDER + RIBBON_EDGE_BAND; // m past the carriageway edge (strict zone)
+export const SHAVE_BLEND = 3.6;                       // m: taper of the shave onto natural ground
+export const SHAVE_STATS = { columns: 0, dropSum: 0 };
+const NB4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+/** The same uncamped ribbon bed field the carve shaves to, sampled from a station + point. */
+export function ribbonBedLevel(road, i, x, z) {
+  const hw = road.width[i] / 2;
+  const d = (x - road.x[i]) * road.nx[i] + (z - road.z[i]) * road.nz[i];
+  const ad = Math.abs(d), u = ad / hw;
+  const wl = Math.exp(-Math.pow((ad - hw * RUT_AT) / (hw * RUT_WIDTH), 2));
+  let y = road.h[i] + d * Math.tan(road.camber[i]) - CROWN * hw * u * u - RUT_DEPTH * wl;
+  y += (valueNoise(x, z, 1, GRIT_SALT) - 0.5) * GRAVEL_RIPPLE;
+  y += (valueNoise(x, z, 2, EDGE_SALT) - 0.5) * EDGE_BREAK * Math.max(0, (u - 0.55) / 0.45);
+  return y;
+}
 
 /**
  * Local average of the natural ground around a column (3 samples at stride 2, so a
@@ -139,6 +169,7 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
 
   scratchBest.fill(1e9);
   scratchUsed.fill(0);
+  scratchShaved.fill(0);
 
   for (let k = 0; k < samples.length; k++) {
     const i = samples[k];
@@ -264,7 +295,59 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
     }
     if (world.carveColumn(colX, colZ, target, blockId)) writes++;
   }
+  // The heightfield blend (crown/rut/carve-to-own-ground relax) above is what sets the
+  // corridor profile; the shave runs after it and before the map is written, so it lands
+  // in the baked maps and in the runtime carve alike.
+  if (process.env.RALLY_NO_SHAVE !== '1') shaveOverhang(world, chunk, road, x0, z0);
   return writes;
+}
+
+/**
+ * Drop every shoulder/ribbon-edge-band column that overhangs the ribbon over it. Strict
+ * zone = shoulder + ribbon edge band; past it the drop tapers to nothing over SHAVE_BLEND
+ * metres so the corridor never ends on a fresh step. A column never moves more than
+ * SHAVE_STEP below a neighbour that was already set (the taper plus the shared analytic
+ * ribbon level keep the along-corridor steps well inside that).
+ */
+function shaveOverhang(world, chunk, road, x0, z0) {
+  for (let pass = 0; pass < 2; pass++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!scratchUsed[c]) continue;
+      const lx = c & (CHUNK - 1), lz = c >> 4;
+      const gx = x0 + lx, gz = z0 + lz;
+      // Judged from the column centre against its own nearest station - the same measure
+      // the ribbon test uses, so carve and test cannot disagree on what overhangs.
+      const px = gx + 0.5, pz = gz + 0.5;
+      const iN = road.nearest(px, pz);
+      const hw = road.width[iN] / 2;
+      const absD = Math.abs((px - road.x[iN]) * road.nx[iN] + (pz - road.z[iN]) * road.nz[iN]);
+      if (absD <= hw || absD > hw + SHAVE_BAND + SHAVE_BLEND) continue;  // lane / outside the shave
+      const cur = chunk.columnTop(c);
+      if (cur < 0) continue;
+      const level = ribbonBedLevel(road, iN, px, pz);
+      const over = cur - level;
+      if (over < SHAVE_MIN || over > SHAVE_MAX) continue;   // flush, or a real cut / bank wall
+      let w = 1;
+      if (absD > hw + SHAVE_BAND) {
+        w = Math.max(0, 1 - (absD - hw - SHAVE_BAND) / SHAVE_BLEND);
+        if (w <= 0) continue;
+        let floor = level;                                   // taper keeps neighbour continuity
+        for (const [dx, dz] of NB4) {
+          const q = world.columnTopQAt(gx + dx, gz + dz);
+          if (q < 0) continue;
+          if (q / 16 - SHAVE_STEP > floor) floor = q / 16 - SHAVE_STEP;
+        }
+        if (floor > cur - over * w) w = Math.max(0, (cur - floor) / over);
+        if (w <= 0) continue;
+      }
+      const target = cur - over * w - (w === 1 ? 0.02 : 0);
+      if (target >= cur - 1e-4) continue;
+      if (!scratchShaved[c]) { scratchShaved[c] = 1; SHAVE_STATS.columns++; SHAVE_STATS.dropSum += cur - target; }
+      const under = chunk.blocks[c * WORLD_HEIGHT + chunk.height[c]];
+      const blockId = (under && !FROZEN.has(under)) ? under : BLOCK.DIRT;
+      world.carveColumn(gx, gz, target, blockId);
+    }
+  }
 }
 
 /** Whole-stage carve (used by tests / offline generation). */
