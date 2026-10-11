@@ -483,7 +483,10 @@ export class RallyHud {
   update(dt, ctx) {
     if (!ctx || !ctx.stage) return;
     const st = ctx.stage;
-    if (st.state === STATE.PRE_START && this.top() === 'hud') {
+    // HUD OFF (the ?showroom=1 route, src/debug/showroom.js) must leave a blank
+    // frame: the countdown is a modal screen, not a panel, so it used to survive
+    // hudMode OFF and put "START ZA 3.0 s" across the showroom shot.
+    if (st.state === STATE.PRE_START && this.top() === 'hud' && this.mode !== 'OFF') {
       this._modalText[0] = `START ZA ${Math.max(0, st.countdown).toFixed(1)} s`;
       this._modalText[1] = '';
       this._info = [];

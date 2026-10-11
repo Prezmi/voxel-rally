@@ -266,20 +266,29 @@ function adoptAssetCar(view, proceduralWheels) {
       node.scale.set(ts, ts, ts);
       node.castShadow = true;
       node.receiveShadow = true;
-      const src = Array.isArray(wheelRecs[i].material) ? wheelRecs[i].material[0] : wheelRecs[i].material;
-      const mat = src && src.clone ? src.clone() : new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.08 });
-      mat.vertexColors = false;
-      // The corner's own arch panel feeds the tyre's dirt state.
+      // Keep the wheel's OWN materials. Collapsing the multi-primitive wheel onto
+      // material[0] plus the arch-dirt patch is what turned every wheel into one
+      // flat brown disc: rubber, alloy face, spokes and hub nut all shared a single
+      // tinted material (shots/showroom.png). Rubber/sidewall alone take the dirt
+      // response; the alloy, spokes and the nut stay clean and keep their contrast.
       const archKey = ['archFL', 'archFR', 'archRL', 'archRR'][i] || 'archRL';
-      attachTyreDirt(mat, view.dtex, PANEL_INDEX[archKey], wheelRecs[i].geometry);
-      node.material = mat;
+      const tyreMats = [];
       node.traverse((c) => {                   // multi-primitive wheel: Group of meshes
         if (!c.isMesh) return;
-        c.material = mat;
         c.castShadow = true;
         c.receiveShadow = true;
+        const src = Array.isArray(c.material) ? c.material[0] : c.material;
+        const mat = src && src.clone ? src.clone() : new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.08 });
+        mat.vertexColors = false;
+        const nm = String(mat.name || (src && src.name) || '');
+        if (/tyre|rubber|sidewall/i.test(nm)) {
+          attachTyreDirt(mat, view.dtex, PANEL_INDEX[archKey], c.geometry);
+          tyreMats.push(mat);
+        }
+        c.material = mat;
       });
-      (view.tyreMats || (view.tyreMats = []))[i] = mat;
+      node.material = null;
+      (view.tyreMats || (view.tyreMats = []))[i] = tyreMats;
       const pivot = new THREE.Object3D();
       pivot.matrixAutoUpdate = false;
       pivot.add(node);
@@ -754,11 +763,13 @@ export function updateCarDirt(view, car, dirt) {
   // per-wheel colour, so rubber and alloy can never read as one flat tint).
   if (view.tyreMats) {
     for (let i = 0; i < 4; i++) {
-      const m = view.tyreMats[i];
-      const ts = m && m.userData.shader;
-      if (!ts) continue;
-      ts.uniforms.uSpeed.value = car.body.groundSpeed;
-      ts.uniforms.uRubber.value = panels.rubber ? clamp01(panels.rubber[i]) : 0;
+      const list = Array.isArray(view.tyreMats[i]) ? view.tyreMats[i] : [view.tyreMats[i]];
+      for (const m of list) {
+        const ts = m && m.userData && m.userData.shader;
+        if (!ts) continue;
+        ts.uniforms.uSpeed.value = car.body.groundSpeed;
+        ts.uniforms.uRubber.value = panels.rubber ? clamp01(panels.rubber[i]) : 0;
+      }
     }
   }
 }

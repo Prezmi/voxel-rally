@@ -21,7 +21,10 @@ const TEAM = {
   D: { primary: '#d8a416', secondary: '#22242a', num: 5 },
 };
 
-const S = 128;
+// 512, not 128: the flank half of the atlas is 0.46 of the canvas over a 4.1 m
+// body (T35/T38), so at 128 the 0.35 m roundel was under 4 texels wide and the
+// number dissolved. At 512 it is ~20 texels across and the digit stays legible.
+const S = 512;
 const INK = '#1a1b1f';
 
 /** Atlas rects the paint occupies (u/v, same space as the projection in
@@ -29,9 +32,23 @@ const INK = '#1a1b1f';
  *  roundel and the sponsor strip can only land on the door / rear quarter
  *  panel skin, never on the greenhouse. car-asset.js parks every glass face at
  *  GLASS_UV, and src/debug/tests.js T35 asserts these rects stay glass-free. */
-export const LIVERY_BAND = { u0: 0.150, u1: 0.340, v0: 0.280, v1: 0.460 };
-export const LIVERY_ROUND = { u: 0.255, v: 0.400, r: 9.0 / S };
-export const LIVERY_STRIP = { u0: 0.350, u1: 0.435, v0: 0.250, v1: 0.280 };
+/**
+ * METRIC numbers (T38): the flank projection in car-asset.js is isotropic at
+ * mu = FLANK_UV.uSpan / bodyLength = 0.46 / 4.114 = 0.11182 atlas units per
+ * METRE, so these rects convert straight back to metres on the door:
+ *   band   x -0.794..+0.413 m, y -0.056..+0.223 m (the model's own white band,
+ *          rows 6..8 cols 13..25, so baked and painted band are the same band)
+ *   roundel centre x -0.075 m (mid door panel, arch gaps at -1.05 / +0.90),
+ *          y +0.037 m (z 0.60, i.e. under the 0.85 m belt line), r = 0.175 m
+ *          => a 0.35 m CIRCLE, never an ellipse, and clear of both arches
+ *   strip  x +0.487..+0.785 m, z 0.76..0.80 m (ahead of the door, behind the
+ *          front arch at +0.90 m, below the belt)
+ * Nothing here reaches u > 0.34 or v > 0.115: the flank rect runs u 0.02..0.48,
+ * v 0.03..0.198, glass is parked at GLASS_UV and every arch panel is masked.
+ */
+export const LIVERY_BAND = { u0: 0.1612, u1: 0.2962, v0: 0.0819, v1: 0.1131 };
+export const LIVERY_ROUND = { u: 0.2469, v: 0.0917, r: 0.0196 };
+export const LIVERY_STRIP = { u0: 0.3044, u1: 0.3375, v0: 0.1092, v1: 0.1133 };
 
 const lerp = (a, b, k) => a + (b - a) * k;
 /** Canvas x for a texture u in 0..1. */
@@ -67,7 +84,7 @@ export function drawLivery(ctx, carId) {
   ctx.stroke();
   const label = String(t.num);
   ctx.fillStyle = '#141414';
-  ctx.font = `bold ${label.length > 1 ? 11 : 14}px monospace`;
+  ctx.font = `bold ${label.length > 1 ? 11 : 14}px monospace`;   // ~2/3 of the 20 texel roundel
   ctx.textBaseline = 'middle';
   ctx.fillText(label, cx - ctx.measureText(label).width / 2, cy);
   ctx.textBaseline = 'alphabetic';

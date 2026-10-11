@@ -11,7 +11,7 @@ import { SURF, SURFACES, surface } from '../world/surfaces.js';
 import { TYRE_BASE, CARS } from '../car/car-params.js';
 import { DT, MAX_STEPS_PER_FRAME } from '../core/time.js';
 import { FrameLoop } from '../core/loop.js';
-import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV } from '../render/car-asset.js';
+import { buildAssetBody, tyreScale, BODY_PARTS, WHEEL_NODES, defaultExhaust, GLASS_TINT, GLASS_UV, ARCH_PANELS, FLANK_UV } from '../render/car-asset.js';
 import { LIVERY_BAND, LIVERY_ROUND, LIVERY_STRIP } from '../render/car-livery.js';
 import { FxSystem } from '../fx/fx.js';
 import { bus } from '../core/events.js';
@@ -2111,20 +2111,29 @@ function testLiveryGlassSeparation() {
       glass++;
       if (built.aLiv[i] !== 0 || inBand(u, v) || inStrip(u, v) || inRound(u, v)) glassBad++;
       if (Math.abs(u - GLASS_UV[0]) < 1e-6 && Math.abs(v - GLASS_UV[1]) < 1e-6) parked++;
-    } else if (built.aLiv[i] === 1 && u >= LIVERY_BAND.u0 && u <= LIVERY_BAND.u1) {
+    } else if (built.aLiv[i] === 1 && u <= FLANK_UV.u0 + FLANK_UV.uSpan) {
       painted++;
       u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
     }
   }
   const doorCoversRoundel = painted > 0
-    && u0 <= LIVERY_ROUND.u && u1 >= LIVERY_ROUND.u
-    && v0 <= LIVERY_ROUND.v - LIVERY_ROUND.r && v1 >= LIVERY_ROUND.v + LIVERY_ROUND.r;
+    && u0 <= LIVERY_ROUND.u && u1 >= LIVERY_ROUND.u;
+  // The roundel has to be a CIRCLE in metres, not in texels: convert its rect
+  // back through the flank metric (x = (u-u0)/mu - halfX, y = (v-v0)/mu + yb).
+  const M = built.livMetric;
+  const rx0 = (LIVERY_ROUND.u - LIVERY_ROUND.r - M.u0) / M.mu - M.halfX;
+  const rx1 = (LIVERY_ROUND.u + LIVERY_ROUND.r - M.u0) / M.mu - M.halfX;
+  const ry0 = (LIVERY_ROUND.v - LIVERY_ROUND.r - M.v0) / M.mu + M.yb;
+  const ry1 = (LIVERY_ROUND.v + LIVERY_ROUND.r - M.v0) / M.mu + M.yb;
+  const dx = rx1 - rx0, dy = ry1 - ry0;
+  const roundelMetric = Math.abs(dx - dy) < 0.02 && dx > 0.30 && dx < 0.40
+    && rx0 > -M.halfX && rx1 < M.halfX && ry0 > M.yb && ry1 < M.yt;
   const rectsOnFlank = LIVERY_BAND.u1 <= 0.45 && LIVERY_STRIP.u1 <= 0.45
     && LIVERY_BAND.v1 <= 0.50 && LIVERY_ROUND.v + LIVERY_ROUND.r <= 0.50;
-  const ok = glass >= 12 && glassBad === 0 && parked === glass && doorCoversRoundel && rectsOnFlank;
+  const ok = glass >= 12 && glassBad === 0 && parked === glass && doorCoversRoundel && rectsOnFlank && roundelMetric;
   check('T35 no glass face reads the livery: glass is masked + parked outside the band/roundel rects, the door skin still carries the roundel',
     ok,
-    `glassVerts=${glass} glassBad=${glassBad} parked=${parked}/${glass} | door u[${u0.toFixed(3)}..${u1.toFixed(3)}] v[${v0.toFixed(3)}..${v1.toFixed(3)}] roundel(${LIVERY_ROUND.u},${LIVERY_ROUND.v}) r=${LIVERY_ROUND.r.toFixed(3)} | band u[${LIVERY_BAND.u0}..${LIVERY_BAND.u1}] v[${LIVERY_BAND.v0}..${LIVERY_BAND.v1}] strip u[${LIVERY_STRIP.u0}..${LIVERY_STRIP.u1}] v[${LIVERY_STRIP.v0}..${LIVERY_STRIP.v1}]`);
+    `glassVerts=${glass} glassBad=${glassBad} parked=${parked}/${glass} | roundel ${dx.toFixed(3)}x${dy.toFixed(3)} m at x[${rx0.toFixed(2)}..${rx1.toFixed(2)}] y[${ry0.toFixed(2)}..${ry1.toFixed(2)}] | door u[${u0.toFixed(3)}..${u1.toFixed(3)}] v[${v0.toFixed(3)}..${v1.toFixed(3)}] roundel(${LIVERY_ROUND.u},${LIVERY_ROUND.v}) r=${LIVERY_ROUND.r.toFixed(3)} | band u[${LIVERY_BAND.u0}..${LIVERY_BAND.u1}] v[${LIVERY_BAND.v0}..${LIVERY_BAND.v1}] strip u[${LIVERY_STRIP.u0}..${LIVERY_STRIP.u1}] v[${LIVERY_STRIP.v0}..${LIVERY_STRIP.v1}]`);
 }
 testLiveryGlassSeparation();
 
@@ -2203,6 +2212,66 @@ function testShowroomRoute() {
     `active=${cfg.active} view=${cfg.view} off=${off.active} frozen=${route.simFrozen} stream=${route.streamWorld} hud=${route.hudMode} dist side=${side.dist.toFixed(2)} rear=${rear.dist.toFixed(2)} 3q=${tq.dist.toFixed(2)} (want ${dSide.toFixed(2)}/${dRear.toFixed(2)}/${d3q.toFixed(2)}) fov=${side.fovDeg.toFixed(1)}`);
 }
 testShowroomRoute();
+
+// ---------------------------------------------------------------- test 38
+// The flank projection is METRIC (one atlas scale per panel, not one planar map
+// over the whole body), so a painted rect converts back to the same number of
+// metres on u and on v. T38 uses that to prove the roundel/band/strip never
+// reach a wheel, an arch or a glass face: their metre footprint must not
+// overlap the x/y extent of any arch-panel vertex or of the glass region, and
+// arch vertices are masked out of the livery mask entirely (aLiv 0).
+function testRoundelClearsWheelsArchesGlass() {
+  const w = new FlatWorld(SURF.DIRT);
+  const params = makeCar(w, {}).params;
+  const nodes = fakeNodes();
+  nodes.get('car_panel').material = [{ name: 'rally_glass' }];
+  const built = buildAssetBody(nodes, params);
+  const M = built.livMetric;
+  const X = (u) => (u - M.u0) / M.mu - M.halfX;
+  const Y = (v) => (v - M.v0) / M.mu + M.yb;
+  const rects = [
+    ['band', X(LIVERY_BAND.u0), X(LIVERY_BAND.u1), Y(LIVERY_BAND.v0), Y(LIVERY_BAND.v1)],
+    ['roundel', X(LIVERY_ROUND.u - LIVERY_ROUND.r), X(LIVERY_ROUND.u + LIVERY_ROUND.r), Y(LIVERY_ROUND.v - LIVERY_ROUND.r), Y(LIVERY_ROUND.v + LIVERY_ROUND.r)],
+    ['strip', X(LIVERY_STRIP.u0), X(LIVERY_STRIP.u1), Y(LIVERY_STRIP.v0), Y(LIVERY_STRIP.v1)],
+  ];
+  // 1. every arch-panel + glass vertex stays out of the mask and out of the rects
+  const inAny = (u, v) => rects.some(([, ax0, ax1, ay0, ay1]) => u >= ax0 && u <= ax1 && v >= ay0 && v <= ay1);
+  let archVerts = 0, archBad = 0;
+  for (let i = 0; i < built.count; i++) {
+    if (!ARCH_PANELS.has(built.aPanel[i])) continue;
+    archVerts++;
+    if (built.aLiv[i] !== 0) archBad++;
+  }
+  // 2. glass region: no vertex inside a rect, and it starts above the paint
+  let glassUvBad = 0, glassY = 9;
+  const gr = built.ranges.glass;
+  if (gr) for (let i = gr[0]; i < gr[1]; i++) {
+    if (inAny(built.aLivUv[i * 2], built.aLivUv[i * 2 + 1])) glassUvBad++;
+    glassY = Math.min(glassY, built.position[i * 3 + 1]);
+  }
+  // 3. metric overlap of the metre footprints against every arch box, and the
+  //    roundel has to be a circle (equal u/v scale) of ~0.35 m
+  // 3. the real geometry contract, in metres: every painted rect sits inside the
+  //    door window - short of the inner edge of the nearest wheel, above the
+  //    sill, below the belt line (where the glass starts) - and the roundel is a
+  //    circle, not an ellipse, because the flank projection is isotropic.
+  const wheelEdge = params.wheelbase / 2 - TYRE_BASE.r;      // inner wheel plane
+  const sillTop = M.yb + 0.15 * built.scale, belt = M.yb + 0.82 * built.scale;
+  let outside = 0;
+  for (const [nm, x0, x1, y0, y1] of rects) {
+    if (Math.abs(x0) > wheelEdge - 0.05 || Math.abs(x1) > wheelEdge - 0.05) outside++;
+    if (y0 < sillTop || y1 > belt) outside++;
+  }
+  const diam = X(LIVERY_ROUND.u + LIVERY_ROUND.r) - X(LIVERY_ROUND.u - LIVERY_ROUND.r);
+  const diamY = Y(LIVERY_ROUND.v + LIVERY_ROUND.r) - Y(LIVERY_ROUND.v - LIVERY_ROUND.r);
+  const bandYTop = Y(LIVERY_BAND.v1);
+  const ok = archVerts >= 4 && archBad === 0 && glassUvBad === 0 && outside === 0
+    && bandYTop < glassY && Math.abs(diam - diamY) < 0.02 && diam > 0.30 && diam < 0.40;
+  check('T38 roundel + band + strip uv rects never intersect a wheel arch, wheel or glass face, and the projection is metric (isotropic)',
+    ok,
+    `archVerts=${archVerts} archMaskedBad=${archBad} glassUvInRect=${glassUvBad} rectsOutsideDoorWindow=${outside} | roundel ${diam.toFixed(3)}x${diamY.toFixed(3)} m (want ~0.35) bandTop y=${bandYTop.toFixed(3)} < glassY=${glassY.toFixed(3)} | wheelEdge x=${wheelEdge.toFixed(2)} sill=${sillTop.toFixed(2)} belt=${belt.toFixed(2)} | rects ${rects.map((r) => `${r[0]} x[${r[1].toFixed(2)}..${r[2].toFixed(2)}] y[${r[3].toFixed(2)}..${r[4].toFixed(2)}]`).join(' ')} | flank u[${FLANK_UV.u0}..${(FLANK_UV.u0 + FLANK_UV.uSpan).toFixed(2)}] mu=${M.mu.toFixed(5)}`);
+}
+testRoundelClearsWheelsArchesGlass();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

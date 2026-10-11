@@ -125,13 +125,18 @@ def build_livery():
 
 
 def build_hardware():
-    # roof lamp bar: dark carbon rail raised on two feet so it reads clear of the white
-    # roof panel, with four pods spaced apart (never one white blob)
-    for c in (15, 25):
-        put("lamps", "carbon", cx(c), ZTOP + 0.030, sy=0.34, sz=0.08)
-    put("lamps", "carbon", cx(20), ZTOP + 0.080, sx=1.30, sy=0.56, sz=0.08)
+    # Roof lamp pod, ON the roof (shots/showroom.png had it floating: the feet
+    # were pinned to ZTOP, but the roof panel is profile row 1, whose top face is
+    # one block BELOW ZTOP). Feet on the roof skin, a full-width mounting bar
+    # across them, and four pods that are a dark carbon housing with a bright
+    # lens face proud of its front - not four white blobs.
+    ROOF = ZTOP - B                            # top face of profile row 1 = 1.30 m
+    for c in (15, 25):                         # feet, touching the roof skin
+        put("lamps", "carbon", cx(c), ROOF + 0.045, sy=0.34, sz=0.09)
+    put("lamps", "carbon", cx(20), ROOF + 0.115, sx=1.30, sy=0.56, sz=0.07)   # mounting bar
     for c in (14.5, 17.5, 20.5, 23.5):
-        put("lamps", "lamproof", cx(c), ZTOP + 0.165, sx=0.14, sy=0.22, sz=0.10)
+        put("lamps", "carbon", cx(c), ROOF + 0.215, sx=0.16, sy=0.24, sz=0.14)      # housing
+        put("lamps", "lamp", cx(c) + 0.085, ROOF + 0.215, sx=0.03, sy=0.20, sz=0.12)  # lens face
 
     # ---- front fascia: closed nose, bumper frame, recessed grille between the lamp
     #      clusters, lamps set INTO the frame, splitter below, tow hook on the offside

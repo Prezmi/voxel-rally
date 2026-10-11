@@ -57,7 +57,28 @@ export const REGIONS = ['hood', 'roof', 'glass', 'flank', 'front', 'bumperF',
   'rear', 'under', 'wing', 'lampFL', 'lampFR'];
 
 const SIDED_BASE = /^(flank|sill|arch)/;
-const LIV_PARTS = new Set(['car_body', 'car_fender', 'car_panel', 'car_spoiler']);
+// The arch lips (car_fender) are NOT painted: they sit over the wheel gap, so any
+// marking that reaches them paints the tyre (shots/showroom.png had the roundel
+// spanning the arches). The four arch panels are masked out too, see ARCH_PANELS.
+const LIV_PARTS = new Set(['car_body', 'car_panel', 'car_spoiler']);
+/** Dirt panel indices of the four wheel arches: never painted (T38). */
+export const ARCH_PANELS = new Set(
+  ['archFL', 'archFR', 'archRL', 'archRR'].map((k) => PANEL_INDEX[k]).filter((i) => i !== undefined),
+);
+
+/**
+ * Atlas sub-rects, one PER PROJECTION, each laid out METRIC: the same number of
+ * atlas units per metre along u and along v. The old code squeezed 4.4 m of body
+ * length into the same 0.40 u span that 1.4 m of height squeezed into 0.90 v -
+ * a ~3:1 anisotropy that turned the roundel into the ellipse in
+ * shots/showroom.png. Here the flank rect is 0.46 u wide over the full body
+ * length and its v span FOLLOWS from that, so a circle in the map is a 1:1
+ * circle on the door and the number is never distorted.
+ *   u0/v0 anchor, uSpan span; vSpan is derived at build time (see livMetric).
+ */
+export const FLANK_UV = { u0: 0.02, uSpan: 0.46, v0: 0.03 };
+export const TOP_UV = { u0: 0.55, uSpan: 0.40, v0: 0.55 };
+export const END_UV = { u0: 0.55, uSpan: 0.40, v0: 0.05 };
 
 /** Window glass: near-black, neutral (the glb's pale slate 0.045/0.058/0.080 is
  *  what read as "slate blue"), written straight into `color` so tests.js can
@@ -201,7 +222,8 @@ export function buildAssetBody(nodes, params) {
   // land in the 'glass' region but are paint, so they must still read the map.
   const glassy = /glass|window/.test(matName)
     || (region === 'glass' && !/paint|livery|body|decal/.test(matName));
-  const liv = (LIV_PARTS.has(name) && !glassy && region !== 'lampFL' && region !== 'lampFR') ? 1 : 0;
+  const liv = (LIV_PARTS.has(name) && !glassy && region !== 'lampFL' && region !== 'lampFR'
+    && !ARCH_PANELS.has(panel)) ? 1 : 0;
         const list = bucket.get(region) || bucket.get('flank');
         const tr = glassy ? GLASS_TINT[0] : cr, tg = glassy ? GLASS_TINT[1] : cg, tb = glassy ? GLASS_TINT[2] : cb;
         for (let j = 0; j < 3; j++) {
@@ -238,6 +260,7 @@ export function buildAssetBody(nodes, params) {
   const halfX = sizeX * 0.5 * scale, halfZ = sizeZ * 0.5 * scale, yb = miny * scale + oy, yt = maxy * scale + oy;
 
   let vi = 0;
+  let metricFlank = null;
   for (const r of REGIONS) {    const list = bucket.get(r);
     if (!list.length) continue;
     const from = vi;
@@ -254,12 +277,21 @@ export function buildAssetBody(nodes, params) {
       // i.e. onto the texture edge, where the old map kept its dark end bars and
       // stripe ends - the grey panels and stray patches in shots/road-merge.png.
       const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
-      const fu = (x + halfX) / (2 * halfX || 1), fw = (z + halfZ) / (2 * halfZ || 1);
-      const fh = (y - yb) / ((yt - yb) || 1);
-      let u, vv;
-      if (az >= ax && az >= ay) { u = 0.05 + 0.40 * fu; vv = 0.05 + 0.90 * fh; }
-      else if (ay >= ax) { u = 0.55 + 0.40 * fu; vv = 0.55 + 0.40 * fw; }
-      else { u = 0.55 + 0.40 * fw; vv = 0.05 + 0.40 * fh; }
+      const lenX = 2 * halfX || 1, widZ = 2 * halfZ || 1, hgt = (yt - yb) || 1;
+      let u, vv, mu;
+      if (az >= ax && az >= ay) {
+        mu = FLANK_UV.uSpan / lenX;                      // atlas units per metre
+        u = FLANK_UV.u0 + (x + halfX) * mu;
+        vv = FLANK_UV.v0 + (y - yb) * mu;
+      } else if (ay >= ax) {
+        mu = TOP_UV.uSpan / Math.max(lenX, widZ);
+        u = TOP_UV.u0 + (x + halfX) * mu;
+        vv = TOP_UV.v0 + (z + halfZ) * mu;
+      } else {
+        mu = END_UV.uSpan / Math.max(widZ, hgt);
+        u = END_UV.u0 + (z + halfZ) * mu;
+        vv = END_UV.v0 + (y - yb) * mu;
+      }
       // Glass never reads the painted half of the atlas: park it in the gap
       // between quadrants, so no mask slip downstream can put a door band or the
       // roundel on a window (tests.js T35 asserts the rects stay empty).
@@ -268,6 +300,12 @@ export function buildAssetBody(nodes, params) {
       }
       aLivUv[vi * 2] = Math.max(0, Math.min(1, u)); aLivUv[vi * 2 + 1] = Math.max(0, Math.min(1, vv));
       aPanel[vi] = list[o + 9]; aLiv[vi] = list[o + 10]; aLamp[vi] = list[o + 11];
+      // The flank metric, kept so a livery rect can be turned back into metres
+      // (src/debug/tests.js T38 checks that footprint against the door panel and
+      // the four wheels): x = (u - u0)/mu - halfX, y = (v - v0)/mu + yb, both in
+      // the fitted car-group frame the vertices were written in.
+      if (az >= ax && az >= ay && !metricFlank && list[o + 10] === 1)
+        metricFlank = { mu, u0: FLANK_UV.u0, v0: FLANK_UV.v0, halfX, yb, yt };
       vi++;
     }
     if (vi > from) ranges[r] = [from, vi];
@@ -284,7 +322,8 @@ export function buildAssetBody(nodes, params) {
       exhaust[i * 3 + 2] = (exSum[i * 3 + 2] / exN[i]) * scale + oz;
     }
   }
-  return { position, normal, color, aPanel, aLivUv, aLiv, aLamp, ranges, tris, scale, count, missing, exhaust };
+  return { position, normal, color, aPanel, aLivUv, aLiv, aLamp, ranges, tris, scale, count, missing, exhaust,
+    livMetric: metricFlank || { mu: FLANK_UV.uSpan / ((2 * halfX) || 1), u0: FLANK_UV.u0, v0: FLANK_UV.v0, halfX, yb, yt } };
 }
 
 /** Fallback tips when the glb has none: rear bumper, one per side, in the same
