@@ -262,14 +262,18 @@ export function generateChunkProps(cx, cz, stage) {
       const i = samples[k];
       if (out.length >= TREE_CAP + 40) break;
       const hsh = hash01(i, 9, BUSH_SALT ^ seed);
-      if (hsh > 0.62) continue;
+      // Verge vegetation was a thin, even sprinkle; denser so the corridor edge reads
+      // as a hedge line rather than a mown lawn with a few ornaments on it.
+      if (hsh > 0.74) continue;
       const side = hash01(i, 10, BUSH_SALT ^ seed) < 0.5 ? 1 : -1;
       const along = hash01(i, 11, BUSH_SALT ^ seed) * 2.2 - 1.1;
       const off = road.width[i] / 2 + SHOULDER + 1.2 + hash01(i, 12, BUSH_SALT ^ seed) * 3.4;
       let px = road.x[i] + road.nx[i] * off * side + road.tx[i] * along;
       let pz = road.z[i] + road.nz[i] * off * side + road.tz[i] * along;
       const kind = hash01(i, 13, FERN_SALT ^ seed) < 0.55 ? PROP.FERN : PROP.BUSH;
-      const bScale = 0.8 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.5;
+      // A few deliberately tall tufts (bracken over the verge) instead of one height.
+      const tall = hash01(i, 21, BUSH_SALT ^ (seed + 3)) > 0.74 ? 0.55 : 0;
+      const bScale = 0.85 + hash01(i, 15, BUSH_SALT ^ (seed + 11)) * 0.55 + tall;
       // Same veto as the trees: the sample normal is exact on a straight but folds on a
       // hairpin, and these are the props that ended up on the carriageway at the start.
       const bfit = resolveOffRoad(road, px, pz, propFootprint(kind, bScale) + PROP_CORRIDOR_MARGIN);
@@ -334,140 +338,184 @@ function px(data, x, y, r, g, b, a) {
   data[k] = r; data[k + 1] = g; data[k + 2] = b; data[k + 3] = a;
 }
 
+/* Four-tone foliage palette per sprite species: shadow / mid / sunlit / warm rim.
+   Baked straight into the atlas cell, so a crossed quad carries its own light. All
+   four are darker and more saturated than the old single mint base (the old pine
+   base [44, 78, 48] came out at ~[46, 82, 50], i.e. a pale card in the sun): a real
+   conifer crown runs from near-black needles in the underside to a warm tip. */
+const SPR_TONES = {
+  [SPR.PINE]: { shadow: [12, 26, 17], mid: [22, 46, 25], sun: [40, 72, 32], rim: [78, 96, 38], bark: [52, 36, 22] },
+  [SPR.OAK]: { shadow: [20, 36, 15], mid: [36, 60, 21], sun: [62, 90, 28], rim: [112, 118, 42], bark: [72, 48, 28] },
+  [SPR.BIRCH]: { shadow: [30, 46, 20], mid: [54, 80, 30], sun: [84, 110, 40], rim: [136, 138, 52], bark: [176, 168, 148] },
+  [SPR.BUSH]: { shadow: [16, 30, 13], mid: [28, 50, 19], sun: [48, 74, 26], rim: [92, 100, 36], bark: [52, 40, 24] },
+  [SPR.FERN]: { shadow: [14, 26, 12], mid: [24, 42, 16], sun: [44, 66, 22], rim: [84, 92, 30], bark: [44, 36, 22] },
+};
+
 function paintFoliage(kind, data) {
   data.fill(0);
-  const leaf = (x, y, base, spread, s) => {
-    // Three tones per sprite: lit tips, mid mass, shaded underside, plus a hard
-    // silhouette jitter so the edge is ragged rather than a cut-out ellipse.
-    const n = ph(x, y, s);
-    // Three tones, darkest at the BOTTOM of the sprite (the shaded underside of the
-    // crown), lit only on the top shell. The old 1.28 lit term plus the +0.14 top lift
-    // blew the whole card out to a pale mint flat sheet (FAULT 3, review frame).
-    const t = (n < 0.22 ? 1.06 : n < 0.70 ? 0.90 : 0.56) - 0.20 * (y / TEX_PX);
-    const warm = n < 0.12 ? 12 : 0;
-    px(data, x, y, Math.min(255, base[0] * t + warm), Math.min(255, base[1] * t), Math.min(255, base[2] * t * 0.96), 255);
-    if (spread && n > 0.86) px(data, x + 1, y, base[0] * 0.7, base[1] * 0.7, base[2] * 0.7, 255);
+  const T = SPR_TONES[kind] || SPR_TONES[SPR.OAK];
+  // Clustered blob field: three octaves (4x4, 2x2 and 1x1 texels). Per-texel salt is
+  // what made the crown read as static; bunches read as needle bunches / leaf clumps.
+  const blob = (x, y, s) => 0.55 * ph(x >> 2, y >> 2, s) + 0.28 * ph(x >> 1, y >> 1, s + 3)
+    + 0.17 * ph(x, y, s + 5);
+  // One shaded texel: the vertical gradient (g = 1 at the top of the sprite, 0.48 at
+  // the base) picks the tone, the blob field breaks the tone into bunches, the warm
+  // rim only catches the top shell. Interior texels are always opaque - a see-through
+  // crown was half of the "flat card" read.
+  const leaf = (x, y, s) => {
+    const v = blob(x, y, s);
+    const g = 1 - 0.52 * (y / (TEX_PX - 1));
+    const c = (g < 0.50 || v < 0.22) ? T.shadow : (v > 0.62 && g > 0.60) ? T.sun
+      : (v > 0.40 && g > 0.74) ? T.sun : T.mid;
+    const tip = y <= 5 && ph(x, y, s + 23) > 0.66;
+    const cc = tip ? T.rim : c;
+    const t = 0.62 + 0.38 * g + (ph(x, y - 1, s + 11) > 0.80 ? 0.07 : 0);
+    px(data, x, y, Math.min(255, cc[0] * t + (tip ? 8 : 0)), Math.min(255, cc[1] * t), Math.min(255, cc[2] * t * 0.96), 255);
   };
-  const trunk = (x, y, w, c, s) => {
-    for (let dx = -w; dx <= w; dx++) {
-      const n = ph(x + dx, y, s);
-      if (n < 0.10) continue;                        // bark splits
-      const t = 0.72 + 0.5 * ph(x + dx, y >> 2, s + 7);
-      px(data, x + dx, y, c[0] * t, c[1] * t, c[2] * t, 255);
+  // Silhouette fill: interior texels are solid, only the outer 1-2 texels ragged.
+  const fill = (x, y, s, edge) => { if (!edge || ph(x, y, s + 31) > 0.40) leaf(x, y, s); };
+  const wood = (x, y, c, s) => {
+    if (ph(x, y >> 2, s) < 0.06) return;                    // bark split
+    const t = 0.62 + 0.42 * ph(x, y >> 2, s + 7);
+    px(data, x, y, c[0] * t, c[1] * t * 0.97, c[2] * t * 0.92, 255);
+  };
+  // A branch that starts INSIDE the crown mass and runs out to just past the silhouette
+  // edge: without it the canopy floats, and the sprite reads as a green lozenge.
+  const branch = (x0, y0, dx, dy, len, c, s) => {
+    for (let i = 0; i < len; i++) {
+      wood(x0 + dx * i, y0 - Math.round(dy * i), c, s);
+      if (i > 1) wood(x0 + dx * i, y0 - Math.round(dy * i) + 1, T.shadow, s + 3);
     }
   };
 
   if (kind === SPR.PINE || kind === SPR.BIRCH) {
     const spruce = kind === SPR.PINE;
-    const base = spruce ? [44, 78, 48] : [120, 158, 74];
-    const bark = spruce ? [74, 52, 34] : [206, 198, 176];
     for (let y = 0; y < TEX_PX; y++) {
       const u = y / (TEX_PX - 1);                   // 0 top .. 1 bottom
       if (spruce) {
-        // conical stack with jagged tiers
-        const half = spruce ? 1.5 + 12.5 * Math.pow(u, 1.35) : 4 + 8 * Math.sin(Math.min(1, u * 1.15) * Math.PI * 0.85);
+        // conical stack with jagged tiers, filled solid inside each tier
+        const half = 1.5 + 12.5 * Math.pow(u, 1.35);
         const tier = 1 + (y % 4 === 0 ? 1 : 0);
         const jag = ph(y * 3, y, 31) > 0.72 ? tier : 0;
-        for (let x = 16 - Math.floor(half) - jag; x <= 16 + Math.floor(half); x++) {
-          if (ph(x, y, 17) > 0.14) leaf(x, y, base, true, 5);
+        const h = Math.floor(half) + jag;
+        for (let x = 16 - h; x <= 16 + h; x++) fill(x, y, 5, Math.abs(x - 16) >= h - 1);
+        if (u > 0.36) {                             // needle sprays on the lower tiers
+          const d = y % 8 < 4 ? 1 : -1;
+          wood(16 + d * Math.round(h * 0.55), y, T.bark, 43);
+          wood(16 + d * Math.round(h * 0.55) + d, y, T.shadow, 47);
         }
-        if (u > 0.62) trunk(16, y, spruce ? 1 : 2, bark, 23);
+        if (u > 0.60) for (let dx = -1; dx <= 1; dx++) wood(16 + dx, y, T.bark, 23);
       } else {
-        // birch: rounded pale crown, pale banded trunk
+        // birch: rounded crown, pale banded trunk, two visible limbs
         const dy = u - 0.55;
-        const half = 12 * Math.sqrt(Math.max(0, 1 - dy * dy * 3.4));
-        for (let x = 16 - Math.floor(half); x <= 16 + Math.floor(half); x++) {
-          if (ph(x, y, 13) > 0.10) leaf(x, y, base, true, 9);
-        }
+        const h = Math.floor(12 * Math.sqrt(Math.max(0, 1 - dy * dy * 3.4)));
+        for (let x = 16 - h; x <= 16 + h; x++) fill(x, y, 9, Math.abs(x - 16) >= h - 1);
         if (u > 0.58) {
-          trunk(16, y, 2, bark, 29);
-          if (y % 5 === 2) for (let x = 14; x <= 18; x++) if (ph(x, y, 41) > 0.45) px(data, x, y, 96, 88, 74, 255);
+          for (let dx = -2; dx <= 2; dx++) wood(16 + dx, y, T.bark, 29);
+          if (y % 5 === 2) for (let x = 14; x <= 18; x++) if (ph(x, y, 41) > 0.45) px(data, x, y, 74, 66, 54, 255);
         }
       }
     }
+    if (spruce) branch(16, 22, -1, 0.4, 7, T.bark, 61);
+    else { branch(16, 18, -1, 0.5, 8, T.bark, 63); branch(16, 20, 1, 0.4, 7, T.bark, 67); }
     return;
   }
 
   if (kind === SPR.OAK) {
-    const base = [78, 118, 52];
-    // rounded mass: three overlapping lobes so the crown has no flat side
+    // rounded mass: three overlapping lobes, filled solid so no light gets through
     const lobes = [[16, 12, 11], [10, 16, 8], [22, 17, 8]];
     for (const [cx0, cy0, r] of lobes) {
       for (let y = cy0 - r; y <= cy0 + r; y++) {
         const dy = (y - cy0) / r;
-        const half = r * Math.sqrt(Math.max(0, 1 - dy * dy));
-        for (let x = cx0 - half; x <= cx0 + half; x++) {
-          if (ph(x, y, 3) > 0.08) leaf(x, y, base, true, 11);
-        }
+        const h = Math.round(r * Math.sqrt(Math.max(0, 1 - dy * dy)));
+        for (let x = cx0 - h; x <= cx0 + h; x++) fill(x, y, 11, Math.abs(x - cx0) >= h - 1);
       }
     }
-    for (let y = 21; y < TEX_PX; y++) trunk(16, y, y > 26 ? 3 : 2, [96, 66, 40], 19);
+    branch(16, 22, -1, 0.55, 8, [96, 66, 40], 19);
+    branch(16, 24, 1, 0.5, 7, [96, 66, 40], 27);
+    for (let y = 21; y < TEX_PX; y++) {
+      const hw = y > 26 ? 3 : 2;
+      for (let dx = -hw; dx <= hw; dx++) wood(16 + dx, y, dx < -1 ? [72, 48, 28] : [96, 66, 40], 19);
+    }
     return;
   }
 
   if (kind === SPR.BUSH) {
-    const base = [70, 104, 46];
     for (let y = 12; y < TEX_PX; y++) {
       const dy = (y - 25) / 13;
-      const half = 14 * Math.sqrt(Math.max(0, 1 - dy * dy * 1.9));
-      for (let x = 16 - half; x <= 16 + half; x++) if (ph(x, y, 7) > 0.11) leaf(x, y, base, true, 15);
+      const h = Math.round(14 * Math.sqrt(Math.max(0, 1 - dy * dy * 1.9)));
+      for (let x = 16 - h; x <= 16 + h; x++) fill(x, y, 15, Math.abs(x - 16) >= h - 1);
     }
-    for (let y = 26; y < TEX_PX; y++) trunk(16, y, 1, [70, 56, 36], 21);
+    branch(16, 27, -1, 0.6, 5, [52, 40, 24], 21);
+    for (let y = 26; y < TEX_PX; y++) for (let dx = -1; dx <= 1; dx++) wood(16 + dx, y, [70, 56, 36], 21);
     return;
   }
 
-  if (kind === SPR.DEAD) {
-    // A bare snag: no leaf mass, so the whole silhouette has to come from the trunk and
-    // the broken limbs. Painted from the voxel snag palette (NEAR_LOD_SPEC / buildTree
-    // Geometries) so the sprite and the near voxel tree read as the same tree, and 6
-    // texels (0.38 m at the 2.02 m quad) is the real trunk diameter - thinner and the
-    // snag vanishes at the 300 m this band has to reach, thicker and it reads as a post.
-    const pale = [106, 88, 67], mid = [91, 76, 57], dark = [76, 63, 46];
-    const wood = (x, y, c, s) => {
-      // Bark tone plus a vertical banding noise: flat wood at 300 m is a pale stick.
-      const t = 0.68 + 0.5 * ph(x, y >> 2, s + 5);
-      px(data, x, y, c[0] * t, c[1] * t * 0.97, c[2] * t * 0.92, 255);
-    };
-    // Trunk: tapers from 3 texels half-width (0.4 m, the real snag diameter) at the
-    // ground to 2 texels under the snapped crown. Never thinner than 2: one texel is
-    // 6 cm, which is sub-pixel past 150 m and the far band turns into a sparkle.
-    for (let y = 5; y < TEX_PX; y++) {
-      const u = (y - 5) / (TEX_PX - 6);
-      const half = Math.max(2, Math.round(1.6 + 1.6 * u));
-      const lean = Math.round(1.4 * u * (ph(y, 3, 11) > 0.5 ? 1 : -1));
-      for (let dx = -half; dx <= half; dx++) wood(16 + lean + dx, y, dx < 0 ? pale : mid, 17);
-      if (y % 6 === 3) for (let dx = -half; dx <= half; dx++) px(data, 16 + lean + dx, y, dark[0], dark[1], dark[2], 255);
-    }
-    // Limbs start INSIDE the trunk (a limb starting at the trunk face is a floating
-    // stick at distance) and step up, or droop for the lowest one.
-    const limb = (y0, dir, len, up) => {
-      for (let s = 0; s < len; s++) {
-        const y = up ? y0 - Math.floor(s / 2) : y0 + Math.floor(s / 3);
-        wood(16 + dir * s, y, mid, 23);
-        if (s > 1) wood(16 + dir * s, y + 1, dark, 29);      // shaded underside
-      }
-    };
-    limb(13, -1, 11, true);
-    limb(18, 1, 12, true);
-    limb(24, -1, 9, false);
-    // Nubs and the snapped top: the ragged edge is what stops the far band reading as a
-    // row of toothpicks.
-    for (const [x, y] of [[5, 9], [27, 12], [7, 20], [26, 19], [16, 4], [18, 3]]) wood(x, y, pale, 37);
-    return;
-  }
+  if (kind === SPR.DEAD) return paintSnag(data);
 
-  // FERN / BRACKEN: fronds radiating from the base, drawn as stepped strokes.
-  const base = [64, 96, 40];
+  // FERN / BRACKEN: fronds radiating from the base, drawn as stepped 2-texel strokes so
+  // a fern patch has mass instead of a hairline.
   for (let f = 0; f < 7; f++) {
     const lean = (f - 3) * 2.6;
     const len = 12 + Math.floor(ph(f, 1, 33) * 8);
-    for (let s = 0; s < len; s++) {
-      const x = Math.round(16 + lean * (s / len));
-      const y = TEX_PX - 2 - s;
-      px(data, x, y, base[0], base[1], base[2], 255);
-      if (s > 2) { px(data, x - 1, y - 1, base[0] * 1.2, base[1] * 1.2, base[2], 255); px(data, x + 1, y - 1, base[0] * 0.8, base[1] * 0.85, base[2], 255); }
+    const s = 71 + f;
+    for (let i = 0; i < len; i++) {
+      const x = Math.round(16 + lean * (i / len));
+      const y = TEX_PX - 2 - i;
+      leaf(x, y, s);
+      if (i > 2) { leaf(x - 1, y - 1, s); leaf(x + 1, y - 1, s); }
     }
   }
+}
+
+// A bare snag: no leaf mass, so the whole silhouette comes from the trunk and the
+// broken limbs (palette and trunk widths are the near voxel snag's, so the sprite and
+// the near build read as the same tree). Unchanged from the last pass.
+function paintSnag(data) {
+  const pale = [106, 88, 67], mid = [91, 76, 57], dark = [76, 63, 46];
+  const wood = (x, y, c, s) => {
+    // Bark tone plus a vertical banding noise: flat wood at 300 m is a pale stick.
+    const t = 0.68 + 0.5 * ph(x, y >> 2, s + 5);
+    px(data, x, y, c[0] * t, c[1] * t * 0.97, c[2] * t * 0.92, 255);
+  };
+  // Trunk: tapers from 3 texels half-width (0.4 m, the real snag diameter) at the
+  // ground to 2 texels under the snapped crown. Never thinner than 2: one texel is
+  // 6 cm, which is sub-pixel past 150 m and the far band turns into a sparkle.
+  for (let y = 5; y < TEX_PX; y++) {
+    const u = (y - 5) / (TEX_PX - 6);
+    const half = Math.max(2, Math.round(1.6 + 1.6 * u));
+    const lean = Math.round(1.4 * u * (ph(y, 3, 11) > 0.5 ? 1 : -1));
+    for (let dx = -half; dx <= half; dx++) wood(16 + lean + dx, y, dx < 0 ? pale : mid, 17);
+    if (y % 6 === 3) for (let dx = -half; dx <= half; dx++) px(data, 16 + lean + dx, y, dark[0], dark[1], dark[2], 255);
+  }
+  // Limbs start INSIDE the trunk (a limb starting at the trunk face is a floating
+  // stick at distance) and step up, or droop for the lowest one.
+  const limb = (y0, dir, len, up) => {
+    for (let s = 0; s < len; s++) {
+      const y = up ? y0 - Math.floor(s / 2) : y0 + Math.floor(s / 3);
+      wood(16 + dir * s, y, mid, 23);
+      if (s > 1) wood(16 + dir * s, y + 1, dark, 29);      // shaded underside
+    }
+  };
+  limb(13, -1, 11, true);
+  limb(18, 1, 12, true);
+  limb(24, -1, 9, false);
+  // Nubs and the snapped top: the ragged edge is what stops the far band reading as a
+  // row of toothpicks.
+  for (const [x, y] of [[5, 9], [27, 12], [7, 20], [26, 19], [16, 4], [18, 3]]) wood(x, y, pale, 37);
+}
+
+/** Per-instance tone jitter for vegetation (a few percent of hue and lightness) so a
+ *  stand of one sprite species is not a copy of one tree. Deterministic from position,
+ *  allocation-free, multiplied into the instance colour in streaming.js. */
+export function vegToneJitter(x, z, salt = 0, out = null) {
+  const ix = Math.round(x * 3), iz = Math.round(z * 3);
+  const a = hash01(ix, iz, 7717 ^ salt), b = hash01(ix, iz, 9257 ^ salt);
+  const lift = 0.94 + 0.12 * a;                       // lightness +/-6%
+  const warm = 0.96 + 0.08 * b;                       // hue: warm <-> cool +/-4%
+  const o = out || [0, 0, 0];
+  o[0] = lift * warm; o[1] = lift; o[2] = lift * (2 - warm);
+  return o;
 }
 
 /**
@@ -484,16 +532,21 @@ function paintFoliage(kind, data) {
 // the same envelope (width/height straight from the manifest, matching SPRITE_SPEC so
 // the near -> sprite handover keeps the same silhouette). Mid and far bands untouched.
 export const NEAR_LOD_TRIS = {
-  [PROP.PINE]: 320, [PROP.OAK]: 240, [PROP.BIRCH]: 270, [PROP.BUSH]: 150, [PROP.DEAD]: 90,
+  // Raised from 320/240/270/150/90: at 240-320 tris a crown is 19-25 boxes, too few to
+  // fill a cone, so every near tree read as a flat stack. The builds below now spend
+  // 444 (pine) / 300 (oak, birch) / 168 (bush) / 96 (snag) inside the same envelopes;
+  // the frame total is bounded by the band radii + instance caps (streaming.js), not by
+  // these numbers: ~220 k drawn tris at MED.
+  [PROP.PINE]: 450, [PROP.OAK]: 330, [PROP.BIRCH]: 330, [PROP.BUSH]: 190, [PROP.DEAD]: 110,
 };
 const NEAR_LOD_SPEC = {
   // tiers x perTier boxes of foliage on one trunk box, sized to the baked envelope.
   // leafT is the three-tone foliage ramp (lit crown / mid mass / shaded underside):
   // a single flat leaf colour made the near canopies read as pale, flat cards.
-  [PROP.PINE]: { w: 4.58, h: 9.44, bark: 0x3d2c19, leaf: 0x2f4a2c, leafT: [0x38562f, 0x2f4a2c, 0x1e3120], tiers: 5, perTier: 5, cone: 1 },
-  [PROP.OAK]: { w: 4.84, h: 7.37, bark: 0x5c4127, leaf: 0x3f6b30, leafT: [0x4e7a33, 0x3f6b30, 0x2a4a20], tiers: 3, perTier: 6, base: 0.46 },
-  [PROP.BIRCH]: { w: 3.74, h: 7.96, bark: 0x8d8577, leaf: 0x4a7a3a, leafT: [0x568343, 0x4a7a3a, 0x30522a], tiers: 3, perTier: 6, base: 0.50 },
-  [PROP.BUSH]: { w: 2.00, h: 1.57, bark: 0x35602c, leaf: 0x35602c, leafT: [0x3e6b33, 0x35602c, 0x21401c], tiers: 2, perTier: 6, base: 0.05, trunk: 0 },
+  [PROP.PINE]: { w: 4.58, h: 9.44, bark: 0x3d2c19, leaf: 0x2f4a2c, leafT: [0x38562f, 0x2f4a2c, 0x1e3120], tiers: 6, perTier: 6, cone: 1, taper: 0.80, trunkH: 0.24 },
+  [PROP.OAK]: { w: 4.84, h: 7.37, bark: 0x5c4127, leaf: 0x3f6b30, leafT: [0x4e7a33, 0x3f6b30, 0x2a4a20], tiers: 4, perTier: 6, base: 0.46 },
+  [PROP.BIRCH]: { w: 3.74, h: 7.96, bark: 0x8d8577, leaf: 0x4a7a3a, leafT: [0x568343, 0x4a7a3a, 0x30522a], tiers: 4, perTier: 6, base: 0.50 },
+  [PROP.BUSH]: { w: 2.00, h: 1.57, bark: 0x35602c, leaf: 0x35602c, leafT: [0x3e6b33, 0x35602c, 0x21401c], tiers: 2, perTier: 7, base: 0.05, trunk: 0 },
   [PROP.DEAD]: { w: 2.02, h: 5.94, bark: 0x6a5843, leaf: 0x5b4c39, snag: 1 },
 };
 
@@ -503,9 +556,7 @@ const NEAR_LOD_SPEC = {
  * a tapering trunk with three limbs. Same outer envelope as the baked node, so the
  * skyline of a stand does not move — only the block count inside it halves.
  */
-export function buildNearLodGeometries(GeoBuilder, THREE) {
-  const geos = {};
-  for (const [key, sp] of Object.entries(NEAR_LOD_SPEC)) {
+function lodGeo(sp, GeoBuilder) {
     const b = new GeoBuilder();
     if (sp.snag) {
       let y = 0;
@@ -518,7 +569,10 @@ export function buildNearLodGeometries(GeoBuilder, THREE) {
       b.box(-sp.w * 0.19, sp.h * 0.70, sp.w * 0.09, sp.w * 0.19, 0.06, 0.06, sp.leaf);
       b.box(0.05, sp.h * 0.86, -sp.w * 0.14, 0.06, sp.h * 0.10, 0.06, sp.leaf);
     } else {
-      if (sp.trunk !== 0) b.box(0, sp.h * 0.17, 0, 0.16, sp.h * 0.17, 0.16, sp.bark);
+      if (sp.trunk !== 0) {
+        const th = sp.h * (sp.trunkH || 0.17);
+        b.box(0, th * 0.5, 0, 0.16, th * 0.5, 0.16, sp.bark);
+      }
       const base = sp.base !== undefined ? sp.base : 0.30;
       // Three foliage tones, darkest at the lowest tier (the shaded underside of the
       // crown) and on the interior core box, lit on the outer shell of the top tier.
@@ -533,9 +587,9 @@ export function buildNearLodGeometries(GeoBuilder, THREE) {
       };
       for (let k = 0; k < sp.tiers; k++) {
         const t = sp.tiers > 1 ? k / (sp.tiers - 1) : 0;
-        const rad = sp.w * 0.5 * (1 - (sp.cone ? 0.74 : 0.30) * t);
+        const rad = sp.w * 0.5 * (1 - (sp.cone ? (sp.taper || 0.80) : 0.30) * t);
         const y = sp.h * (base + (0.94 - base) * t);
-        const hy = sp.h * (sp.cone ? 0.075 : 0.11) * (1 - 0.25 * t);
+        const hy = sp.h * (sp.cone ? 0.085 : 0.11) * (1 - 0.25 * t);
         for (let j = 0; j < sp.perTier; j++) {
           const a = (j / sp.perTier) * Math.PI * 2 + k * 0.7;
           const off = j === 0 ? 0 : rad * 0.40;
@@ -545,9 +599,35 @@ export function buildNearLodGeometries(GeoBuilder, THREE) {
         }
       }
     }
-    geos[Number(key)] = b.toGeometry(THREE);
-  }
+  return b;
+}
+
+/** One near build per species (the band default). */
+export function buildNearLodGeometries(GeoBuilder, THREE) {
+  const geos = {};
+  for (const [key, sp] of Object.entries(NEAR_LOD_SPEC)) geos[Number(key)] = lodGeo(sp, GeoBuilder).toGeometry(THREE);
   return geos;
+}
+
+/** Real pine size classes instead of one geometry scaled up and down: an understory
+ *  sapling, the standard mid-canopy tree and a dominant, each its own near build (own
+ *  tier count, taper, trunk height), so a stand has three silhouettes rather than one
+ *  silhouette in three sizes. All three stay inside NEAR_LOD_TRIS[PINE].
+ */
+export const NEAR_LOD_VARIANTS = {
+  [PROP.PINE]: [
+    Object.assign({}, NEAR_LOD_SPEC[PROP.PINE], { w: 3.10, h: 6.60, tiers: 5, perTier: 5, base: 0.30, trunkH: 0.20 }),
+    Object.assign({}, NEAR_LOD_SPEC[PROP.PINE]),
+    Object.assign({}, NEAR_LOD_SPEC[PROP.PINE], { w: 5.10, h: 11.00, tiers: 6, perTier: 6, base: 0.34, trunkH: 0.28, taper: 0.78 }),
+  ],
+};
+
+export function buildNearLodVariantGeometries(GeoBuilder, THREE) {
+  const out = {};
+  for (const [key, list] of Object.entries(NEAR_LOD_VARIANTS)) {
+    out[Number(key)] = list.map((sp) => lodGeo(sp, GeoBuilder).toGeometry(THREE));
+  }
+  return out;
 }
 
 export function buildSpriteGeometries(THREE) {

@@ -3,12 +3,13 @@
 // Remeshing is budgeted per frame so a fast drive never hitches.
 import * as THREE from 'three';
 import { CHUNK, COLS, chunkKey, keyToCx, keyToCz } from './chunk.js';
+import { hash01 } from './noise.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
 import { carveChunk, SHOULDER } from './road-carve.js';
 import { SURF } from './surfaces.js';
 import { PALETTE } from './palette.js';
 import { GeoBuilder } from '../render/primitives.js';
-import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries } from './props.js';
+import { generateChunkProps, buildTreeGeometries, buildGateGeometry, buildSpriteGeometries, buildBillboardGeometries, buildFoliageTextures, buildSpriteMaterials, SPRITE_PROPS, PROP, PROP_NAMES, NEAR_LOD_TRIS, buildNearLodGeometries, buildNearLodVariantGeometries, vegToneJitter } from './props.js';
 import { settings, QUALITY } from '../core/settings.js';
 import { loadModelNodes } from '../render/assets.js';
 
@@ -24,6 +25,10 @@ const ASSET_NODES = {
   [PROP.BIRCH]: 'prop_tree_birch',
   [PROP.POST]: 'prop_fence_post',
   [PROP.GATE]: 'prop_gate_checkpoint',
+  // Understory: the fern node is the only one of the three ground layers that has no
+  // NEAR_LOD_TRIS entry in props.js, so the baked node is adopted whole (12 blocks,
+  // 144 tris). Denser fronds than the crossed two-box procedural build it replaces.
+  [PROP.FERN]: 'prop_fern',
 };
 
 // Start-line furniture (tools/blender/build_stage_props.py): glb node -> instance cap.
@@ -61,8 +66,24 @@ const BLOCK_SURFACES = Object.keys(BLOCK_NODE).map(Number);
 // surface type with a fixed capacity allocated once at boot. No allocation per frame.
 const TILE_CAP_CHUNK = 192;
 const TILE_CAPACITY = 4096;
-const VERGE = 2.4;                 // m past carriageway+shoulder that still counts
-const TILE_LIFT = 0.02;            // hairline gap so a tile never z-fights the terrain
+const VERGE = 2.8;                 // nominal m past carriageway+shoulder that still counts
+// The verge used to end on a ruled tile line. The cutoff jitters per column and the
+// grass band is thinned out to bare dirt, so the corridor edge is ragged.
+const VERGE_SALT = 0x5177a1e3;
+const BARE_SALT = 0x2be4c07d;
+// A tile footprint is 12 % wider than the 1 m column pitch, so neighbours overlap
+// instead of leaving slots, and the slab sits a hair BELOW the column top: TILE_LIFT
+// used to be +0.02, which put a lit lip under every plate and let graded ground show
+// through as a gap.
+const TILE_SPAN = 1.12;
+const TILE_LIFT = -0.02;
+const TILE_JITTER = 0.14;          // m of in-plane jitter, affordable because tiles overlap
+const RUT_DROP = 0.055;            // packed wheel line sits lower than the crown
+const CROWN_RAISE = 0.045;         // the centre of the road is the high line
+const PEBBLE_CHANCE = 0.18;        // share of the road-edge band that becomes small stones
+// Free high bits of the per-column tile table (surface ids are < 32): what relief and
+// what kind of edge material this column's tile carries.
+const FLAG_PEBBLE = 0x80, FLAG_RUT = 0x40, FLAG_CROWN = 0x20, SURF_MASK = 0x1f;
 // Distance ramp, not a hard cut. TILE_RING_MAX = 0 gave a visible wall where the block
 // detail simply stopped at ~110 m. Ring 0 keeps one block per corridor column (full
 // detail on the road you are driving on), ring 1 gets every 3rd column - a coarser,
@@ -166,6 +187,7 @@ export class Streaming {
       this.billMeshes.set(p, bill);
     }
     this._frustum = new THREE.Frustum();
+    this._jit = [1, 1, 1];            // scratch for the per-instance tone jitter
     this._projScreen = new THREE.Matrix4();
     this._sphere = new THREE.Sphere();
 
@@ -226,6 +248,25 @@ export class Streaming {
         im.geometry = lod;
         im.material = this.renderer.propMaterial;
         cheaper.push(`${PROP_NAMES[type]} ${nodeTris}->${geoTris(lod)}`);
+        // Pine size classes (props.js NEAR_LOD_VARIANTS): three real near builds - a
+        // sapling, a mid-canopy tree, a dominant - instanced separately, because one
+        // InstancedMesh carries one geometry. _rebuildProps routes each placed pine to
+        // the class its placement variant says it is, so a stand has three silhouettes
+        // instead of one silhouette scaled up and down.
+        if (type === PROP.PINE) {
+          const vg = (buildNearLodVariantGeometries(GeoBuilder, THREE)[PROP.PINE] || []);
+          if (vg.length === 3 && vg.every((g) => geoTris(g) <= budget)) {
+            const meshes = vg.map((g) => {
+              const m = new THREE.InstancedMesh(g, this.renderer.propMaterial, 640);
+              m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+              m.castShadow = true; m.receiveShadow = true;
+              m.count = 0; m.frustumCulled = false;
+              this.renderer.scene.add(m);
+              return m;
+            });
+            (this.nearVariants || (this.nearVariants = new Map())).set(PROP.PINE, meshes);
+          }
+        }
       } else {
         im.geometry = rec.geometry;
         if (mat) im.material = mat;
@@ -327,10 +368,24 @@ export class Streaming {
       const wx = x0 + (c & (CHUNK - 1)) + 0.5, wz = z0 + (c >> 4) + 0.5;
       const i = road.nearest(wx, wz);
       const lat = Math.abs((wx - road.x[i]) * road.nx[i] + (wz - road.z[i]) * road.nz[i]);
-      if (lat > road.width[i] / 2 + SHOULDER + VERGE) continue;
+      const hw = road.width[i] / 2;
+      const verge = VERGE * (0.5 + hash01(Math.round(wx), Math.round(wz), VERGE_SALT));
+      if (lat > hw + SHOULDER + verge) continue;
       const sid = chunk.surface[c];                        // the id physics already has
       if (!sid || !BLOCK_SURFACES.includes(sid)) continue;
-      cand.push([c, sid, lat]);
+      let flags = 0;
+      if (lat > hw + SHOULDER * 0.4) {
+        // Verge: skip a fifth of the columns so bare dirt shows between the grass
+        // blocks instead of one unbroken mint carpet.
+        if (hash01(c + cx * 17, cz * 31 + cx, BARE_SALT) < 0.22) continue;
+      } else if (lat > hw - 0.55) {
+        if (hash01(c + cx * 13, cz * 29 + cx, VERGE_SALT) < PEBBLE_CHANCE) flags = FLAG_PEBBLE;
+      } else if (Math.abs(lat - hw * 0.55) < hw * 0.22) {
+        flags = FLAG_RUT;                                  // same band the carve wears dark
+      } else if (lat < hw * 0.30) {
+        flags = FLAG_CROWN;
+      }
+      cand.push([c, sid | flags, lat]);
     }
     // The cap is fixed, so spend it from the carriageway outwards: stopping at the
     // first 192 columns left raw unbanded strips in the middle of the corridor.
@@ -377,17 +432,33 @@ export class Streaming {
         const far = Math.min(farAbs, TILE_FAR[ring] || farAbs);
         const x0 = rec.cx * CHUNK, z0 = rec.cz * CHUNK;
         for (let c = 0, seen = 0; c < COLS && seen < t.tiles; c++) {
-          const sid = t[c];
-          if (!sid) continue;
+          const raw = t[c];
+          if (!raw) continue;
           seen++;
+          const peb = (raw & FLAG_PEBBLE) !== 0;
+          const rut = (raw & FLAG_RUT) !== 0;
+          const crown = (raw & FLAG_CROWN) !== 0;
+          const sid = raw & SURF_MASK;
           const im = this.blockMeshes.get(sid);
           const off = this.blockOff.get(sid);
           if (!im || !off) continue;
           const used = this._tileCount.get(sid);
           if (used >= TILE_CAPACITY) continue;
-          const y = chunk.columnTop(c);                    // tile stands on the real ground
-          if (y < 0) continue;
           const wx = x0 + (c & (CHUNK - 1)) + 0.5, wz = z0 + (c >> 4) + 0.5;
+          // Hug the surface rather than float over it: a tile spans more than one
+          // column, so it is laid at the LOWEST top under its own footprint. Taking the
+          // source column's top is what left plates hovering over the graded crown.
+          const stride = TILE_STRIDE[ring] || 1;
+          const span = stride * TILE_SPAN * (peb ? 0.45 : 1);
+          const half = span * 0.5;
+          let y = chunk.columnTop(c);
+          if (y < 0) continue;
+          for (const sx of [wx - half, wx + half]) {
+            for (const sz of [wz - half, wz + half]) {
+              const hy = this.world.columnTopAt(Math.floor(sx), Math.floor(sz));
+              if (hy >= 0 && hy < y) y = hy;
+            }
+          }
           // distance + frustum cull: a tile the car will never reach, or that is
           // behind / beside the camera, costs nothing.
           if (focus && Math.hypot(wx - focus.x, wz - focus.z) > far) continue;
@@ -396,9 +467,12 @@ export class Streaming {
             this._sphere.radius = 1.6;
             if (!this._frustum.intersectsSphere(this._sphere)) continue;
           }
-          this._pos.set(wx + off.x, y + TILE_LIFT + off.y, wz + off.z);
+          const jx = (hash01(c + rec.cx * 7, rec.cz * 19 + rec.cx, VERGE_SALT) - 0.5) * TILE_JITTER * stride;
+          const jz = (hash01(c + rec.cx * 23, rec.cz * 11 + rec.cx, BARE_SALT) - 0.5) * TILE_JITTER * stride;
+          const relief = (rut ? -RUT_DROP : 0) + (crown ? CROWN_RAISE : 0) + (peb ? 0.03 : 0);
+          this._pos.set(wx + off.x + jx, y + TILE_LIFT + relief + off.y, wz + off.z + jz);
           this._quat.identity();
-          this._scale.set(off.w, off.h, off.d);
+          this._scale.set(span, off.h, span);
           this._mat4.compose(this._pos, this._quat, this._scale);
           im.setMatrixAt(used, this._mat4);
           // Tone agreement with the ground under the tile: chunk.wear is the very band
@@ -406,7 +480,12 @@ export class Streaming {
           // rut and one over the crown / outer edge as light as that band.
           const tc = this._tileCol || (this._tileCol = new THREE.Color());
           const w01 = (chunk.wear ? chunk.wear[c] : 0) / 255;
-          const tint = 0.94 + 0.12 * w01;
+          let tint = 0.80 + 0.20 * w01;        // was 0.94 + 0.12: a washed plate over banded ground
+          if (rut) tint *= 0.80;               // damp, compacted wheel line
+          else if (crown) tint *= 1.14;        // the high line catches the sky
+          else if (sid === SURF.GRASS) tint *= 0.88;
+          if (peb) tint = 1.15;                // stones read paler than the packed edge
+          if (tint > 1.25) tint = 1.25;
           im.setColorAt(used, tc.setRGB(tint, tint, tint));
           this._tileCount.set(sid, used + 1);
         }
@@ -616,6 +695,15 @@ export class Streaming {
         sp[name] += bim.count;
       }
     }
+    // Pine near band: the three size-class meshes carry the instances the single pine
+    // mesh gave up, so they have to be counted or the treesNear column lies.
+    for (const [type, meshes] of (this.nearVariants || [])) {
+      const name = PROP_NAMES[type] || String(type);
+      for (const m of meshes) {
+        bd.treesNear += geoTris(m.geometry) * m.count;
+        sp[name] = (sp[name] || 0) + m.count;
+      }
+    }
     for (const im of this.startMeshes.values()) bd.other += geoTris(im.geometry) * im.count;
     bd.tileUnit = 0;
     for (const im of this.blockMeshes.values()) {
@@ -772,7 +860,17 @@ export class Streaming {
     // (Measured at MEDIUM: the old 45 m near band put 230 k of the 309 k frame
     // triangles into trees that were too far away to read anything.)
     const nearR = low ? 18 : (high ? 34 : 24);
-    const midR = low ? 62 : (high ? 140 : 104);
+    // Near-band triangle arithmetic (why the raised NEAR_LOD_TRIS caps do not blow the
+    // frame): placement yields ~17 props per 16x16 chunk (T19 measures 1535 props over
+    // 90 chunks), so a 24 m near disc inside the frustum holds ~110 tree instances at
+    // MED, not the 420 the instance cap allows. 110 x the new per-tree builds
+    // (pine 444 / mean of the three pine classes 400, oak+birch 300, bush 168, snag 84)
+    // = ~40 k, mid band ~600 sprites x 6 tris = 4 k, far band at its caps (5 830 quads)
+    // x 2 tris = ~12 k: vegetation ~56 k of the ~220 k a MED frame draws. Radii kept.
+    // Mid band pulled in 104 -> 96 m: everything past that handovers to the 2-tri
+    // billboard band, which is what pays for the rebuilt vegetation carrying more blocks
+    // per tree inside the near band (vegetation ~90 k, frame ~220 k at MED).
+    const midR = low ? 62 : (high ? 140 : 96);
     // Far band: ONE camera-facing billboard quad = 2 triangles per tree, so the radius
     // is the cheap axis and the INSTANCE CAP is what bounds the cost (the old 135 m far
     // ring faded the forest out inside a short radius: the drive read as a clearing).
@@ -842,7 +940,11 @@ export class Streaming {
           // quad at 320 m read as haze instead of as a cut edge.
           const t = Math.max(0, Math.min(1, (p._d - fade0) / Math.max(1, fade1 - fade0)));
           const f = 1 - (1 - fadeMin) * t * farRef;
-          this._col.setRGB(f, f, f);
+          // Per-instance tone jitter (a few percent of lightness and hue, hashed from
+          // the position, so it is stable while driving): without it every tree of one
+          // species is the exact same colour and a stand reads as one flat cut-out.
+          const j = vegToneJitter(p.x, p.z, 0, this._jit);
+          this._col.setRGB(f * j[0], f * j[1], f * j[2]);
           im.setColorAt(i, this._col);
         }
       }
@@ -866,7 +968,24 @@ export class Streaming {
       const nN = (near.length && near[0]._d > nearLim) ? 0 : this._budget(near, Math.floor(cap * nearCapMul));
       const mN = (mid.length && mid[0]._d > midR) ? 0 : this._budget(mid, Math.floor(cap * midCapMul));
       const bN = (bill.length && bill[0]._d > farR) ? 0 : this._budget(bill, Math.floor(cap * farCapMul));
-      put(im, near, nN, false, 0, 0, 0, 0.78);
+      const variants = this.nearVariants && this.nearVariants.get(type);
+      if (variants) {
+        // Pine: the near batch is split by placement variant onto the three near builds,
+        // and the single pine mesh stands down for the frame.
+        im.count = 0; im.visible = false;
+        const bs = this._pv || (this._pv = [[], [], []]);
+        for (const b of bs) b.length = 0;
+        for (let i = 0; i < nN; i++) {
+          const p = near[i];
+          let v = (p.variant | 0) % bs.length;
+          if (v < 0) v = 0;
+          bs[v].push(p);
+        }
+        for (let v = 0; v < variants.length; v++) {
+          const m = variants[v];
+          put(m, bs[v], Math.min(bs[v].length, m.instanceMatrix.count), false, 0, 0, 0, 0.78);
+        }
+      } else put(im, near, nN, false, 0, 0, 0, 0.78);
       const mim = this.midMeshes.get(type);
       if (mim) put(mim, mid, mN, false, midR * 0.55, midR, 1, 0.72);
       const bim = this.billMeshes.get(type);

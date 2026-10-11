@@ -42,25 +42,41 @@ VOXEL = 0.25                              # resolution of the see-through-gap ch
 # Foliage anchors are deliberately deep: the sun key is 2.1 with ACES, which lifts
 # everything, so a mid-green anchor renders as pale mint.
 C = {
-    "bark_pine":  (0x241809, 0.95),   # props.js:382 pine trunk, darkened
-    "bark_oak":   (0x33220F, 0.95),   # props.js:375 oak trunk, darkened
-    "bark_snag":  (0x2C2417, 0.95),   # props.js:389 dead wood
-    "bark_birch": (0x7D7768, 0.90),   # props.js:243 pale birch trunk
-    "bark_band":  (0x2A2620, 0.90),   # birch bark bands
+    "bark_pine":  (0x1A1007, 0.95),   # pine bark, deep red-brown
+    "bark_pine_b":(0x2C1B0B, 0.95),   # pine bark band (lighter course in the stack)
+    "bark_oak":   (0x231707, 0.95),   # oak bark
+    "bark_oak_b": (0x3A2510, 0.95),   # oak bark band / branch wood
+    "bark_snag":  (0x20190F, 0.95),   # dead wood, grey-brown
+    "bark_snag_b":(0x332A1B, 0.95),   # weathered grey check on a snag
+    "bark_birch": (0x6E6859, 0.90),   # pale birch trunk
+    "bark_birch_b":(0x544E42, 0.90),  # birch trunk in shade (root flare, lee side)
+    "bark_band":  (0x262219, 0.90),   # birch bark lenticel bands
     "timber":     (0x352D21, 0.90),   # props.js:411 corner / fence post
     "wood_board": (0x6B5230, 0.88),
-    "pine_dark":  (0x16301A, 0.95),   # shaded underside of a conifer tier
-    "pine_mid":   (0x21421F, 0.95),   # props.js:196 pine foliage base
-    "pine_lit":   (0x2F5730, 0.95),   # lit top plate of a tier
-    "leaf_dark":  (0x26411A, 0.95),   # shaded underside of a broadleaf crown
-    "leaf_mid":   (0x3C5F24, 0.95),   # props.js:238 oak foliage base
-    "leaf_lit":   (0x547A30, 0.95),   # lit crown top
-    "birch_dark": (0x2A4A1E, 0.95),
-    "birch_mid":  (0x44692A, 0.95),   # props.js:196 birch foliage base, de-minted
-    "birch_lit":  (0x5C8536, 0.95),
-    "bush_dark":  (0x1F3615, 0.95),   # props.js:250 bush foliage base
-    "bush_mid":   (0x33511E, 0.95),
-    "bush_lit":   (0x476B2A, 0.95),
+    # Four tones per species. The old anchors (pine_mid 0x21421F, leaf_mid 0x3C5F24,
+    # birch_mid 0x44692A) sat too high and too desaturated: with a 2.1 key light and
+    # ACES on top, baseColorFactor lands in pale mint and every species collapses into
+    # one tone. These are pulled down 25-40% in value and pushed toward green/yellow.
+    "pine_dark":  (0x09190D, 0.95),   # conifer tier, shaded underside
+    "pine_mid":   (0x12300F, 0.95),   # conifer body
+    "pine_lit":   (0x1C4A14, 0.95),   # sunlit cap of a tier
+    "pine_rim":   (0x3F6218, 0.95),   # warm rim lobe on the lit side
+    "leaf_dark":  (0x10250C, 0.95),   # broadleaf crown, shaded underside
+    "leaf_mid":   (0x1E3D11, 0.95),   # broadleaf body
+    "leaf_lit":   (0x2C5A16, 0.95),   # sunlit crown mass
+    "leaf_rim":   (0x52701E, 0.95),   # warm rim, lit edge of the crown
+    "birch_dark": (0x12270E, 0.95),   # birch is finer and a touch yellower than oak
+    "birch_mid":  (0x214213, 0.95),
+    "birch_lit":  (0x305C1C, 0.95),
+    "birch_rim":  (0x5C7626, 0.95),
+    "bush_dark":  (0x0C1E0B, 0.95),   # understory shrub, shaded underside
+    "bush_mid":   (0x173211, 0.95),
+    "bush_lit":   (0x234818, 0.95),
+    "bush_rim":   (0x3E5E1E, 0.95),
+    "fern_dark":  (0x08170A, 0.95),   # fern frond, underside / back fronds
+    "fern_mid":   (0x11290F, 0.95),   # frond body
+    "fern_lit":   (0x1B3F14, 0.95),   # frond tip catching the key
+    "fern_rim":   (0x2C5518, 0.95),   # warm rim on the front fronds
     "soil":       (0x241C12, 0.95),   # darker soil collar at the hedge/ground line
     "stone_lit":  (0x77766E, 0.72),   # palette.js stone tone
     "stone_mid":  (0x5C5C57, 0.65),   # surfaces.js:84 stone
@@ -121,110 +137,178 @@ MAT_ORDER = list(C)
 
 
 # --------------------------------------------------------------- vegetation
-# A foliage cluster is a filled volume, not a slab: the wide shaded base plate stays
-# centred on the branch so the stack can never be seen through, but the mid flanks and
-# the lit crown sit at their own x/y offset with their own half-depths, and two lobes
-# stick out on opposite quarters at different heights and tones. That breaks the
-# "stack of identical square plates" read the in-game capture showed from ground level.
-# Overlapping hz values keep the stack solid; the builder voxelises each tree and fails
-# on any enclosed empty run along X, Y or Z.
-def tier(salt, cx, cz, r, hz, idx, dark, mid, lit, arms=1.0):
-    a = hsh(salt, idx, 17)
-    b = hsh(idx, salt, 23)
-    o = hsh(salt + 5, idx, 41) - 0.5     # cluster offset, always inside r
-    q = hsh(idx, salt + 7, 59) - 0.5
-    lo = hsh(salt + 2, idx, 71)
-    side = 1.0 if (salt + idx) % 2 == 0 else -1.0
-    out = [
-        (cx, 0, cz - hz * 0.42, r * arms, r, hz * 0.46, dark),           # shaded underside
-        (cx + o * r * 0.34, q * r * 0.34, cz + hz * 0.04,
-         r * (0.80 + 0.12 * a) * arms, r * (0.78 + 0.14 * b), hz * 0.30, mid),   # near flank
-        (cx - o * r * 0.26, -q * r * 0.30, cz + hz * 0.20,
-         r * (0.66 + 0.14 * b) * arms, r * (0.70 + 0.12 * a), hz * 0.26, mid),   # far flank
-        (cx + o * r * 0.46, q * r * 0.44, cz + hz * 0.46,
-         r * (0.50 + 0.14 * b) * arms, r * (0.50 + 0.14 * a), hz * 0.42, lit),   # lit crown
-        (cx + side * r * (0.66 + 0.18 * a), (b - 0.5) * r * 0.7,
-         cz - hz * 0.10, r * 0.16, r * 0.16, hz * 0.36, dark),           # jutting sprig
-        (cx - side * r * (0.60 + 0.16 * lo), (a - 0.5) * r * 0.86,
-         cz + hz * 0.24, r * (0.15 + 0.11 * lo), r * (0.15 + 0.13 * lo),
-         hz * (0.28 + 0.20 * abs(q)), lit if lo > 0.5 else mid),          # deeper side lobe
+# A foliage cluster is a filled VOLUME with four tones, not a plate:
+#   * the deep shadow mass is the widest block and hangs below the branch plane, so the
+#     underside of a canopy reads dark from the road instead of pale mint;
+#   * two mid-tone flank masses at different spans carry the body of the cluster, so the
+#     silhouette is lumpy rather than a stepped square disc;
+#   * the sunlit mass sits proud of the cluster top and off-centre, never a full plate;
+#   * one warm rim lobe on the lit side is hung LOWER than the crown, which is what makes
+#     the edge of a canopy droop instead of reading as a shelf.
+# Every half-extent and offset comes out of hsh(), which also keeps two differently
+# coloured faces off the same plane (coplanar_conflicts() below fails the export if a
+# differently-coloured face pair ever lands coplanar and overlapping - that is what
+# dithered the old flat plates into one pale mass).
+def cluster(salt, cx, cz, r, hz, tones, arms=1.0, droop=1.0):
+    dark, mid, lit, rim = tones
+    a = hsh(salt, 1, 17); b = hsh(salt, 2, 23); c = hsh(salt, 3, 41)
+    d = hsh(salt, 4, 59); e = hsh(salt, 5, 71); f = hsh(salt, 6, 83)
+    side = 1.0 if salt % 2 == 0 else -1.0
+    return [
+        (cx, (b - 0.5) * r * 0.20, cz - hz * (0.30 + 0.20 * droop),
+         r * (0.95 + 0.07 * a) * arms, r * (0.93 + 0.08 * b), hz * 0.37, dark),
+        (cx + (a - 0.5) * r * 0.52, (d - 0.5) * r * 0.70, cz + hz * 0.02,
+         r * (0.78 + 0.11 * c) * arms, r * (0.74 + 0.13 * a), hz * 0.33, mid),
+        (cx - (d - 0.5) * r * 0.44, (c - 0.5) * r * 0.64, cz + hz * (0.16 + 0.12 * e),
+         r * (0.65 + 0.13 * b) * arms, r * (0.69 + 0.15 * f), hz * 0.30, mid),
+        (cx + (e - 0.5) * r * 0.36, (f - 0.5) * r * 0.42, cz + hz * (0.32 + 0.12 * b),
+         r * (0.51 + 0.15 * d) * arms, r * (0.49 + 0.15 * e), hz * 0.27, lit),
+        (cx + side * r * (0.70 + 0.17 * f), (a - 0.5) * r * 0.52,
+         cz - hz * (0.06 + 0.18 * droop), r * (0.18 + 0.08 * b), r * (0.20 + 0.10 * c),
+         hz * (0.23 + 0.09 * d), rim),
     ]
-    return out
 
 
-def trunk(cx, cz_top, hx_base, hx_top, mat, steps, flare=True, mat_alt=None):
-    """Visible tapered trunk stack; every step is its own block."""
+def conifer(salt, cx, cz, r, hz, tones, arms=1.0):
+    """Four-box cluster for a conifer tier: same four tones, one less mass per tier so a
+    six-tier pine stays inside the near-band triangle budget."""
+    dark, mid, lit, rim = tones
+    a = hsh(salt, 1, 17); b = hsh(salt, 2, 23); c = hsh(salt, 3, 41)
+    d = hsh(salt, 4, 59); e = hsh(salt, 5, 71)
+    side = 1.0 if salt % 3 == 0 else -1.0
+    return [
+        (cx, (b - 0.5) * r * 0.16, cz - hz * 0.30,
+         r * (0.97 + 0.05 * a) * arms, r * (0.95 + 0.06 * b), hz * 0.40, dark),
+        (cx + (a - 0.5) * r * 0.30, (d - 0.5) * r * 0.52, cz + hz * 0.06,
+         r * (0.74 + 0.13 * c) * arms, r * (0.72 + 0.14 * d), hz * 0.34, mid),
+        (cx - (c - 0.5) * r * 0.34, (e - 0.5) * r * 0.40, cz + hz * 0.30,
+         r * (0.48 + 0.16 * e) * arms, r * (0.46 + 0.16 * a), hz * 0.28, lit),
+        (cx + side * r * (0.62 + 0.20 * d), (e - 0.5) * r * 0.62,
+         cz - hz * 0.16, r * (0.17 + 0.09 * d), r * (0.19 + 0.11 * b),
+         hz * (0.26 + 0.10 * c), rim),
+    ]
+
+
+def trunk(cx, cz_top, hx_base, hx_top, mat, steps, flare=True, mat_alt=None,
+          bark_every=3, salt=0, branch=None):
+    """Root flare (two stacked offset pads wider than the trunk), a taper, bark banding
+    (every `bark_every` course lands in the lighter bark tone) and branch stubs the
+    canopy sits on. Each course carries a few centimetres of z/y/r jitter so the band
+    courses do not share a plane with the course above it."""
     out = []
     if flare:
-        out.append((cx, 0, 0.14, hx_base * 1.55, hx_base * 1.55, 0.16, mat))
-    step = cz_top / steps
+        out.append((cx, 0, 0.11, hx_base * 1.72, hx_base * 1.64, 0.11, mat_alt or mat))
+        out.append((cx + hx_base * 0.24, -hx_base * 0.19, 0.30,
+                    hx_base * 1.28, hx_base * 1.21, 0.10, mat))
+    step = (cz_top - 0.40) / steps
     for s in range(steps):
         r = hx_base + (hx_top - hx_base) * (s / max(1, steps - 1))
-        out.append((cx, 0, 0.16 + step * s + step * 0.5, r, r, step * 0.5,
-                    mat if (mat_alt is None or s % 3) else mat_alt))
+        zj = (hsh(salt + s, 7, 101) - 0.5) * 0.06
+        yj = (hsh(salt + s, 9, 103) - 0.5) * 0.04
+        rj = (hsh(salt + s, 11, 107) - 0.5) * 0.04
+        out.append((cx, yj, 0.40 + step * s + step * 0.5 + zj, r + rj, r + rj * 0.6,
+                    step * 0.5, mat if (mat_alt is None or s % bark_every) else mat_alt))
+    for _bi, (bx, by, bz, bhx, bhy, bhz) in enumerate(branch or ()):  # branch structure
+        out.append((cx + bx, by, bz + (hsh(salt + _bi, 3, 109) - 0.5) * 0.03,
+                    bhx, bhy, bhz, mat_alt or mat))
     return out
 
 
 PROPS = {}
 
-# --- pine: conical stack of 6 tiers over a visible trunk (SPRITE_SPEC 4.6 w x 9.4 h)
-_pine = trunk(0, 3.30, 0.36, 0.18, "bark_pine", 5)
-_pine_tiers = [(3.15, 2.28, 0.66), (4.30, 1.98, 0.62), (5.45, 1.68, 0.58),
-               (6.55, 1.36, 0.54), (7.60, 1.02, 0.48), (8.55, 0.64, 0.42)]
+# --- pine: conical crown of 5 tiers over a flared, barked trunk. Node is kept at or
+# under NEAR_LOD_TRIS[PROP.PINE] (props.js:491, 320 tris) on purpose: over budget the
+# streaming layer throws the baked node away for the cheap procedural near build
+# (streaming.js:235-244) and none of this work is ever drawn.
+_pine = trunk(0, 3.55, 0.34, 0.17, "bark_pine", 3, mat_alt="bark_pine_b", bark_every=2,
+              salt=3)
+_pine_tiers = [(3.35, 2.24, 0.72), (4.55, 1.92, 0.68), (5.70, 1.60, 0.62),
+               (6.85, 1.26, 0.56), (7.95, 0.86, 0.48)]
 for _t, (_z, _r, _hz) in enumerate(_pine_tiers):
-    _pine.extend(tier(3 + _t, 0, _z, _r, _hz, _t, "pine_dark", "pine_mid", "pine_lit"))
-_pine.append((0, 0, 9.20, 0.16, 0.16, 0.22, "pine_mid"))            # leader/spike
+    _pine.extend(conifer(3 + _t, 0, _z, _r, _hz, ("pine_dark", "pine_mid", "pine_lit",
+                                                  "pine_rim")))
+_pine.append((0, 0, 9.02, 0.15, 0.15, 0.30, "pine_mid"))            # leader/spike
 PROPS["tree_pine"] = dict(instance=True, blocks=_pine)
 
-# --- deciduous / oak: trunk + branches + 5 crown plates (SPRITE_SPEC 5.6 w x 7.2 h)
-_dec = trunk(0, 3.00, 0.36, 0.20, "bark_oak", 4)
-_dec += [(0.55, 0, 2.95, 0.60, 0.16, 0.16, "bark_oak"),
-         (-0.50, 0, 3.20, 0.16, 0.55, 0.16, "bark_oak")]
-_dec_tiers = [(4.05, 2.30, 0.62), (4.90, 2.60, 0.66), (5.75, 2.35, 0.62),
-              (6.45, 1.80, 0.54), (7.00, 1.10, 0.40)]
+# --- oak: spreading branch structure the crown clusters sit on (SPRITE_SPEC 5.6 x 7.2)
+_dec = trunk(0, 3.05, 0.38, 0.22, "bark_oak", 2, mat_alt="bark_oak_b", bark_every=2,
+             salt=21,
+             branch=[(0.72, 0.10, 3.02, 0.62, 0.17, 0.17),
+                     (-0.66, -0.14, 3.34, 0.17, 0.58, 0.16),
+                     (0.12, 0.76, 2.70, 0.16, 0.62, 0.15)])
+_dec_tiers = [(4.25, 2.24, 0.72), (5.45, 2.42, 0.76), (6.62, 1.72, 0.58)]
 for _t, (_z, _r, _hz) in enumerate(_dec_tiers):
-    _dec.extend(tier(21 + _t, 0, _z, _r, _hz, _t, "leaf_dark", "leaf_mid", "leaf_lit",
-                     arms=1.0 if _t % 2 == 0 else 0.92))
+    _fn = cluster if _t == 0 else conifer
+    _dec.extend(_fn(21 + _t, (-0.34 if _t == 0 else (0.30 if _t == 1 else -0.22)), _z,
+                    _r, _hz, ("leaf_dark", "leaf_mid", "leaf_lit", "leaf_rim"),
+                    arms=1.0 if _t != 1 else 0.94))
 PROPS["tree_deciduous"] = dict(instance=True, blocks=_dec)
 
-# --- birch: slim pale trunk with dark bands, narrow tall crown (4.4 w x 7.8 h)
-_birch = trunk(0, 3.60, 0.24, 0.12, "bark_birch", 6, mat_alt="bark_band")
-_birch_tiers = [(4.00, 1.55, 0.52), (4.75, 1.85, 0.56), (5.50, 1.95, 0.56),
-                (6.20, 1.68, 0.52), (6.85, 1.28, 0.46), (7.40, 0.78, 0.36)]
-for _t, (_z, _r, _hz) in enumerate(_birch_tiers):
-    _birch.extend(tier(41 + _t, 0, _z, _r, _hz, _t, "birch_dark", "birch_mid", "birch_lit",
-                       arms=0.95))
-_birch.append((0, 0, 7.78, 0.14, 0.14, 0.16, "birch_mid"))
+# --- birch: slim pale trunk, dark lenticel bands, finer and tighter crown
+_birch = trunk(0, 4.30, 0.24, 0.12, "bark_birch", 4, mat_alt="bark_band", bark_every=2,
+               salt=41,
+               branch=[(0.36, 0.10, 3.42, 0.34, 0.11, 0.11),
+                       (-0.32, -0.08, 4.04, 0.11, 0.32, 0.10)])
+for _t, (_z, _r, _hz) in enumerate([(4.55, 1.58, 0.56), (5.60, 1.82, 0.62),
+                                    (6.65, 1.56, 0.54)]):
+    _fn = cluster if _t == 1 else conifer
+    _birch.extend(_fn(41 + _t, 0, _z, _r, _hz,
+                      ("birch_dark", "birch_mid", "birch_lit", "birch_rim"),
+                      arms=0.94))
+_birch.append((0, 0, 7.78, 0.13, 0.13, 0.20, "birch_mid"))
 PROPS["tree_birch"] = dict(instance=True, blocks=_birch)
 
-# --- dead tree / snag: bare trunk stack + broken branch stubs (no canopy)
-_dead = trunk(0, 5.30, 0.34, 0.14, "bark_snag", 6)
-_dead += [(0.62, 0, 2.90, 0.68, 0.15, 0.15, "bark_snag"),
-          (-0.55, 0, 3.60, 0.15, 0.60, 0.15, "bark_snag"),
-          (0.15, 0.60, 4.30, 0.15, 0.62, 0.15, "bark_snag"),
-          (-0.30, -0.35, 4.85, 0.42, 0.14, 0.14, "bark_snag"),
-          (0.28, 0.15, 5.62, 0.20, 0.20, 0.30, "bark_snag")]
+# --- dead snag: root flare, weathered bark check, tapered stack, broken limbs
+_dead = trunk(0, 5.90, 0.34, 0.13, "bark_snag", 3, mat_alt="bark_snag_b", bark_every=2,
+              salt=51,
+              branch=[(0.58, 0.06, 2.86, 0.58, 0.15, 0.15),
+                      (-0.16, 0.62, 4.32, 0.14, 0.58, 0.14)])
 PROPS["tree_dead"] = dict(instance=True, blocks=_dead)
 
-# --- bush: 3 short tiers over a stub trunk (SPRITE_SPEC 2.3 w x 1.7 h)
-_bush = trunk(0, 0.55, 0.13, 0.10, "bark_snag", 2, flare=False)
-for _t, (_z, _r, _hz) in enumerate([(0.58, 0.82, 0.30), (0.96, 1.00, 0.34), (1.34, 0.66, 0.26)]):
-    _bush.extend(tier(61 + _t, 0, _z, _r, _hz, _t, "bush_dark", "bush_mid", "bush_lit"))
-_bush.append((0, 0, 0.04, 0.86, 0.86, 0.045, "soil"))          # soil collar, hides the base
+# --- shrub: soil collar, stub, two four-tone masses plus a pair of rim sprigs
+_bush = [(0, 0, 0.04, 0.88, 0.86, 0.045, "soil")]                # soil collar
+_bush.append((0, 0.02, 0.30, 0.13, 0.13, 0.26, "bark_snag"))     # stub
+_bush.extend(cluster(61, -0.14, 0.92, 0.88, 0.46,
+                     ("bush_dark", "bush_mid", "bush_lit", "bush_rim"), droop=1.2))
+_bush.extend(cluster(67, 0.64, 1.34, 0.58, 0.34,
+                     ("bush_dark", "bush_mid", "bush_lit", "bush_rim"), droop=1.0))
 PROPS["bush"] = dict(instance=True, blocks=_bush)
 
-# hedgerow: 3 m of continuous block hedge, soil foot, 3 tones, no gaps
-_hedge = [(0, 0, 0.05, 1.50, 0.50, 0.055, "soil")]
-for i in range(8):                      # 8 face blocks along X = 3.0 m
-    x = -1.5 + 0.375 + i * 0.375
+# --- fern: dense crown of arching fronds, taller tufts at the back, soil crown at the
+# foot. FERN has no NEAR_LOD_TRIS entry in props.js, so this node is adopted whole.
+_fern = [(0, 0, 0.05, 0.62, 0.60, 0.056, "soil")]
+for _k, (_a, _len, _h, _tone) in enumerate([(0.0, 1.00, 0.92, "fern_lit"),
+                                            (1.05, 0.92, 0.84, "fern_mid"),
+                                            (2.10, 0.86, 0.78, "fern_rim"),
+                                            (3.20, 1.18, 1.24, "fern_lit"),
+                                            (4.30, 0.80, 0.66, "fern_dark")]):
+    j1 = 1.0 + (hsh(_k, 5, 109) - 0.5) * 0.30
+    j2 = 1.0 + (hsh(_k, 9, 113) - 0.5) * 0.30
+    _cx, _cz = math.cos(_a) * _len * 0.42 * j1, math.sin(_a) * _len * 0.42 * j2
+    _fern.append((_cx * 0.35, _cz * 0.35, _h * (0.42 + 0.021 * _k),
+                  0.097 + 0.011 * _k, 0.104 - 0.009 * _k, _h * (0.42 + 0.017 * _k),
+                  "fern_mid" if _k % 2 else "fern_dark"))                # stem
+    _fern.append((_cx, _cz, _h * (0.865 + 0.019 * _k), 0.09 + 0.031 * _k,
+                  0.30 + 0.047 * (_k % 3), _h * (0.20 + 0.023 * _k), _tone))
+_fern.append((0.02, 0.12, 1.36, 0.21, 0.19, 0.17, "fern_rim"))        # taller tuft
+PROPS["fern"] = dict(instance=True, blocks=_fern)
+
+# hedgerow: 3 m of continuous block hedge, soil foot, four tones, no gaps. Every course
+# is jittered in z as well as y so two differently coloured faces never share a plane.
+_hedge = [(0, 0, 0.05, 1.50, 0.52, 0.055, "soil")]
+for i in range(7):                      # face blocks along X = 3.0 m
+    x = -1.5 + 0.215 + i * 0.43
     jit = (hsh(i, 3, 83) - 0.5) * 0.10
+    zz = 0.42 + (hsh(i, 11, 87) - 0.5) * 0.05
     g = "bush_mid" if i % 2 == 0 else "leaf_mid"
-    _hedge.append((x, jit, 0.42, 0.21, 0.50, 0.38, g))          # lower course, solid
-    _hedge.append((x, jit, 0.95, 0.20, 0.46, 0.20, "leaf_dark"))  # shaded middle
-for i in range(6):                      # lit, ragged top course
+    _hedge.append((x, jit, zz, 0.21, 0.50 - 0.02 * (i % 3), 0.38, g))
+    _hedge.append((x - 0.045, jit + 0.03, 0.95 + (hsh(i, 13, 91) - 0.5) * 0.09,
+                   0.195, 0.455 - 0.031 * (i % 2), 0.20, "leaf_dark"))
+for i in range(6):                      # lit + warm rim ragged top course
     x = -1.25 + i * 0.50 + (hsh(i, 7, 89) - 0.5) * 0.10
-    _hedge.append((x, (hsh(i, 5, 91) - 0.5) * 0.14, 1.28, 0.30, 0.44, 0.18,
-                   "leaf_lit" if i % 2 else "bush_lit"))
+    _hedge.append((x, (hsh(i, 5, 91) - 0.5) * 0.14,
+                   1.26 + (hsh(i, 17, 93) - 0.5) * 0.08, 0.30, 0.44, 0.18,
+                   "leaf_rim" if i % 3 == 0 else ("leaf_lit" if i % 2 else "bush_lit")))
 PROPS["hedgerow"] = dict(instance=True, blocks=_hedge)
 
 # rock: grey block cluster
@@ -492,9 +576,43 @@ EXPECTED = ["prop_" + k for k in PROPS]
 # pine > birch > deciduous > bush > hedgerow. Sizes match SPRITE_SPEC in props.js.
 SPEC = {"tree_pine": (8.9, 9.6, 4.2, 5.0), "tree_deciduous": (6.8, 7.6, 4.8, 5.8),
         "tree_birch": (7.4, 8.1, 3.8, 4.8), "tree_dead": (5.4, 6.6, 1.6, 3.2),
-        "bush": (1.5, 1.85, 1.6, 2.4), "hedgerow": (1.35, 1.70, 2.9, 3.3)}
+        "bush": (1.5, 1.85, 1.6, 2.4), "fern": (1.05, 1.55, 1.3, 2.3),
+        "hedgerow": (1.35, 1.70, 2.9, 3.3)}
 HIERARCHY = ["tree_pine", "tree_birch", "tree_deciduous", "bush", "hedgerow"]
-SOLID_CHECK = list(SPEC)
+SOLID_CHECK = ["tree_pine", "tree_deciduous", "tree_birch", "bush", "hedgerow"]
+
+# Near-band triangle budget, mirroring NEAR_LOD_TRIS in src/world/props.js:491. The
+# streaming layer compares the ADOPTED node against that budget (streaming.js:235-244):
+# a species over it is swapped for the cheap procedural near build, so an over-budget
+# node is a node the driver never sees. Kept in the builder so a richer tree cannot
+# silently opt itself out of the near band - and so the vegetation frame cost (near
+# 90 k triangles) cannot grow just because the model got prettier.
+VEG_BUDGET = {"tree_pine": 320, "tree_deciduous": 240, "tree_birch": 270,
+              "bush": 150, "tree_dead": 90, "fern": 170, "hedgerow": 330}
+
+
+def coplanar_conflicts(blocks):
+    """Count pairs of DIFFERENT-material faces that land on the same plane and overlap.
+    Two opposite colours sharing a plane is what made the old flat canopy plates and the
+    banner board dither into one pale mass in the depth pass. Same-material contact is
+    fine (a hedge is built out of touching blocks of one tone)."""
+    faces = []
+    for cx, cy, cz, hx, hy, hz, m in blocks:
+        for ax, (u, v, uh, vh) in ((0, (cy, cz, hy, hz)), (1, (cx, cz, hx, hz)),
+                                   (2, (cx, cy, hx, hy))):
+            for s in (-1, 1):
+                co = (cx, cy, cz)[ax] + s * (hx, hy, hz)[ax]
+                faces.append((ax, round(co, 4), u - uh, u + uh, v - vh, v + vh, m))
+    bad = []
+    for i in range(len(faces)):
+        ax, co, a0, a1, b0, b1, mi = faces[i]
+        for j in range(i + 1, len(faces)):
+            ax2, co2, c0, c1, d0, d1, mj = faces[j]
+            if ax != ax2 or mi == mj or abs(co - co2) > 1e-4:
+                continue
+            if min(a1, c1) - max(a0, c0) > 1e-3 and min(b1, d1) - max(b0, d0) > 1e-3:
+                bad.append("%s/%s @%c%.2f" % (mi, mj, "xyz"[ax], co))
+    return bad
 
 
 def find_gaps(blocks):
@@ -668,10 +786,14 @@ def main():
 
     total = 0
     solids = {}
+    flats = {}
+    veg_objs = set()
     for key in PROPS:
         blocks = PROPS[key]["blocks"]
         if key in SOLID_CHECK:
             solids[key] = find_gaps(blocks)
+        if key in VEG_BUDGET:
+            flats[key] = coplanar_conflicts(blocks)
         verts, faces, fmat = build(blocks)
         mesh = D.meshes.new("prop_" + key)
         mesh.from_pydata(verts, [], faces)
@@ -683,6 +805,8 @@ def main():
             mesh.polygons[i].material_index = m
         obj = D.objects.new("prop_" + key, mesh)
         bpy.context.scene.collection.objects.link(obj)
+        if key in SPEC:
+            veg_objs.add(obj.name)
         obj.select_set(True)
         tris = sum(len(f) - 2 for f in faces)
         total += tris
@@ -698,6 +822,23 @@ def main():
         bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True,
                                   export_apply=True, export_yup=True)
 
+    # Optional vegetation-only export for the preview renders: the full props.glb stacks
+    # every node on the origin, so a camera on the whole file frames the gate, not a tree.
+    if "--preview-veg" in args:
+        pv = os.path.abspath(args[args.index("--preview-veg") + 1])
+        ROW = {"tree_pine": 0.0, "tree_deciduous": 7.0, "tree_birch": 14.0,
+               "tree_dead": 20.0, "bush": 24.0, "fern": 27.0, "hedgerow": 31.0}
+        for ob in bpy.context.scene.objects:
+            ob.select_set(ob.name in veg_objs)
+            key = ob.name[len("prop_"):]
+            if key in ROW:
+                ob.location.x = ROW[key]
+        bpy.ops.export_scene.gltf(filepath=pv, export_format="GLB", use_selection=True,
+                                  export_apply=True, export_materials="EXPORT",
+                                  export_cameras=False, export_lights=False,
+                                  export_yup=True)
+        print("preview glb      : %s" % pv)
+
     blob, rows, found, missing, doc = verify(out)
     size = len(blob)
     glb_tris = sum(r["triangles"] for r in rows)
@@ -706,8 +847,10 @@ def main():
     for r in rows:
         key = r["name"][len("prop_"):]
         solid = ("see-through %d" % solids[key]) if key in solids else "-"
-        print("node %-22s w=%6.2f m  h=%6.2f m  d=%6.2f m  tris=%5d  %s"
-              % (r["name"], r["width_m"], r["height_m"], r["depth_m"], r["triangles"], solid))
+        flat = (" coplanar %d" % len(flats[key])) if key in flats else ""
+        print("node %-22s w=%6.2f m  h=%6.2f m  d=%6.2f m  tris=%5d  %s%s"
+              % (r["name"], r["width_m"], r["height_m"], r["depth_m"], r["triangles"],
+                 solid, flat))
     print("nodes found      : %d / %d" % (len(found), len(EXPECTED)))
     dbl = double_sided_materials(doc)
     print("doubleSided mats : %d / %d" % (len(dbl), len(doc.get("materials", []))))
@@ -752,6 +895,24 @@ def main():
         if g:
             print("FAIL %s has %d see-through gaps in its foliage" % (key, g))
             ok = False
+    for key, g in flats.items():
+        if g:
+            print("FAIL %s has %d coplanar opposite-colour face pairs (the depth pass "
+                  "dithers those into one flat mass): %s"
+                  % (key, len(g), ", ".join(g[:6])))
+            ok = False
+    veg_tris = 0
+    for key, budget in VEG_BUDGET.items():
+        r = by_name.get(key)
+        if not r:
+            continue
+        veg_tris += r["triangles"]
+        if r["triangles"] > budget:
+            print("FAIL %s tris %d > near-band budget %d (props.js NEAR_LOD_TRIS): "
+                  "streaming would swap the node for the procedural near build"
+                  % (key, r["triangles"], budget))
+            ok = False
+    print("vegetation triangles (near band at worst): %d" % veg_tris)
     for r in rows:
         if r["height_m"] > MAX_HEIGHT_M:
             print("FAIL %s height %.2f m > %.1f m" % (r["name"], r["height_m"], MAX_HEIGHT_M))

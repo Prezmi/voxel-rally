@@ -10,8 +10,8 @@
 // pale patches, which is what queue P7 is about.
 
 export const ROAD_TONE = {
-  base: 0.94,                        // tile = 0  -> darkest panel
-  swing: 0.12,                       // tile = 1  -> 1.06, so the band is 0.94..1.06
+  base: 0.93,                        // tile = 0  -> darkest panel
+  swing: 0.15,                       // tile = 1  -> 1.08, so the band is 0.93..1.08
 };
 
 // Wheel-line rut. The mesher packs edge/corridor wear into the surface attribute
@@ -23,7 +23,7 @@ export const ROAD_TONE = {
 export const RUT_GLOSS = {
   from: 0.10,                        // wear at or below this is fully in the rut
   to: 0.45,                          // wear at or above this is back to panel roughness
-  road: 0.80,                        // 20% glossier inside the rut: sheen, not a mirror
+  road: 0.71,                        // 29 % glossier inside the rut: packed, damp earth
 };
 
 /** The tone band the shader multiplies a panel by, as measured numbers. */

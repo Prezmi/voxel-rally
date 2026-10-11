@@ -1,8 +1,8 @@
 {
   "generated_by": "tools/blender/build_stage_props.py",
   "source_glb": "props.glb",
-  "total_triangles": 4728,
-  "file_bytes": 283696,
+  "total_triangles": 4008,
+  "file_bytes": 254856,
   "props": [
     {
       "name": "prop_banner_arch",
@@ -14,10 +14,10 @@
     },
     {
       "name": "prop_bush",
-      "width_m": 2.0,
-      "height_m": 1.574,
-      "depth_m": 2.0,
-      "triangles": 252,
+      "width_m": 2.371,
+      "height_m": 1.553,
+      "depth_m": 1.803,
+      "triangles": 144,
       "instance": true
     },
     {
@@ -34,6 +34,14 @@
       "height_m": 1.24,
       "depth_m": 0.24,
       "triangles": 48,
+      "instance": true
+    },
+    {
+      "name": "prop_fern",
+      "width_m": 1.336,
+      "height_m": 1.536,
+      "depth_m": 1.319,
+      "triangles": 144,
       "instance": true
     },
     {
@@ -62,10 +70,10 @@
     },
     {
       "name": "prop_hedgerow",
-      "width_m": 3.291,
-      "height_m": 1.465,
+      "width_m": 3.125,
+      "height_m": 1.479,
       "depth_m": 1.066,
-      "triangles": 276,
+      "triangles": 252,
       "instance": true
     },
     {
@@ -134,34 +142,34 @@
     },
     {
       "name": "prop_tree_birch",
-      "width_m": 3.738,
-      "height_m": 7.96,
-      "depth_m": 3.9,
-      "triangles": 528,
+      "width_m": 3.585,
+      "height_m": 7.98,
+      "depth_m": 4.063,
+      "triangles": 264,
       "instance": true
     },
     {
       "name": "prop_tree_dead",
-      "width_m": 2.02,
-      "height_m": 5.94,
-      "depth_m": 1.82,
-      "triangles": 144,
+      "width_m": 1.745,
+      "height_m": 5.887,
+      "depth_m": 1.758,
+      "triangles": 84,
       "instance": true
     },
     {
       "name": "prop_tree_deciduous",
-      "width_m": 4.837,
-      "height_m": 7.372,
-      "depth_m": 5.2,
-      "triangles": 444,
+      "width_m": 5.201,
+      "height_m": 6.956,
+      "depth_m": 4.762,
+      "triangles": 240,
       "instance": true
     },
     {
       "name": "prop_tree_pine",
-      "width_m": 4.58,
-      "height_m": 9.44,
-      "depth_m": 4.56,
-      "triangles": 516,
+      "width_m": 4.569,
+      "height_m": 9.32,
+      "depth_m": 4.652,
+      "triangles": 312,
       "instance": true
     }
   ]
