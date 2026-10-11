@@ -40,7 +40,8 @@ import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render
 import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, wheelTreadPlan, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
-  radialBlurAmount, sunVisibility } from '../render/post/tune.js';
+  radialBlurAmount, sunVisibility,
+  DOF_TUNE, dofFocus, dofCoc, dofRadiusPx, dofTapCount } from '../render/post/tune.js';
 import { MODEL_QUEUE, ModelQueue, nextBackoffMs } from '../render/model-queue.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle, shaftWallAlpha, shaftPeak } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
@@ -3658,6 +3659,140 @@ function testBackfireHasASound() {
     `shifts=${shifts} accepted=${accepted} pops=${bf.pops} gated=${bf.gated} muted=${bf.muted} stolen=${bf.stolen} flameBursts=${flameBursts} gate=${agree.join('')} nodes=${nodes}/${V.nodeBudget} chains=${V.chains} builds=${bf.builds} buffers=${ctx.buffers} resume=${ctx.resumeCalls} trainMax=${trainMax} window=${winMax.toFixed(3)}s<=${V.maxPopS} gainMax=${V.level} clicks=${steps}/${shortAttack}/${backTime}/${hot} gaps=[${gaps.join(' ')}]`);
 }
 testBackfireHasASound();
+
+// ---------------------------------------------------------------- test 55
+// Depth of field (queue P14). Headless: the whole depth -> blur ramp, the quality
+// gate and the focus clamp are pure data in tune.js; the pass graph must NOT grow
+// (the blur is folded into the composite), and the composite is the only place that
+// reads the scene depth attachment.
+const DOF_RANGES = {
+  nearFlat: [1, 120], farSpan: [10, 900], maxFrac: [0, 0.05], maxPx: [1, 32], taps: [1, 8],
+  minFocus: [1, 60], maxFocus: [60, 900],
+  'level.LOW': [0, 2], 'level.MEDIUM': [0, 2], 'level.HIGH': [0, 2],
+  'tapsLevel.LOW': [0, 8], 'tapsLevel.MEDIUM': [0, 8], 'tapsLevel.HIGH': [0, 8],
+};
+
+function testDepthOfField() {
+  const gaps = [];
+
+  // 1) every dial finite and inside its pinned range (one table, like T33/T40).
+  const walk = (obj, path) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const p = path ? `${path}.${k}` : k;
+      if (v && typeof v === 'object') { walk(v, p); continue; }
+      if (!Number.isFinite(v)) { gaps.push(`${p} is not finite (${v})`); continue; }
+      const r = DOF_RANGES[p];
+      if (!r) gaps.push(`${p} has no pinned range`);
+      else if (v < r[0] || v > r[1]) gaps.push(`${p}=${v} outside ${r[0]}..${r[1]}`);
+    }
+  };
+  walk(DOF_TUNE, '');
+
+  // 2) the composite's linearisation is the projection identity run backwards: a
+  //    window depth written at distance d must read back as d at both ends of the
+  //    frustum, or every coc below is measured against the wrong distance.
+  const near = 0.25, far = 1320;
+  const winAt = (d) => (far * (1 - near / d)) / (far - near);
+  const distOf = (zw) => -((near * far) / ((far - near) * zw - far));
+  for (const d of [near, 1, 7, 30, 120, 400, 900, far]) {
+    const zw = winAt(d);
+    if (!(zw > 0 && zw <= 1)) gaps.push(`window depth out of range at ${d} m: ${zw}`);
+    const back = distOf(zw);
+    if (Math.abs(back - d) > 1e-6 * Math.max(1, d)) gaps.push(`depth round trip ${d} -> ${back.toFixed(3)} m`);
+  }
+
+  // 3) the ramp: dead zero in the sharp band, 1 at the far end, monotone between.
+  const f = 12;
+  const edge = f + DOF_TUNE.nearFlat;
+  if (dofCoc(edge, f) !== 0) gaps.push('a pixel at focus+nearFlat already blurs');
+  if (dofCoc(f, f) !== 0) gaps.push('the focus plane itself blurs');
+  if (Math.abs(dofCoc(edge + DOF_TUNE.farSpan, f) - 1) > 1e-9) gaps.push('the far end does not reach full blur');
+  let prev = -1, over = 0;
+  for (let d = 0; d <= 600; d += 3) {
+    const c = dofCoc(d, f);
+    if (c < prev - 1e-9) gaps.push(`coc falls with distance at ${d} m`);
+    if (c < 0 || c > 1) gaps.push(`coc out of 0..1 at ${d} m: ${c}`);
+    if (d <= edge && c !== 0) over++;
+    prev = c;
+  }
+  if (over) gaps.push(`${over} samples inside the sharp band are not 0`);
+  // the sky (far plane) must be fully defocused, a mid-distance treeline only partly
+  if (dofCoc(far, f) < 0.999) gaps.push('the far plane is not fully defocused');
+  const mid = dofCoc(edge + DOF_TUNE.farSpan * 0.5, f);
+  if (!(mid > 0.35 && mid < 0.65)) gaps.push(`the ramp is not centred on its span (${mid})`);
+
+  // 4) quality gate: the cheap preset pays least, POST off pays nothing, and no
+  //    resolution can buy a blur disc past the ceiling.
+  const rLow = dofRadiusPx({ post: true, level: 'LOW', height: 630 });
+  const rMed = dofRadiusPx({ post: true, level: 'MEDIUM', height: 630 });
+  const rHigh = dofRadiusPx({ post: true, level: 'HIGH', height: 630 });
+  if (!(rLow > 0 && rLow < rMed && rMed < rHigh)) gaps.push(`the quality gate does not step: ${rLow}/${rMed}/${rHigh}`);
+  if (dofRadiusPx({ post: false, level: 'HIGH', height: 630 }) !== 0) gaps.push('DOF runs with POST off');
+  for (const lvl of BLOOM_LEVELS) {
+    const r = dofRadiusPx({ post: true, level: lvl, height: 8192 });
+    if (r > DOF_TUNE.maxPx + 1e-9) gaps.push(`${lvl} blur radius ${r} px over the ${DOF_TUNE.maxPx} px ceiling`);
+  }
+  if (Math.abs(dofRadiusPx({ post: true, level: 'nonsense', height: 630 }) - rMed) > 1e-9) gaps.push('an unknown level does not fall back to MEDIUM');
+
+  // 5) tap count: the cheap preset takes fewer taps, nobody exceeds the table, and a
+  //    garbage level still lands inside the loop bound the shader compiles (i < 5).
+  const tLow = dofTapCount('LOW'), tMed = dofTapCount('MEDIUM'), tHigh = dofTapCount('HIGH');
+  if (!(tLow >= 1 && tLow <= tMed && tMed <= tHigh && tHigh <= DOF_TUNE.taps)) gaps.push(`tap ladder wrong ${tLow}/${tMed}/${tHigh} vs ${DOF_TUNE.taps}`);
+  if (dofTapCount('garbage') > 4 || dofTapCount(undefined) > 4) gaps.push('a tap count exceeds the compiled loop bound');
+
+  // 6) garbage in -> finite, clamped out (a stale save or a NaN camera can never put
+  //    a negative focus or a 400 px disc on the GPU).
+  for (const v of [NaN, Infinity, -1e9, 1e9, undefined, '12']) {
+    const fo = dofFocus(v), co = dofCoc(v, v), px = dofRadiusPx({ post: true, level: v, height: v });
+    const tc = dofTapCount(v);
+    if (!Number.isFinite(fo) || fo < DOF_TUNE.minFocus || fo > DOF_TUNE.maxFocus) gaps.push(`focus leaked ${fo} for input ${v}`);
+    if (!Number.isFinite(co) || co < 0 || co > 1) gaps.push(`coc leaked ${co} for input ${v}`);
+    if (!Number.isFinite(px) || px < 0 || px > DOF_TUNE.maxPx) gaps.push(`radius leaked ${px} for input ${v}`);
+    if (!(tc >= 0 && tc <= 4)) gaps.push(`taps leaked ${tc} for input ${v}`);
+  }
+  // the focus clamp is what stops a bumper cam (0.4 m off the nose) from putting the
+  // whole frame in the blur band
+  if (dofFocus(0.4) < DOF_TUNE.minFocus) gaps.push('a bumper-cam distance focuses inside the car');
+
+  // 7) the budget: DOF buys no pass. The graph is still 4/6/6 with exactly one
+  //    composite, and POST off is still the zero-pass fallback.
+  const per = {};
+  for (const [qName, q] of [['LOW', QUALITY.LOW], ['MED', QUALITY.MED], ['HIGH', QUALITY.HIGH]]) {
+    qualityPreset(q);
+    const g = passGraph({ post: settings.post, bloom: settings.bloom, shafts: true });
+    per[qName] = g.length;
+    if (g.some((p) => /dof|depth/i.test(p.name) || /dof|depth/i.test(p.kind))) gaps.push(`${qName}: DOF added a pass`);
+    if (g.length > MAX_POST_PASSES) gaps.push(`${qName}: ${g.length} passes > budget ${MAX_POST_PASSES}`);
+    if (g[g.length - 1].kind !== 'composite') gaps.push(`${qName}: composite is not the last pass`);
+  }
+  if (per.LOW !== 4 || per.MED !== 6 || per.HIGH !== 6) gaps.push(`pass count moved: ${per.LOW}/${per.MED}/${per.HIGH} (want 4/6/6)`);
+  if (passGraph({ post: false, bloom: 'HIGH', shafts: true }).length !== 0) gaps.push('POST off still builds passes');
+  qualityPreset(QUALITY.MED);
+
+  // 8) the GPU half really reads the depth, mirrors the node-side ramp, and is gated
+  //    by the same POST flag; and there is exactly one owner of the focus distance.
+  const comp = readFileSync(new URL('../render/post/composer.js', import.meta.url), 'utf8');
+  const frag = comp.slice(comp.indexOf('COMPOSITE_FRAG'), comp.indexOf('export class PostComposer'));
+  if (!/uniform sampler2D uDepth/.test(frag)) gaps.push('the composite declares no depth sampler');
+  if (!/texture2D\(uDepth,\s*vUv\)/.test(frag)) gaps.push('the composite never samples the depth attachment');
+  if (!/uNearP \* uFarP/.test(frag) || !/uFarP - uNearP/.test(frag)) gaps.push('the composite does not linearise with the projection identity');
+  if (!/x \* x \* \(3\.0 - 2\.0 \* x\)/.test(frag)) gaps.push('the composite does not mirror the node-side smoothstep');
+  if (!/uDofNear/.test(frag) || !/uFocus \+ uDofNear/.test(frag)) gaps.push('the composite does not ramp from the focus plane');
+  if (!/uDofPx > 0\.02/.test(frag)) gaps.push('the DOF taps are not gated on a zero radius');
+  if (!/depthTexture: new THREE\.DepthTexture\(w, h\)/.test(comp)) gaps.push('the scene target carries no sampled depth attachment');
+  if (!/dofRadiusPx\(\{\s*post: this\.enabled/.test(comp)) gaps.push('the blur radius is not gated by the POST flag');
+  if (!/setFocus\(v\)\s*\{\s*this\.focusIn = dofFocus\(v\)/.test(comp)) gaps.push('setFocus does not clamp through dofFocus');
+  if ((comp.match(/uDofPx\.value/g) || []).length !== 1) gaps.push('uDofPx is written from more than one place');
+  const mainSrc = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  if ((mainSrc.match(/post\.setFocus\(/g) || []).length !== 1) gaps.push('main.js does not own the focus distance');
+  const camSrc = readFileSync(new URL('../render/camera.js', import.meta.url), 'utf8');
+  if (/setFocus\(/.test(camSrc)) gaps.push('two owners push the focus distance (camera.js)');
+
+  check('T55 depth of field: a pinned dial table, a depth ramp that round-trips the projection and stays dead zero inside the sharp band, a quality-gated radius and tap count, ZERO new passes (folded into the composite, still 4/6/6), and one clamped focus owner',
+    gaps.length === 0,
+    `ramp ${DOF_TUNE.nearFlat}+${DOF_TUNE.farSpan} m focus ${DOF_TUNE.minFocus}..${DOF_TUNE.maxFocus} | px ${rLow.toFixed(1)}/${rMed.toFixed(1)}/${rHigh.toFixed(1)} cap ${DOF_TUNE.maxPx} | taps ${tLow}/${tMed}/${tHigh} | passes ${per.LOW}/${per.MED}/${per.HIGH} <= ${MAX_POST_PASSES} | midSpan ${mid.toFixed(2)} | gaps=[${gaps.join(' ')}]`);
+}
+testDepthOfField();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

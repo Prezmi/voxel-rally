@@ -36,3 +36,6 @@ self-improve: PUSHED 769d1da
 self-improve 2026-10-11T190001 · before 63/63 passed · head 12bd431
 self-improve: PUSHED d08eea2
 self-improve 2026-10-11T200002 · before 64/64 passed · head d08eea2
+self-improve: agent leg timed out after 1500s
+self-improve: PUSHED 017cdb4
+self-improve 2026-10-11T210001 · before 65/65 passed · head 017cdb4

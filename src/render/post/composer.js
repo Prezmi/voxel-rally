@@ -10,16 +10,24 @@
 //   2) blurQ                   vertical gaussian over the quarter mip
 //   3) brightE                 eighth-res bright pass + horizontal gaussian
 //   4) blurE                   vertical gaussian over the eighth mip
-//   composite (to canvas)      bloom add -> AgX tone map -> filmic grade -> sRGB
+//   composite (to canvas)      DOF (from the scene depth attachment) -> bloom add
+//                              -> AgX tone map -> filmic grade -> sRGB
 // Four offscreen passes + one composite. LOW runs the cheapest graph: the eighth
 // mip is not allocated or drawn at all (brightQ + blurQ + composite).
+//
+// Depth of field (queue P14) costs no pass at all: the composite reads rtScene's
+// depth attachment and takes a few extra scene taps where the linear distance is
+// past the focus plane, exactly like the edge radial blur and the dirty lens before
+// it. The bloom mips still come from the sharp scene, so a far light blooms the way
+// it always did while its own surface defocuses.
 //
 // Draw calls: every pass is the same preallocated fullscreen quad; the scene's own
 // draw-call count is read straight after the scene render, before any quad runs,
 // so renderer.info (and the budget harness) reports the same calls as the raw path.
 import * as THREE from 'three';
 import { POST_TUNE, BLOOM_LEVELS, passGraph, resolveToneMode, clampNum, ATMO_TUNE,
-  sunVisibility, shaftAlpha, lensFlareAlpha, radialBlurAmount } from './tune.js';
+  sunVisibility, shaftAlpha, lensFlareAlpha, radialBlurAmount,
+  DOF_TUNE, dofFocus, dofRadiusPx, dofTapCount } from './tune.js';
 import { settings } from '../../core/settings.js';
 
 // The dial table + the pass graph live in tune.js (no THREE import there, so the
@@ -153,7 +161,7 @@ void main() {
 }
 `;
 
-// ---- composite: shafts -> lens -> bloom -> radial blur -> AgX -> grade -> sRGB ---
+// ---- composite: DOF -> shafts -> lens -> bloom -> radial blur -> AgX -> grade -> sRGB
 const COMPOSITE_FRAG = `
 varying vec2 vUv;
 uniform sampler2D uScene;
@@ -170,6 +178,9 @@ uniform float uShaftW;
 uniform float uRadial, uRBInner, uRBOuter;
 uniform vec2 uSunUv;
 uniform float uLensAmt, uLensSmudge, uLensFlare, uLensHalo, uLensBlobs, uLensGhosts;
+// depth of field: the scene depth attachment + the focus plane, in metres
+uniform sampler2D uDepth;
+uniform float uNearP, uFarP, uFocus, uDofNear, uDofSpan, uDofPx, uDofTaps;
 
 float h13(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -204,13 +215,41 @@ vec3 agx(vec3 color) {
 }
 
 void main() {
+  // Depth of field (queue P14), folded in here like the two effects below it. The
+  // window depth is linearised with the same projection identity the built-in
+  // depth chunks use, then ramped by dofCoc() mirrored from tune.js: nothing inside
+  // focus+uDofNear takes a single extra sample, so the car, the road and the pace
+  // note boards stay pixel-sharp and only the far corridor softens.
+  vec3 c = texture2D(uScene, vUv).rgb;
+  if (uDofPx > 0.02) {
+    float zw = texture2D(uDepth, vUv).x;
+    float dist = -((uNearP * uFarP) / max(1e-3, (uFarP - uNearP) * zw - uFarP));
+    float a = uFocus + uDofNear;
+    if (dist > a) {
+      float x = clamp((dist - a) / max(1e-3, uDofSpan), 0.0, 1.0);
+      float rad = (x * x * (3.0 - 2.0 * x)) * uDofPx;
+      if (rad > 0.35) {
+        // Equal-area ring on the golden angle: a disc, not four points on one circle.
+        vec3 acc = c;
+        float ws = 1.0;
+        for (int i = 1; i < 5; i++) {
+          if (float(i) > uDofTaps) break;
+          float ang = float(i) * 2.39996;
+          float rf = sqrt((float(i) + 0.5) / (uDofTaps + 1.0));
+          acc += texture2D(uScene, vUv + vec2(cos(ang), sin(ang)) * rf * rad / uRes).rgb;
+          ws += 1.0;
+        }
+        c = acc / ws;
+      }
+    }
+  }
+
   // Edge radial blur, folded in here so it costs no pass of its own: the weight ramps
   // from 0 inside uRBInner to 1 at uRBOuter, so the car and the road centre (screen
   // centre) stay perfectly sharp however fast the car is.
   vec2 rc = vUv - vec2(0.5);
   float rr = length(rc);
   float sm = uRadial * smoothstep(uRBInner, uRBOuter, rr);
-  vec3 c = texture2D(uScene, vUv).rgb;
   if (sm > 0.0004) {
     vec3 acc = c;
     float ws = 1.0;
@@ -347,6 +386,10 @@ export class PostComposer {
         uLensAmt: { value: 0 }, uLensSmudge: { value: ATMO_TUNE.lens.smudge },
         uLensFlare: { value: ATMO_TUNE.lens.flare }, uLensHalo: { value: ATMO_TUNE.lens.halo },
         uLensBlobs: { value: ATMO_TUNE.lens.blobs }, uLensGhosts: { value: ATMO_TUNE.lens.ghosts },
+        uDepth: { value: null }, uNearP: { value: 0.25 }, uFarP: { value: 900 },
+        uFocus: { value: DOF_TUNE.minFocus }, uDofNear: { value: DOF_TUNE.nearFlat },
+        uDofSpan: { value: DOF_TUNE.farSpan }, uDofPx: { value: 0 },
+        uDofTaps: { value: dofTapCount('MEDIUM') },
       },
     });
     // One extra quad, eighth res: the sun-shaft radial streak (see SHAFT_FRAG).
@@ -364,6 +407,8 @@ export class PostComposer {
     });
 
     this.rtScene = null; this.rtBQ = null; this.rtQB = null; this.rtBE = null; this.rtEB = null; this.rtShaft = null;
+    this.focusIn = DOF_TUNE.minFocus;   // auto-focus, pushed by the frame loop
+    this.dofPx = 0;                     // device-px blur radius this frame (0 = DOF off)
     this._size = new THREE.Vector2();
     this.graph = [];
     this.setSize(1280, 720);
@@ -430,7 +475,12 @@ export class PostComposer {
     const opts = { type, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat };
     const old = [this.rtScene, this.rtBQ, this.rtQB, this.rtBE, this.rtEB, this.rtShaft];
     for (const rt of old) if (rt) rt.dispose();
-    this.rtScene = new THREE.WebGLRenderTarget(w, h, { ...opts, depthBuffer: true, stencilBuffer: false });
+    // The DOF taps need to READ the depth, so the scene target carries a sampled
+    // depth attachment (nearest, no mips: depth buffers are not filterable).
+    this.rtScene = new THREE.WebGLRenderTarget(w, h, {
+      ...opts, depthBuffer: true, stencilBuffer: false,
+      depthTexture: new THREE.DepthTexture(w, h),
+    });
     const qw = Math.max(1, Math.round(w / 4)), qh = Math.max(1, Math.round(h / 4));
     const ew = Math.max(1, Math.round(w / 8)), eh = Math.max(1, Math.round(h / 8));
     this.rtBQ = new THREE.WebGLRenderTarget(qw, qh, { ...opts, depthBuffer: false });
@@ -451,6 +501,11 @@ export class PostComposer {
   /** Ground speed, pushed by render/camera.js every frame. Clamped here, never
    *  trusted; radialBlurAmount() does the rest. */
   setSpeed(v) { this.speedIn = num(v, 0, 200, 0); }
+
+  /** Auto-focus distance in metres (camera -> car), pushed by the frame loop next to
+   *  setSpeed. Clamped by dofFocus(): a bumper cam 0.5 m off the nose still focuses
+   *  on the road ahead of it instead of putting the whole frame in the blur band. */
+  setFocus(v) { this.focusIn = dofFocus(v); }
 
   /** Screen-space sun + the 0..1 "is it in (or near) the frame" term the shafts, the
    *  lens flare and the blur all key off. Uses the camera matrices the scene render
@@ -530,6 +585,21 @@ export class PostComposer {
       post: this.enabled, speed: this.speedIn,
       gain: this.level === 'LOW' ? 0.55 : (this.level === 'HIGH' ? 1.0 : 0.85),
     });
+
+    // ---- depth of field: no pass, one depth read and up to 4 scene taps per pixel,
+    // and only for pixels the depth ramp says are far. Zero with POST off or without
+    // a sampled depth attachment, so the cheap path is the old path exactly.
+    const dp = this.rtScene.depthTexture;
+    const px = dp ? dofRadiusPx({ post: this.enabled, level: this.level, height: this._size.y }) : 0;
+    this.dofPx = px;
+    u.uDepth.value = dp || null;
+    u.uDofPx.value = px;
+    u.uDofTaps.value = dofTapCount(this.level);
+    u.uFocus.value = this.focusIn;
+    u.uDofNear.value = DOF_TUNE.nearFlat;
+    u.uDofSpan.value = DOF_TUNE.farSpan;
+    u.uNearP.value = camera.near;
+    u.uFarP.value = camera.far;
 
     if (twoMip) {
       // 3) bright + horizontal gaussian, eighth (wider taps: 2 source texels apart)

@@ -18,3 +18,26 @@ bili: spawned proxy exited before becoming healthy — re-checking for a late-pu
 2026-10-11T19:00:25.680Z [info] [v=dev] native-attach: drop http://127.0.0.1:18787 (pid 267683): owner process gone
 bili-native: proxy bootstrap failed — model traffic goes direct (uncompressed): bili: proxy child exited before becoming healthy (code 1) (log: /tmp/bili-proxy-18787.log)
 bili-native: proxy not ready — model request goes direct (uncompressed): http://192.168.10.216:8080/v1/chat/completions
+**Chosen item (lowest open P): P13** — *"backfire flames have no audio cue; add a short procedural pop through the existing audio layer, gated by the same `fx` setting"*.
+
+The repo had no audio layer at all (`src/audio/` did not exist; the only WebAudio was the co-driver's fallback click), so the fix opened it and hooked it to the flame's own gate.
+
+**Changes**
+- `src/audio/backfire.js` (new) — the whole synthesized pop layer: `BACKFIRE` voice table `:32` (chains 3, 2 s generated noise loop, `crackLo/Hi 900/2400`, `lowpass 6200`, `thump 52..88`, `level 0.30`, `decay 55..145 ms`, `maxPopS 0.34`, `nodeBudget 20`), `popVoice()` `:72`, `crackTrain()` `:97` (1–3 cracks, each starting only after the previous envelope ends, so nothing gets truncated into a click), `BackfirePop` `:124`, `wants()` `:149`, `silenced()` `:152`, `onShift()` `:154`, `pop()` `:163` (0 nodes created, 0 sources started per pop; `stolen` chain counter), `arm()` `:203`, `_ensure()` `:213` (graph built once, lazily, at the first pop; bus gain `:36` → limiter → `ctx.destination` `:245`).
+- `src/fx/fx.js` — one gate for both media: `LIFT_THROTTLE` `:20`, `POP_FLOOR` `:23`, `rpmNorm()` `:28`, `shiftPop()` `:42`; `ExhaustFx.onShift` `:124` now calls `shiftPop` instead of its own inline throttle rule, `step()` `:134,136` uses the shared `rpmNorm`.
+- `src/main.js` — import `:27`, `new BackfirePop({ bus, settings, engine: car.params.engine })` `:351`, gesture arm `:352`, exposed on `__rally` `:840`.
+- `src/debug/tests.js` — new check **T54** `:3497` (check at `:3656`) with a stub WebAudio that throws on an exponential ramp to 0 like the real API: flame/crack agree event-by-event on synthetic shifts *and* on a driven lap (4 accepted = 4 pops = 4 plume bursts), nothing built at boot, 1 build + 1 noise buffer, 30 pops create 0 nodes, 20/20 nodes, 0 clicks/steps/backwards automation, 0 gains over the bus level, 0 stolen chains, 0.338 s train inside 0.34 s, zero param moves with `settings.fx = false`, plus source guards (no `Math.random`, no fetched audio, no node creation outside `_ensure()`).
+- `docs/QUALITY-QUEUE.md` — P13 recorded in Done; three new defects filed: P53 (two audio graphs, no shared BUS_MAIN/limiter/ducking), P54 (no camera/distance term in the pop), P55 (`fx` is now a particle *and* audio switch, no volume row).
+
+No screenshot pass spent (non-visual item); browser boot verified through the headless Chrome console instead — no uncaught error with the layer wired in. `tools/smoke.mjs` drive clean, no NaN. Frame cost untouched (no geometry path edited).
+
+Committed locally, not pushed: `017cdb4 quality loop: the backfire has a sound - one synthesized crack per plume, one gate and one switch with the flames, graph built once (queue P13)`
+
+Verbatim test line:
+
+```
+65/65 passed
+```
+self-improve: agent leg timed out after 1500s
+To https://github.com/Prezmi/voxel-rally.git
+   d08eea2..017cdb4  main -> main

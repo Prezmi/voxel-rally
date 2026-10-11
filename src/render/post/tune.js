@@ -71,6 +71,62 @@ export const ATMO_TUNE = {
   },
 };
 
+// ------------------------------------------------------------- depth of field
+// The far half of the depth cue (queue P14): whatever the corridor leaves past the
+// focus plane defocuses. No extra pass and no new geometry — the composite already
+// samples the scene, so the blur is a few more taps there, driven by the scene's own
+// depth attachment. Kept in its own table so the bloom/grade dials (T33) and the
+// atmosphere dials (T40) stay exactly as they are pinned; DOF_TUNE is pinned by T55.
+export const DOF_TUNE = {
+  nearFlat: 22,          // m past the focus plane that stay perfectly sharp
+  farSpan: 150,          // m over which the ramp reaches full blur (GLSL smoothstep)
+  maxFrac: 0.0060,       // blur disc radius, as a fraction of the target height
+  maxPx: 18,             // hard ceiling in device px, whatever the resolution
+  taps: 4,               // ring taps inside the composite (golden-angle disc)
+  minFocus: 7,           // auto-focus clamp: never focus closer than this
+  maxFocus: 260,         // ... nor further, so a clear view still focuses on the car
+  level: { LOW: 0.45, MEDIUM: 1.0, HIGH: 1.35 },   // the quality gate on the radius
+  tapsLevel: { LOW: 2, MEDIUM: 4, HIGH: 4 },
+};
+
+const dofLevel = (l) => (BLOOM_LEVELS.includes(l) ? l : 'MEDIUM');
+
+/** Auto-focus: the camera-to-car distance, clamped so a bumper cam (0.5 m from the
+ *  nose) or an unplaced car can never put the focus plane on the lens. */
+export function dofFocus(v) {
+  return clampNum(v, DOF_TUNE.minFocus, DOF_TUNE.maxFocus, DOF_TUNE.minFocus);
+}
+
+/** Normalised blur amount 0..1 for one linear distance, mirrored exactly by the
+ *  composite (same smoothstep). Exactly 0 inside the sharp band, so the car, the
+ *  road and everything the driver needs stay pixel-sharp at any speed. */
+export function dofCoc(dist, focus, t = DOF_TUNE) {
+  const d = clampNum(dist, 0, 1e5, 0);
+  const f = dofFocus(focus);
+  const a = f + clampNum(t.nearFlat, 0, 200, 22);
+  const span = Math.max(1e-3, clampNum(t.farSpan, 1, 2000, 150));
+  if (d <= a) return 0;
+  const x = clampNum((d - a) / span, 0, 1, 0);
+  return x * x * (3 - 2 * x);
+}
+
+/** Blur disc radius in DEVICE pixels for one preset — 0 with POST off, so the
+ *  depth read and the taps never run on the cheap preset path. */
+export function dofRadiusPx(cfg = {}) {
+  if (!cfg.post) return 0;
+  const t = DOF_TUNE;
+  const h = clampNum(cfg.height, 64, 8192, 630);
+  const mul = clampNum(t.level[dofLevel(cfg.level)], 0, 2, 1);
+  const frac = clampNum(cfg.frac !== undefined ? cfg.frac : t.maxFrac, 0, 0.05, t.maxFrac);
+  return clampNum(frac * h * mul, 0, clampNum(t.maxPx, 1, 32, 18), 0);
+}
+
+/** Ring taps for one preset — the composite loop bound, never more than DOF_TUNE.taps. */
+export function dofTapCount(level) {
+  const n = Math.round(clampNum(DOF_TUNE.tapsLevel[dofLevel(level)], 0, 8, 4));
+  return Math.min(n, Math.max(0, Math.round(DOF_TUNE.taps)));
+}
+
 /** Sun-in-frame visibility 0..1 for the shafts and the lens. Zero when the sun is
  *  behind the camera or outside the padded frame, so both are exactly 0 (never a
  *  faint residue) whenever the sun is out of frame. */
