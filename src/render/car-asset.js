@@ -188,7 +188,11 @@ export function buildAssetBody(nodes, params) {
         }
         const panel = panelOf(name, cx, cy, cz, boxes);
         const lamp = (name === 'car_lamps' || /lamp|tail/.test(matName)) ? (cx > s.hx * 0.55 ? 1 : 2) : 0;
-        const liv = (LIV_PARTS.has(name) && region !== 'glass' && region !== 'lampFL' && region !== 'lampFR' && region !== 'under') ? 1 : 0;
+        // Painted parts take the livery. Real window glass (by MATERIAL, not by the
+  // geometry region) stays clear of it; the side-facing door decals in car_panel
+  // land in the 'glass' region but are paint, so they must still read the map.
+  const glassy = /glass/.test(matName);
+  const liv = (LIV_PARTS.has(name) && !glassy && region !== 'lampFL' && region !== 'lampFR') ? 1 : 0;
         const list = bucket.get(region) || bucket.get('flank');
         for (let j = 0; j < 3; j++) {
           list.push(tri.x[j], tri.y[j], tri.z[j], tri.nx[j] / nAvg, tri.ny[j] / nAvg, tri.nz[j] / nAvg,
@@ -233,12 +237,19 @@ export function buildAssetBody(nodes, params) {
       position[vi * 3] = x; position[vi * 3 + 1] = y; position[vi * 3 + 2] = z;
       normal[vi * 3] = nx; normal[vi * 3 + 1] = ny; normal[vi * 3 + 2] = nz;
       color[vi * 3] = list[o + 6]; color[vi * 3 + 1] = list[o + 7]; color[vi * 3 + 2] = list[o + 8];
-      // Planar livery projection on the dominant axis, as car-body.js does.
+      // Atlas projection on the dominant axis, matched to the map layout in
+      // render/car-livery.js: flanks read the left half, top faces the upper
+      // right, nose/tail the lower right. A single planar projection put the
+      // flanks at u ~= 0 or 1 (the lateral coordinate is constant along a side),
+      // i.e. onto the texture edge, where the old map kept its dark end bars and
+      // stripe ends - the grey panels and stray patches in shots/road-merge.png.
       const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+      const fu = (x + halfX) / (2 * halfX || 1), fw = (z + halfZ) / (2 * halfZ || 1);
+      const fh = (y - yb) / ((yt - yb) || 1);
       let u, vv;
-      if (az >= ax && az >= ay) { u = (z + halfZ) / (2 * halfZ || 1); vv = (y - yb) / ((yt - yb) || 1); }
-      else if (ay >= ax) { u = (x + halfX) / (2 * halfX || 1); vv = (z + halfZ) / (2 * halfZ || 1); }
-      else { u = (z + halfZ) / (2 * halfZ || 1); vv = (y - yb) / ((yt - yb) || 1); }
+      if (az >= ax && az >= ay) { u = 0.05 + 0.40 * fu; vv = 0.05 + 0.90 * fh; }
+      else if (ay >= ax) { u = 0.55 + 0.40 * fu; vv = 0.55 + 0.40 * fw; }
+      else { u = 0.55 + 0.40 * fw; vv = 0.05 + 0.40 * fh; }
       aLivUv[vi * 2] = Math.max(0, Math.min(1, u)); aLivUv[vi * 2 + 1] = Math.max(0, Math.min(1, vv));
       aPanel[vi] = list[o + 9]; aLiv[vi] = list[o + 10]; aLamp[vi] = list[o + 11];
       vi++;

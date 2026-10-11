@@ -108,17 +108,20 @@ def build_arch_flares():
 
 
 def build_livery():
+    """ONE marking baked into the model: the white door band.
+
+    The reference sheet (shots/review-rally-v3.png) and the approved design call
+    for a clean red body with a single band, a single roundel and a single
+    sponsor strip. The number roundel and the sponsor strip are painted by the
+    code livery (src/render/car-livery.js) into this band's exact v range, so the
+    model itself carries no other markings: no bonnet stripe, no rear quarter
+    panel, no white roof (all three read as stray patches once the code map also
+    paints the flank)."""
     for sgn in (1, -1):
         y = sgn * 0.895
-        for c in range(13, 25):
+        for c in range(13, 26):
             for r in (6, 7, 8):
                 put("panel", "livery", cx(c), cz(r), y0=y, sy=0.025)
-        for c in range(26, 38):                # bonnet stripe
-            put("panel", "livery", cx(c), cz(6), y0=y, sy=0.025)
-        for c in range(11, 20):                # rear quarter panel
-            put("panel", "livery", cx(c), cz(7), y0=y, sy=0.025)
-    for c in range(13, 27):                    # white roof, narrower than the rail base
-        put("panel", "livery", cx(c), ZTOP + 0.014, sy=0.86, sz=0.028)
 
 
 def build_hardware():
@@ -264,11 +267,15 @@ def mat(name, rgb, metallic=0.0, rough=0.5, emit=None, strength=0.0):
 
 
 MATERIALS = {
-    "paint": lambda: mat("rally_paint", (0.72, 0.050, 0.038), 0.35, 0.32),
+    # approved rally red, linear working values; src/render/car-livery.js paints
+    # the same sRGB #c4262a so the painted panels and the exported material match.
+    "paint": lambda: mat("rally_paint", (0.552, 0.019, 0.023), 0.35, 0.32),
     "livery": lambda: mat("rally_livery", (0.95, 0.95, 0.93), 0.05, 0.35, (0.9, 0.9, 0.9), 0.10),
     "trim": lambda: mat("rally_trim", (0.030, 0.030, 0.034), 0.05, 0.60),
     "carbon": lambda: mat("rally_carbon", (0.018, 0.018, 0.020), 0.20, 0.40),
-    "glass": lambda: mat("rally_glass", (0.34, 0.43, 0.53), 0.25, 0.18),
+    # smoky dark glass: the old pale blue-grey (0.34/0.43/0.53) is what read as
+    # washed grey-blue panels around the cabin in shots/road-merge.png.
+    "glass": lambda: mat("rally_glass", (0.045, 0.058, 0.080), 0.25, 0.18),
     "rubber": lambda: mat("rally_tyre", (0.012, 0.012, 0.014), 0.0, 0.94),
     "sidewall": lambda: mat("rally_sidewall", (0.062, 0.062, 0.068), 0.0, 0.86),
     "alloy": lambda: mat("rally_alloy", (0.70, 0.72, 0.76), 0.20, 0.34, (0.55, 0.57, 0.60), 0.14),

@@ -368,10 +368,13 @@ float vnoise(vec3 p) {
 `)
       .replace('#include <color_fragment>', `#include <color_fragment>
 {
-  // Livery (PLAN §10.2): paint, stripes, sponsor blocks and the number roundel
-  // come from the generated map; the vertex colour carries the part's own tone.
+  // Livery (PLAN §10.2): the generated map IS the paint of a body panel. The
+  // old line multiplied the exported red by the map red, so every painted panel
+  // came out as red^2 (muddy, dark, and the pale decals went grey). Painted
+  // panels now take the map colour directly; unpainted parts (glass, trim,
+  // carbon, lamps) keep the exported material colour via vLiv = 0.
   vec3 lv = texture2D(uLivery, clamp(vLivUv, 0.03, 0.97)).rgb;
-  diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * lv * 1.05, vLiv);
+  diffuseColor.rgb = mix(diffuseColor.rgb, lv, vLiv);
 }
 `)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
