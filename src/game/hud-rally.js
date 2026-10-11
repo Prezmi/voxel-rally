@@ -45,6 +45,9 @@ const TOUCH_LABEL = { auto: 'auto', on: 'włączone', off: 'wyłączone' };
 // Ekrany menu (modalne). Górny ekran stosu decyduje, czy zegar odcinka w ogóle
 // idzie - patrz RallyHud.driving(), dzięki temu auto nie jedzie przed STARTem.
 const MENU_SCREENS = ['menu', 'settings', 'controls'];
+// Rows a DOM hit box is pre-built for. `_ensureMenuItems()` grows the pool to whatever
+// a screen actually asks for, so this is only the boot-time size, never a cap.
+const MENU_ROW_POOL = 8;
 // Oak tones of the pace-note boards (sign-board.js), repeated here so the modal
 // framing and the sign language are the same material without a cross-import.
 const WOOD = '#9C7E4E', WOOD_LIGHT = '#B4915C', WOOD_DARK = '#7A6138';
@@ -113,22 +116,7 @@ export class RallyHud {
     this.stageIdx = 0;
     this.touchInset = 0;        // CSS px the touch overlay reserves along the bottom
     this.menuItems = [];
-    for (let i = 0; i < 8; i++) {
-      const el = doc.createElement('div');
-      el.className = 'menu-item off';
-      if (el.setAttribute) el.setAttribute('role', 'button');
-      if (el.addEventListener) {
-        el.addEventListener('pointerdown', (e) => {
-          if (e && e.preventDefault) e.preventDefault();
-          if (i >= this._rows.length) return;
-          this.focus = i;
-          this._syncFocus();
-          this.pendingActivate = true;      // same path as ENTER / pad A
-        });
-      }
-      this.modal.appendChild(el);
-      this.menuItems.push(el);
-    }
+    this._ensureMenuItems(MENU_ROW_POOL);
     this.focus = 0;
 
     // Mirror of the four wheel states (screen readers + tools/stagetest.mjs C3 audit).
@@ -333,6 +321,12 @@ export class RallyHud {
       // in the UI and in the save, so a stale stored payload can never invert it silently.
       rows.push({ label: `KIEROWNICA: ${settings.invertSteer ? 'ODWROTNA' : 'NORMALNA'}`, act: 'cycle:invertSteer' });
       rows.push({ label: `HUD: ${MODE_LABEL[this.mode]}`, act: 'hudmode' });
+      // Efekty: the one switch for the whole particle field (src/fx) — the weak-device
+      // lever. It sits next to JAKOŚĆ because both are render cost, and it has to sit
+      // here at all because a phone has no keyboard for it: the `KeyP` FX branch in
+      // main.js sat behind the menu's KeyP in the same if-chain and never ran, so the
+      // saved `settings.fx` was the only other writer.
+      rows.push({ label: `Efekty: ${on(settings.fx)}`, act: 'toggle:fx' });
       rows.push({ label: `Jakość: ${QUAL_LABEL[settings.quality] || '—'}`, act: 'quality' });
       rows.push({ label: 'Wróć  (esc)', act: 'back' });
     } else if (name === 'controls') {
@@ -350,9 +344,32 @@ export class RallyHud {
     this._buildMenu(rows);
   }
 
+  /** One tappable DOM box per row. A row with no box is a row a thumb can never
+   *  reach, so the pool grows with the screen instead of being a fixed-size cap —
+   *  Ustawienia outgrew the old 8-element pool once the EFEKTY row landed. */
+  _ensureMenuItems(n) {
+    while (this.menuItems.length < n) {
+      const i = this.menuItems.length;
+      const el = this.doc.createElement('div');
+      el.className = 'menu-item off';
+      if (el.setAttribute) el.setAttribute('role', 'button');
+      if (el.addEventListener) {
+        el.addEventListener('pointerdown', (e) => {
+          if (e && e.preventDefault) e.preventDefault();
+          if (i >= this._rows.length) return;
+          this.focus = i;
+          this._syncFocus();
+          this.pendingActivate = true;      // same path as ENTER / pad A
+        });
+      }
+      this.modal.appendChild(el);
+      this.menuItems.push(el);
+    }
+  }
   /** Focus navigation: something is always focused while a modal is open (skill #4). */
   _buildMenu(rows) {
     this._rows = rows;
+    this._ensureMenuItems(rows.length);
     this.menu.length = 0;
     for (let i = 0; i < this.menuItems.length; i++) {
       const el = this.menuItems[i];

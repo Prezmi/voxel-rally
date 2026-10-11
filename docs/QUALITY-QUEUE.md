@@ -12,8 +12,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
-- [ ] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
-      setting); add a row in the same wood-banner style so mobile users can reach it
 - [ ] P6 · prop and glb materials export with `doubleSided` true from Blender
       (`build_stage_props.py:518` `make_material`); set `use_backface_culling` so the
       FrontSide override in `streaming.js` is not needed
@@ -91,10 +89,54 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       so part of the 222.83 s basis is the on-stage recovery rather than the driver; make
       the driver hold the 7.5 m corridor (lookahead/hairpin term) and re-read
       `referenceSpeedMargin` against the cleaner lap
+- [ ] P26 · the settings panel no longer fits the screen it is drawn on — **the highest
+      of these three, promote it above P6**: nine rows at `pitch = max(rowH + 4,
+      ceil(72 / ui))` (`src/game/hud-rally.js:891`) make the modal taller than the
+      viewport. At 1280x720 (`uiScale` 2, canvas `H` = 360) the panel is ~382 px, so
+      `y = (H - h) / 2` goes negative and the USTAWIENIA banner is cut at the top while
+      `WRÓĆ (esc)` is clipped at the bottom (`shots/quality-fx-row.png`, read back); on a
+      landscape phone (`H` ~ 390 at `uiScale` 1) it is ~706 px, i.e. it already overflowed
+      before the EFEKTY row landed. Fit the panel — shrink the row pitch, page the rows,
+      or clamp `y` — so no row can fall off-screen.
+- [ ] P27 · turning `fx` off parks the live particles instead of releasing them:
+      `FxSystem.step()` returns at `src/fx/fx.js:283` while disabled, so the pools are only
+      hidden (`src/render/fx-view.js:112`) and never aged or compacted — switching the
+      EFEKTY row back on drops the same plumes mid-life, exactly where they were left
+- [ ] P28 · a stored `quality` never re-runs `qualityPreset()`: boot applies the saved
+      value with `renderer.setQuality(settings.quality)` only (`src/main.js:163`), while
+      the preset columns (`renderScale`, `drawDistance`, `vegFarDistance`, `fxScale`,
+      `src/core/settings.js:149-163`) are re-derived only for `?q=` (`src/main.js:102-104`)
+      — a player who saved LOW boots on MED render scale and keeps most of the cost
 
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P5 · the `fx` toggle has no settings-screen row (only the `P` key and the saved
+      setting); add a row in the same wood-banner style so mobile users can reach it
+      · done — the row is there: `Efekty: wł./wył.` between HUD and JAKOŚĆ in Ustawienia
+      (`src/game/hud-rally.js:329`), drawn by the same wood-banner/stone-GUI row path as
+      every other row, and main.js applies it (`src/main.js:259` `toggle:fx` ->
+      `settings.fx` + `fx.enabled`), persisted by the existing `/^(toggle:|cycle:|quality$)/`
+      save path and re-read by the render loop every frame. The row also needed the hit-box
+      pool un-capped: it was a fixed 8 DOM boxes (`src/game/hud-rally.js:50,119`) while
+      Ustawienia now carries 9 rows, and a row with no box is a row no thumb can tap and
+      no keyboard can focus — `_ensureMenuItems(n)` now grows one box per row on demand
+      (`src/game/hud-rally.js:350`, called from `_buildMenu` at `:372`). The item's
+      premise was wrong: `P` is the menu/pause key (`src/main.js:390`), and the FX branch
+      was a second `KeyP` in the same if-chain (HEAD `src/main.js:417`) that could never
+      run — so `fx` had no keyboard path at all; that dead branch is now a comment
+      (`src/main.js:422-426`). Proof: `node src/debug/tests.js` **37/37 passed** (36
+      before, +1), `tools/smoke.mjs` drive clean. New **T26** (`src/debug/tests.js:1505`,
+      check at `:1579`) pins the labelled row, a DOM hit box *and* a focus slot for every
+      row of all three screens measured from a fresh boot (menu 4/8, settings 9/9,
+      controls 1/8 — the settings row only passes because of the pool fix), that the tap
+      flips the flag and reaches the save, and that a disabled `FxSystem` holds 0 live
+      particles against 108 live while on. Live browser proof: `shots/quality-fx-row.png`
+      (one CDP pass, read back) shows EFEKTY: WYŁ. in the right style and place, focused,
+      with `settings.fx=false` and `fx.enabled=false` after a tap through the real
+      `pendingActivate` path. The same shot shows the 9-row panel standing over the
+      viewport edge — filed with two more defects as P26-P28.
 
 - [x] P4 · the ghost *calibration* is stale after the P3 drag retune: `tools/stagetest.mjs`
       E3 and A6 are RED — the harness driver laps seed 12345 in 222.83 s while

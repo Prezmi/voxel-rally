@@ -1492,6 +1492,97 @@ function testGhostReferenceIsCalibratedToADrivenLap() {
 }
 testGhostReferenceIsCalibratedToADrivenLap();
 
+// ---------------------------------------------------------------- test 26
+// The particle FX switch (`settings.fx`, src/fx) is the weak-device lever, and before
+// the EFEKTY row a phone could not reach it at all: outside the saved payload the only
+// writer was a second `KeyP` inside main.js's if-chain, sitting behind the menu's KeyP,
+// i.e. dead code that never ran. Pin the whole path: Ustawienia owns a labelled EFEKTY
+// row, every row of every menu screen owns both a DOM hit box and a focus slot (the
+// hit-box pool used to be a fixed 8 elements while Ustawienia now carries 9 rows, and a
+// row without a box is a row no thumb can ever tap), the tap flips settings.fx exactly
+// the way main.js applies it, the flip reaches the save, and the FX system stops
+// emitting behind that flag.
+function testFxSwitchIsReachableFromSettings() {
+  const mem = () => { const m = new Map(); return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k), store: m }; };
+  const store = mem();
+  const fxWas = settings.fx;
+
+  // The system main.js drives: one live, one behind the flag the row flips.
+  const car = makeCar(new FlatWorld(SURF.GRAVEL), {});
+  const fxOn = new FxSystem({ scale: 1, bus });
+  const fx = new FxSystem({ scale: 1, bus, enabled: settings.fx !== false });
+  for (const f of [fxOn, fx]) {
+    f.setLocalTips(defaultExhaust(car.params));
+    f.env.trees = 0.9; f.env.wind = 4; f.env.sun = 1;
+  }
+
+  const rally = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+  rally.openMenu();
+  rally.openScreen('settings');
+  const idx = () => rally.rowIndex('toggle:fx');
+  const labelOf = () => (rally._rows[idx()] ? rally._rows[idx()].label : '—');
+
+  const gaps = [];
+  // Every screen, measured from a fresh boot (that is when the pool is its smallest):
+  // a DOM hit box per row AND a focus slot per row (keyboard / gamepad).
+  const perScreen = [];
+  for (const name of ['menu', 'settings', 'controls']) {
+    const hud = new RallyHud(new MenuStubDoc(), { stages: [{ key: 'FOREST', label: 'Leśny' }] });
+    hud.openMenu();
+    hud.openScreen(name);
+    const rows = hud._rows.length, boxes = hud.menuItems.length, focusable = hud.menu.length;
+    perScreen.push(`${name}:${rows}/${boxes}/${focusable}`);
+    if (boxes < rows) gaps.push(`${name} has ${rows} rows but ${boxes} hit boxes`);
+    if (focusable !== rows) gaps.push(`${name} focuses ${focusable} of ${rows} rows`);
+  }
+  settings.fx = true; rally.refreshMenu();
+  const labelled = idx() >= 0 && labelOf().includes('Efekty') && labelOf().includes('wł.');
+
+  // Exactly what main.js activateMenu() does with the row the HUD hands back.
+  const tapRow = () => {
+    rally.focus = idx();
+    const it = rally.activate();
+    if (it && it.act === 'toggle:fx') {
+      settings.fx = !settings.fx;
+      fx.enabled = settings.fx;
+      saveSettings(settings, store);
+    }
+    rally.refreshMenu();
+    return it;
+  };
+  const rowAct = tapRow();
+  const flippedOff = settings.fx === false && fx.enabled === false && labelOf().includes('wył.');
+  const persisted = JSON.parse(store.store.get(SETTINGS_KEY)).fx === false;
+  tapRow();
+  const flippedBack = settings.fx === true && fx.enabled === true && labelOf().includes('wł.');
+
+  // The flag is the whole switch: nothing is emitted while it is off. main.js re-arms
+  // `fx.enabled` from settings.fx every rendered frame, so these two systems are what a
+  // boot with the row on and with the row off builds.
+  settings.fx = true; fxOn.enabled = true; fx.enabled = false;
+  const inp = { throttle: 1, brake: 0, steer: 0, handbrake: 0, shiftUp: 0, shiftDown: 0 };
+  drive(car, inp, 3.0, (c) => { fxOn.step(DT, c, 1); fx.step(DT, c, 1); });
+  const liveOn = fxOn.live(), liveOff = fx.live();
+
+  if (!rowAct || rowAct.act !== 'toggle:fx') gaps.push('the row is not a toggle:fx row');
+  if (!labelled) gaps.push(`row not labelled (${labelOf()})`);
+  if (!flippedOff) gaps.push('the tap did not flip the flag + the system');
+  if (!persisted) gaps.push('the flip did not reach the save');
+  if (!flippedBack) gaps.push('the tap back did not restore it');
+  if (!(liveOn > 0)) gaps.push('the FX field is empty while on');
+  if (liveOff !== 0) gaps.push(`${liveOff} particles live while off`);
+
+  settings.fx = fxWas;
+  check('T26 the EFEKTY row reaches the particle FX switch: labelled, tappable on every screen, persisted, and the pools stop',
+    gaps.length === 0,
+    `row=${labelled} off=${flippedOff} saved=${persisted} back=${flippedBack} live on/off=${liveOn}/${liveOff} `
+    + `| rows/boxes/focus ${perScreen.join(' ')} | gaps=[${gaps.join(' ')}]`);
+}
+testFxSwitchIsReachableFromSettings();
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 if (failed.length) process.exitCode = 1;

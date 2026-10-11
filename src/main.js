@@ -254,6 +254,12 @@ async function main() {
     if (it.act === 'start') startRun();
     else if (it.act === 'restart') restartRun();
     else if (it.act === 'toggle:blockTiles') settings.blockTiles = !settings.blockTiles;
+    // EFEKTY row: the particle field switch (src/fx). fx.step() emits and ages nothing
+    // while disabled and render/fx-view.js hides the pools, so this is one flag.
+    else if (it.act === 'toggle:fx') {
+      settings.fx = !settings.fx;
+      fx.enabled = settings.fx;
+    }
     else if (it.act === 'toggle:showCoDriverArrows') {
       settings.showCoDriverArrows = !settings.showCoDriverArrows;
       rally.arrows = settings.showCoDriverArrows;
@@ -413,14 +419,10 @@ async function main() {
     // Brud: X = mycie auta, V = wycieraczka (docs/04 §4.2 "czyszczenie").
     else if (code === 'KeyX') { dirt.washFull(1); hud.boot('auto umyte — guma na oponach zostaje'); setTimeout(() => hud.boot(null), 2000); }
     else if (code === 'KeyV') dirt.wipeLens();
-    // P = particle FX on/off (src/fx): the weak-device switch.
-    else if (code === 'KeyP') {
-      settings.fx = !settings.fx;
-      fx.enabled = settings.fx;
-      hud.boot(`efekty: ${settings.fx ? 'on' : 'off'}`);
-      setTimeout(() => hud.boot(null), 1800);
-      saveSettings();
-    }
+    // Particle FX (src/fx) has no key: P above is the menu/pause key, and the FX branch
+    // that used to sit here was a second `KeyP` in the same if-chain, i.e. dead code that
+    // never ran. The switch is the EFEKTY row in Ustawienia (activateMenu) plus the
+    // persisted settings.fx, which the render loop re-reads every frame.
     // L = siła brudu na obiektywie: 0.45 domyślnie, 0 = wyłączone (PLAN.md §8 #5).
     else if (code === 'KeyL') {
       settings.lensDirt = settings.lensDirt === 0.45 ? 0 : (settings.lensDirt === 0 ? 1 : 0.45);
