@@ -46,6 +46,8 @@ export const TYRE_TREAD = {
  * Everything the shader needs is derived here so the GLSL never does unit maths.
  */
 export function treadPlan(halfW, rMax, T = TYRE_TREAD) {
+  // A degenerate bbox must not invent a tread: a zero pitch would pack an infinite number
+  // of lugs into the field, and the relief would read as noise on a flat quad.
   const w = Math.max(1e-3, halfW);
   const r = Math.max(1e-3, rMax);
   const pitchRad = T.lugPitch / r;                 // rad between lateral grooves
@@ -71,6 +73,35 @@ const grooveDist = (f) => Math.min(frac01(f), 1 - frac01(f));
 function smoothstep01(a, b, x) {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * ONE plan per WHEEL, folded from the bounding boxes of every rubber-family primitive
+ * that takes this shader (`[sx, sy, sz]` per primitive, as exported).
+ *
+ * A shipped wheel is not one mesh: `rally_v2.glb` splits each wheel into the rolling
+ * band (radius 0.21-0.43 m), the outboard/inboard rubber faces (0.21-0.25 m), the alloy,
+ * the spokes and the hub nut. Deriving the plan from one primitive's own bbox - which is
+ * what `attachTyreDirt` used to do - renormalizes the radius per part: the sidewall ring
+ * read rr = 1 at 0.25 m, so the crown mask decided it was the tread and drew 27 fat lugs
+ * across the outboard face, on a groove pattern that does not line up with the 38 lugs of
+ * the rolling band. A height field whose ruler is the fragment's own mesh is not a
+ * tread, it is a coincidence, so the tyre's radius and width are measured once, over the
+ * whole rubber family, and every part of that wheel shares it.
+ *
+ * The narrowest folded extent is the rolling axis (the tyre is wider in its own plane
+ * than across it), the widest two give the tyre radius.
+ */
+export function wheelTreadPlan(sizes, T = TYRE_TREAD) {
+  const u = [0, 0, 0];
+  for (const s of sizes || []) {
+    if (!s) continue;
+    for (let k = 0; k < 3; k++) u[k] = Math.max(u[k], Math.max(0, Number(s[k]) || 0));
+  }
+  let ai = 0;
+  if (u[1] < u[0] && u[1] < u[2]) ai = 1; else if (u[2] < u[0] && u[2] < u[1]) ai = 2;
+  const wide = [0, 1, 2].filter((k) => k !== ai).map((k) => u[k]);
+  return treadPlan(u[ai] * 0.5, Math.max(wide[0], wide[1]) * 0.5, T);
 }
 
 /**

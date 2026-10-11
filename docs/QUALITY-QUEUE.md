@@ -12,6 +12,24 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 
 ## Open
 
+- [ ] P50 · the showroom pose is measured from the car bbox at the moment it is asked for, so a slow
+      model fetch frames empty ground: the P12 proof pass captured a **sky-only frame** with
+      `?showroom=1&view=three-quarter&sheetDist=3` (`[showroom] ... cam 11.96,20.97,2.19 look
+      10.10,27.05,0.03`) while the same URL a minute later posed `cam 1.80,24.47,2.20 look
+      -0.06,24.53,0.04` with `[car] asset car "rally_v2" ACTIVE` - a 10 m pose shift, so the
+      car layer is not placed when `showroomPose()` reads the bbox (`src/debug/showroom.js:70`,
+      applied in `src/main.js`). Recompute the pose after the car lands (sibling of P31/P46)
+- [ ] P51 · the tread ruler is the folded bbox, so the voxel drum's own shape stretches it: the
+      exported `rally_tyre` profile has radius 0.35 m at the flats and 0.43 m at its corners
+      (`rr` reaches 1.22 over the rolling band), so a 58 mm lug pitch lands as 58 mm at the flat
+      and ~72 mm at the corner - the lugs are visibly uneven in close-up. Either more profile
+      segments in the wheel builder or a pitch that follows the local radius
+- [ ] P52 · T46 still measures the tread on a SYNTHETIC tyre (`halfW 0.095`, `rMax TYRE_BASE.r
+      0.335`) that no shipped wheel has - `rally_v2.glb` folds to halfW 0.170 / rMax 0.350, so its
+      36 lugs and 48 mm axial pitch are not the 38 lugs and 85 mm the asset gets, and its shape
+      assertions (groove dips, stagger, cut depth) run on a wheel nobody drives. Re-read T46 off
+      the asset the way T53 does
+
 - [ ] P47 · the LOW far band collapses to `vegFar x farDetailOffMul` = **253 m inside a 700 m view**
       (`src/world/veg-bands.js` `VEG_BANDS[LOW].farDetailOffMul = 0.55`, applied in `vegBandPlan`): the row reads
       "LOW veg 460" in T31 because that check only compares the *knob* `settings.vegFarDistance` to
@@ -111,8 +129,6 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
       ghost blobs (upper right and lower left of `shots/quality-night-beams.png`) sit in a
       frame where the key is already at dusk strength — `lensFlareAlpha` gates on the sun
       (`sunVis`/`sun`) with no dark-stage term
-- [ ] P12 · tyres have no tread relief once caked; add a cheap normal or relief term in
-      the tyre dirt shader in `src/render/carMesh.js`
 - [ ] P13 · backfire flames have no audio cue; add a short procedural pop through the
       existing audio layer, gated by the same `fx` setting
 - [ ] P14 · depth of field and bloom are not present; a single cheap post pass
@@ -211,6 +227,39 @@ Format: `- [ ] P<n> · <item>` where P1 is highest priority. Mark done as
 ## Done
 
 <!-- the loop appends completed items here -->
+
+- [x] P12 · tyres have no tread relief once caked; add a cheap normal or relief term in
+      the tyre dirt shader in `src/render/carMesh.js`
+      · done - the relief term existed in HEAD (landed unrecorded by `769d1da`: the tread height
+      field `src/render/tyre-tread.js` + the `normal_fragment_maps` patch) but it was **measuring
+      each wheel primitive with its own ruler**, so on the shipped asset it drew the tread in the
+      wrong place. `attachTyreDirt` built `treadPlan(halfW, rMax)` from the one geometry it was
+      patching, and the shader normalizes both axes by it (`rr = |rad| / uTyreDims.y`,
+      `side = |ax| / uTyreDims.x`) - so the outboard rubber ring of `rally_v2.glb` (radius
+      0.21-0.25 m, its own rMax 0.25) read `rr ~ 1` and was declared the tread: it drew **27 fat
+      lugs across the flank of every wheel**, on a groove pitch that does not line up with the 38
+      lugs of the rolling band, while the crown mask's whole job is to keep that flank smooth
+      rubber. The ruler is now the WHEEL: `wheelTreadPlan(sizes)` (`src/render/tyre-tread.js:95`)
+      folds the rubber family's extents into one bbox (narrowest extent = rolling axis, widest
+      two = tyre radius), `src/render/carMesh.js:298-299` folds the four wheel parts once per
+      wheel and `:299,545` feeds that one plan to every rubber material of that wheel, with
+      `geometrySize` `:513` and the shared-ruler contract documented on the patcher `:530`.
+      Measured off the shipped glb (new check **T53**, `src/debug/tests.js:3332`, check at
+      `:3431`, sampling every triangle centroid the way the fragment shader does): all four
+      wheels agree on rMax 0.350 m / halfW 0.170 m / 38 lugs, the flank's mean crown drops
+      **0.49 -> 0.12** (no more lugs on the sidewall; the per-part ruler is kept in the check as
+      a live counter-proof, so the guard fails if the fold is reverted), and the rolling band
+      keeps the relief - **47 % of its 1152 triangles still carry a > 0.15 rad normal tilt with
+      the tyre caked 0.9 and wet 0.5**, which is the exact state P12 names. 0 added triangles
+      (field + normal perturbation only; the asset body is still 8412 tris, confirmed in the
+      browser log). T46's source guard now demands the shared plan by name
+      (`src/debug/tests.js:3089`). Proof: `node src/debug/tests.js` **64/64 passed** (63 before,
+      +1). Visual proof is **still owed**: the one allowed headless pass came back **sky-only** -
+      the showroom posed its camera from a bbox measured before the car was placed (`cam
+      11.96,20.97 look 10.10,27.05` vs the correct `1.80,24.47 / -0.06,24.53` a minute later, same
+      URL, car ACTIVE), so the frame contains no car at all; filed as P50 with two tread defects
+      the same measurement exposed (P51 corner-stretched pitch, P52 T46 measures a tyre nobody
+      drives).
 
 - [x] P11 · quality LOW now streams chunks to 250 m for the far vegetation band; confirm LOW frame
       time is not worse than MEDIUM and clamp if it is

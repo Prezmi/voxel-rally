@@ -9,7 +9,7 @@ import { ASSET_CAR_MODEL, WHEEL_NODES, buildAssetBody, defaultExhaust, tyreScale
 import { TYRE_BASE } from '../car/car-params.js';
 import { buildLiveryTexture } from './car-livery.js';
 import { PANELS, PANEL_COUNT, PANEL_INDEX } from '../dirt/panel-dirt.js';
-import { TYRE_TREAD, TYRE_TREAD_GLSL, treadPlan } from './tyre-tread.js';
+import { TYRE_TREAD, TYRE_TREAD_GLSL, wheelTreadPlan } from './tyre-tread.js';
 import { MAP_TEXELS, MAP_METRES } from '../dirt/dirt-map.js';
 import { BEAM, BEAM_VERT, BEAM_FRAG, beamAnchors, beamGeometry, beamMaterialSpec, isDark, setBeamGain } from './headlights.js';
 import { settings } from '../core/settings.js';
@@ -279,21 +279,36 @@ function adoptAssetCar(view, proceduralWheels) {
       // tinted material (shots/showroom.png). Rubber/sidewall alone take the dirt
       // response; the alloy, spokes and the nut stay clean and keep their contrast.
       const archKey = ['archFL', 'archFR', 'archRL', 'archRR'][i] || 'archRL';
-      const tyreMats = [];
+      const parts = [];
       node.traverse((c) => {                   // multi-primitive wheel: Group of meshes
         if (!c.isMesh) return;
         c.castShadow = true;
         c.receiveShadow = true;
+        parts.push(c);
+      });
+      const isRubber = (c) => {
+        const src = Array.isArray(c.material) ? c.material[0] : c.material;
+        return /tyre|rubber|sidewall/i.test(String((src && src.name) || c.name || ''));
+      };
+      // One tread plan per wheel, measured over the whole rubber family. Deriving it from
+      // each primitive's own bbox (the old behaviour) renormalizes the tyre radius per
+      // part, and the crown mask then decides the outboard rubber faces ARE the tread:
+      // the shipped sidewall ring (radius 0.21-0.25 m) drew 27 lugs across the flank, at
+      // a pitch that did not line up with the 38 lugs of the rolling band.
+      const rubber = parts.filter(isRubber);
+      const plan = rubber.length ? wheelTreadPlan(rubber.map((c) => geometrySize(c.geometry))) : null;
+      const tyreMats = [];
+      for (const c of parts) {
         const src = Array.isArray(c.material) ? c.material[0] : c.material;
         const mat = src && src.clone ? src.clone() : new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.08 });
         mat.vertexColors = false;
         const nm = String(mat.name || (src && src.name) || '');
         if (/tyre|rubber|sidewall/i.test(nm)) {
-          attachTyreDirt(mat, view.dtex, PANEL_INDEX[archKey], c.geometry);
+          attachTyreDirt(mat, view.dtex, PANEL_INDEX[archKey], c.geometry, plan);
           tyreMats.push(mat);
         }
         c.material = mat;
-      });
+      }
       node.material = null;
       (view.tyreMats || (view.tyreMats = []))[i] = tyreMats;
       const pivot = new THREE.Object3D();
@@ -494,31 +509,41 @@ float vnoise(vec3 p) {
   mat.customProgramCacheKey = () => 'vr-car-dirt';
 }
 
+/** Axis-aligned extents of a geometry, as [x, y, z] metres. */
+function geometrySize(geo) {
+  geo.computeBoundingBox();
+  const b = geo.boundingBox;
+  return [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z];
+}
+
 /**
  * Tyre dirt response (docs/04 §4.2): the exported tyre material keeps its own
  * maps, but the rubber reads the same per-panel dirt state the body reads - the
  * arch of that corner - and lays it on the sidewall and the inner face only.
  * Fresh rubber stays near-black; caked rubber takes the panel's brown-grey.
+ *
+ * `wheelPlan` is the WHEEL's tread plan (wheelTreadPlan over its rubber family), not
+ * this primitive's: the shader normalizes both the radius (`rr`) and the axial position
+ * (`side`) by it, so a part measured on its own ruler grows tread where the tyre has
+ * none - which is the half of P12 this patch had left open.
  */
-function attachTyreDirt(mat, dtex, panelIdx, geo) {
+function attachTyreDirt(mat, dtex, panelIdx, geo, wheelPlan) {
   geo.computeBoundingBox();
   const s = geo.boundingBox.getSize(new THREE.Vector3());
-  // The narrowest extent of the exported wheel is the rolling axis; the widest
-  // two give the tyre radius.
+  // The rolling axis is still read off this part, because the two tread directions are
+  // per-geometry tangents; only the pattern's RULER is shared (wheelTreadPlan).
   const axis = new THREE.Vector3(0, 0, 0);
   let ai = 0;
   if (s.y < s.x && s.y < s.z) ai = 1; else if (s.z < s.x && s.z < s.y) ai = 2;
   axis.setComponent(ai, 1);
-  const halfW = s.getComponent(ai) * 0.5;
-  const dims = [s.x, s.y, s.z];
-  dims.splice(ai, 1);
-  const rMax = Math.max(dims[0], dims[1]) * 0.5;
   // Angle zero for the tread field: any in-plane unit axis, so that
   // cross(axis, u) is the second one and atan2 gives the bearing around the wheel.
   const uAxis = new THREE.Vector3();
   uAxis.setComponent(ai === 0 ? 1 : 0, 1);
-  // The pattern pitch, in shader units, off this wheel's own exported dimensions.
-  const plan = treadPlan(halfW, rMax);
+  // The pattern's ruler, once per wheel. Everything below reads its pitch, its crown
+  // bands and its relief depths off this one object.
+  const plan = wheelPlan || wheelTreadPlan([s.x, s.y, s.z]);
+  const halfW = plan.halfW, rMax = plan.rMax;
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPanelTex = { value: dtex.panelTex };

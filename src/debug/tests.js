@@ -36,7 +36,7 @@ import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, 
 import { buildCarveIndex, prewarmArea, SHOULDER } from '../world/road-carve.js';
 import { buildColliders, queryNearBrute, COLLIDER_CELL, SPECIES_SHAPE } from '../world/prop-colliders.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
-import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
+import { TYRE_TREAD, treadPlan, treadCell, treadCrown, treadReliefAmp, treadNormalTilt, wheelTreadPlan, TYRE_TREAD_GLSL } from '../render/tyre-tread.js';
 import { POST_TUNE, passGraph, BLOOM_LEVELS, resolveToneMode,
   ATMO_TUNE, MAX_POST_PASSES, MAX_OFFSCREEN_PASSES, shaftAlpha, lensFlareAlpha,
   radialBlurAmount, sunVisibility } from '../render/post/tune.js';
@@ -3086,7 +3086,7 @@ function testTyreTreadRelief() {
   const tyreFn = src.slice(src.indexOf('function attachTyreDirt'), src.indexOf('const _m4 ='));
   if (!tyreFn.length) gaps.push('attachTyreDirt not found');
   if (!/normal_fragment_maps/.test(tyreFn)) gaps.push('the tyre patch never touches the normal - the P12 defect is back');
-  if (!/TYRE_TREAD_GLSL/.test(tyreFn) || !/treadPlan\(/.test(tyreFn)) gaps.push('the tyre patch hand-writes its own tread maths');
+  if (!/TYRE_TREAD_GLSL/.test(tyreFn) || !/wheelTreadPlan\(/.test(tyreFn)) gaps.push('the tyre patch hand-writes its own tread maths instead of the shared wheel plan');
   if (!/uTyreRelief|vTyreT1/.test(tyreFn)) gaps.push('the tread gradient never reaches the normal');
   if (/new THREE\.BufferGeometry|setAttribute\(/.test(tyreFn)) gaps.push('the tread is baked as extra geometry instead of relief');
   if ((src.match(/#include <normal_fragment_maps>/g) || []).length < 2) gaps.push('only the body shader perturbs the normal');
@@ -3316,6 +3316,123 @@ function testPropColliders() {
     `no-colliders=${before.toFixed(3)} ms/step with-colliders=${after.toFixed(3)} ms/step (budget <=4) colliders=${grove.length}`);
 }
 testPropColliders();
+
+// ---------------------------------------------------------------- test 53
+// The tread's RULER is the wheel, not the fragment's own mesh — the half of queue P12
+// ("tyres have no tread relief once caked") that T46 could not see. T46 measures the
+// height field on a SYNTHETIC tyre (halfW 0.095, r 0.335); the shipped wheel is five
+// separate primitives, and attachTyreDirt used to build its own plan from each part's
+// bounding box. The shader normalizes the radius (rr = |rad| / uTyreDims.y) and the axial
+// position (side = |ax| / uTyreDims.x) by that ruler, so a part measured on its own scale
+// is told it is the tread: the exported outboard rubber ring spans radius 0.21-0.25 m,
+// which on its own 0.25 m ruler is rr ~ 1 — full crown — so it drew 27 fat lugs across
+// the flank of every wheel at a groove pitch that does not line up with the 38 lugs of
+// the rolling band, while the band itself was the only place the tyre should be lugged.
+// This check measures the field off the SHIPPED asset, folded per wheel.
+function testTyreTreadRulerIsTheShippedWheel() {
+  const gaps = [];
+  const { doc, acc } = readGlbDoc('assets/models/rally_v2.glb');
+  const meshOf = new Map();
+  for (const n of doc.nodes) if (n.mesh !== undefined) meshOf.set(n.name, doc.meshes[n.mesh]);
+  const RUBBER = /tyre|rubber|sidewall/i;
+
+  // Sample every triangle centroid the way the fragment shader does: ax from the object
+  // origin along the rolling axis, rr from that axis line, both over the WHEEL's ruler.
+  const sample = (pos, idx, axis, halfW, rMax, plan, caked, wet) => {
+    const ctr = [0, 0, 0];
+    let out = { n: 0, crownSum: 0, crownMax: 0, shaped: 0, band: 0, bandShaped: 0 };
+    const o = [0, 1, 2].filter((k) => k !== axis);
+    for (let t = 0; t < idx.length; t += 3) {
+      const P = [0, 1, 2].map((k) => (pos[idx[t] * 3 + k] + pos[idx[t + 1] * 3 + k] + pos[idx[t + 2] * 3 + k]) / 3);
+      const ax = P[axis];
+      const rr = Math.hypot(P[o[0]], P[o[1]]) / rMax;
+      const side = Math.min(1, Math.abs(ax) / halfW);
+      const ang = Math.atan2(P[o[1]], P[o[0]]);   // the shader's own bearing around the wheel
+      const s = treadNormalTilt(ang, ax, rr, side, plan, caked, wet);
+      out.n++;
+      out.crownSum += s.crown;
+      if (s.crown > out.crownMax) out.crownMax = s.crown;
+      if (s.crown > 0.01) { out.band++; if (s.tilt > 0.15) out.shaped++; }
+      if (side < 0.5 && s.crown > 0.9) out.bandShaped++;
+    }
+    out.crownMean = out.crownSum / Math.max(1, out.n);
+    return out;
+  };
+
+  const sizesOf = (mn, mx) => [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+  const bboxOf = (pos) => {
+    const mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9];
+    for (let i = 0; i < pos.length; i += 3) for (let k = 0; k < 3; k++) {
+      mn[k] = Math.min(mn[k], pos[i + k]); mx[k] = Math.max(mx[k], pos[i + k]);
+    }
+    return { mn, mx, s: sizesOf(mn, mx) };
+  };
+
+  const plans = [], rows = [];
+  let bandTris = 0, bandShaped = 0, flankTris = 0, flankOld = 0, flankNew = 0, parts = 0, rubberParts = 0;
+  for (const wn of WHEEL_NODES) {
+    const mesh = meshOf.get(wn);
+    if (!mesh) { gaps.push(`${wn} missing from the shipped glb`); continue; }
+    const prims = mesh.primitives.map((p) => {
+      const pos = acc(p.attributes.POSITION), idx = acc(p.indices);
+      const b = bboxOf(pos);
+      const s = b.s;
+      const axis = (s[1] < s[0] && s[1] < s[2]) ? 1 : (s[2] < s[0] && s[2] < s[1]) ? 2 : 0;
+      return { name: (doc.materials[p.material] && doc.materials[p.material].name) || '?', pos, idx, b, s, axis };
+    });
+    parts += prims.length;
+    const rub = prims.filter((p) => RUBBER.test(p.name));
+    rubberParts += rub.length;
+    if (rub.length < 2) { gaps.push(`${wn}: only ${rub.length} rubber primitive, the fold is vacuous`); continue; }
+    // the exported rubber sits centred on the wheel pivot, which is what lets the shader
+    // read ax/rr off the object origin at all
+    for (const p of rub) for (let k = 0; k < 3; k++) {
+      if (Math.abs((p.b.mn[k] + p.b.mx[k]) * 0.5) > 0.01) gaps.push(`${wn}/${p.name}: rubber is ${((p.b.mn[k] + p.b.mx[k]) * 0.5).toFixed(3)} m off the pivot on axis ${k}`);
+    }
+    const sizes = rub.map((p) => p.s);
+    const plan = wheelTreadPlan(sizes);
+    plans.push(JSON.stringify([plan.tread, plan.crown, plan.relief, plan.rMax, plan.halfW]));
+    if (!(plan.rMax >= 0.30 && plan.rMax <= 0.40)) gaps.push(`${wn}: folded tyre radius ${plan.rMax.toFixed(3)} m`);
+    if (!(plan.halfW >= 0.12 && plan.halfW <= 0.22)) gaps.push(`${wn}: folded tyre width ${(plan.halfW * 2).toFixed(3)} m`);
+    if (!(plan.lugCount >= 30 && plan.lugCount <= 46)) gaps.push(`${wn}: ${plan.lugCount} lugs on the folded tyre`);
+    for (const p of rub) {
+      // the old ruler: this part's own bbox
+      const ownW = p.s[p.axis] * 0.5;
+      const dims = [...p.s]; dims.splice(p.axis, 1);
+      const ownR = Math.max(dims[0], dims[1]) * 0.5;
+      const shared = sample(p.pos, p.idx, p.axis, plan.halfW, plan.rMax, plan, 0.9, 0.5);
+      const own = sample(p.pos, p.idx, p.axis, ownW, ownR, treadPlan(ownW, ownR), 0.9, 0.5);
+      const wide = ownR > plan.rMax * 0.9;      // the rolling band, by the wheel's ruler
+      rows.push(`${p.name}:${wide ? 'band' : 'flank'} ownR=${ownR.toFixed(2)} crown ${own.crownMean.toFixed(2)}->${shared.crownMean.toFixed(2)}`);
+      if (wide) {
+        bandTris += shared.n; bandShaped += shared.bandShaped;
+        if (!(shared.bandShaped / shared.n > 0.3)) gaps.push(`${wn}/${p.name}: the rolling band carries relief on only ${((100 * shared.bandShaped) / shared.n).toFixed(0)} % of its triangles`);
+      } else {
+        flankTris += shared.n; flankOld += own.crownSum; flankNew += shared.crownSum;
+        if (!(shared.crownMean < 0.25)) gaps.push(`${wn}/${p.name}: ${shared.crownMean.toFixed(2)} mean crown on outboard rubber - the flank is being lugged`);
+        // and prove the fold is what fixes it: on its own ruler this same part IS the tread
+        if (!(own.crownMean > 0.35 && own.band / own.n > 0.35)) gaps.push(`${wn}/${p.name}: per-part ruler crown=${own.crownMean.toFixed(2)} masked=${((100 * own.band) / own.n).toFixed(0)}% - the fold is guarding nothing here`);
+      }
+    }
+  }
+  if (new Set(plans).size !== 1) gaps.push('the four wheels disagree on the tread ruler');
+  if (!(parts >= 16 && rubberParts >= 8)) gaps.push(`shipped wheel primitives parts=${parts} rubber=${rubberParts}: asset truncated`);
+  if (!(bandTris > 0 && flankTris > 0)) gaps.push('no band/flank split to measure on the shipped wheel');
+
+  // ---- the source routes every part of a wheel through the one folded plan ----
+  const src = readFileSync(new URL('../render/carMesh.js', import.meta.url), 'utf8');
+  const wheelLoop = src.slice(src.indexOf('// Wheels: the exported pivots'), src.indexOf('node.material = null;'));
+  if (!/wheelTreadPlan\(/.test(wheelLoop)) gaps.push('the wheel loop builds no folded tread plan');
+  if (!/attachTyreDirt\([^)]*plan\)/.test(wheelLoop)) gaps.push('attachTyreDirt still measures the wheel per primitive');
+  const tyreFn = src.slice(src.indexOf('function attachTyreDirt'), src.indexOf('const _m4 ='));
+  if (/(?:^|[^A-Za-z])treadPlan\(/.test(tyreFn)) gaps.push('attachTyreDirt re-derives its own treadPlan from the part bbox');
+  if (!/plan\.halfW/.test(tyreFn) || !/plan\.rMax/.test(tyreFn)) gaps.push('uTyreDims no longer reads the folded wheel ruler');
+
+  check('T53 the tread ruler is the whole wheel: the shipped rubber family folds into ONE plan per wheel, the rolling band keeps its relief, and the outboard rubber keeps a smooth flank (no lugs across the sidewall) where a per-part ruler would draw 27 of them',
+    gaps.length === 0,
+    `wheels=4 parts=${parts} rubber=${rubberParts} bandTris=${bandTris} flankTris=${flankTris} shaped=${((100 * bandShaped) / Math.max(1, bandTris)).toFixed(0)}% flankCrown shared=${(flankNew / Math.max(1, flankTris)).toFixed(2)} old=${(flankOld / Math.max(1, flankTris)).toFixed(2)} plan=${plans[0] || '-'} | ${rows.slice(0, 5).join(' ')} gaps=[${gaps.join(' ')}]`);
+}
+testTyreTreadRulerIsTheShippedWheel();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
