@@ -68,6 +68,62 @@ export class Renderer {
     this.scene.background = this.skyColor;
     this.scene.fog = new THREE.Fog(this.fogColor, fogNearFor(settings.drawDistance), fogFarFor(settings.drawDistance));
 
+    // ---- sky dome -----------------------------------------------------------------
+    // One procedural backdrop instead of a flat background colour: a graded horizon
+    // haze that carries the *exact* fog colour at the horizon line (so the fog has
+    // somewhere to dissolve into and the far ring stops reading as a pale sheet),
+    // plus a sun disc at the real rig direction and a soft glow with enough HDR headroom
+    // for the bloom pass to pick up. Cost: one 80-tri icosahedron, one draw call,
+    // no texture, no extra pass. depthTest off + renderOrder -2 = it is the backdrop,
+    // never an occluder, and terrain/trees occlude the sun naturally (drawn first).
+    this.sky = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(1, 1),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false,
+        uniforms: {
+          uZenith: { value: new THREE.Color(0x2f5f92) },
+          uHorizon: { value: new THREE.Color(0x9db4c4) },
+          uSunCol: { value: new THREE.Color(0xffca92) },
+          uSunDir: { value: new THREE.Vector3(0.4, 0.3, 0.8) },
+          uSunPow: { value: 26.0 },       // HDR: the composite bloom threshold is ~0.95
+          uHaze: { value: 0.62 },
+        },
+        vertexShader: `
+varying vec3 vDir;
+void main() { vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+`,
+        fragmentShader: `
+varying vec3 vDir;
+uniform vec3 uZenith, uHorizon, uSunCol, uSunDir;
+uniform float uSunPow, uHaze;
+void main() {
+  vec3 d = normalize(vDir);
+  float h = clamp(d.y, -1.0, 1.0);
+  // Graded haze: fog colour ON the horizon, deepening to the zenith colour overhead.
+  float band = pow(1.0 - max(h, 0.0), 3.0);
+  vec3 col = mix(uZenith, uHorizon, band);
+  // Under the horizon the dome is the haze floor: a carve lip or a hairline crack must
+  // never show a hard-cut value through it.
+  col = mix(col, uHorizon * 0.86, smoothstep(0.0, -0.14, h));
+  vec3 sd = normalize(uSunDir);
+  float c = dot(d, sd);
+  float up = smoothstep(-0.05, 0.09, sd.y);        // sun below the horizon = no disc
+  float disc = smoothstep(0.99932, 0.99976, c);
+  float glow = 1.45 * pow(max(c, 0.0), 420.0)
+             + 0.34 * pow(max(c, 0.0), 24.0)
+             + 0.11 * pow(max(c, 0.0), 3.2);
+  // Warm horizon wash on the sun's side of the sky: the air between camera and sun.
+  col += uSunCol * (0.30 * uHaze) * pow(max(c, 0.0), 2.4) * (1.0 - band * 0.35) * up;
+  col += uSunCol * (glow * (0.55 + 0.45 * uHaze) + disc * uSunPow) * up;
+  gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
+}
+`,
+      })
+    );
+    this.sky.renderOrder = -2;
+    this.sky.frustumCulled = false;
+    this.scene.add(this.sky);
+
     this.terrainMaterial = null;
     this.propMaterial = null;
     this.carMaterial = null;
@@ -108,6 +164,7 @@ export class Renderer {
       shader.uniforms.uTintA = { value: ta };
       shader.uniforms.uTintB = { value: tb };
       shader.uniforms.uWet = { value: 0 };      // stage weather wetness (PLAN §10.2)
+      shader.uniforms.uDap = { value: 0 };      // dapple clock (seconds), set per frame
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nattribute float aSurface;\nvarying float vSurface;\nvarying vec3 vWPos;\nvarying vec3 vWNormal;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurface = aSurface;\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWNormal = (modelMatrix * vec4(objectNormal, 0.0)).xyz;');
@@ -119,6 +176,7 @@ varying vec3 vWNormal;
 uniform vec3 uTintA[11];
 uniform vec3 uTintB[11];
 uniform float uWet;
+uniform float uDap;
 
 // Integer hash -> [0,1): cheaper than the sin-hash it replaces, and it is a pure
 // function of world position, so a panel gets the same tone from any chunk or LOD.
@@ -212,13 +270,23 @@ float fbm1(vec2 p) { return vnoise(p); }
   // Ruts: down to 0.62 of the surface tone, feathered by the fbm fields above so the
   // band reads as worked ground rather than a decal.
   float rutT = wear;
-  float band = mix(0.70, 1.06, rutT);
+  float band = mix(0.58, 1.00, rutT);
   // A faint cross-band grain inside the carriageway so a rut is not a dead flat strip.
   band *= 0.94 + 0.12 * fbm1(vec2(wp.x * 1.9 + wp.y * 0.35, wp.y * 1.9));
   diffuseColor.rgb *= mix(natural, band, roadish);
   diffuseColor.rgb += vec3(0.010, 0.008, 0.004) * wear * (1.0 - roadish);
   // The bright edge line against grass: only the very top of the band gets the lift.
   diffuseColor.rgb += vec3(0.020, 0.019, 0.016) * roadish * smoothstep(0.82, 1.0, wear);
+
+  // Dappled canopy light (the stage may not read uniformly lit). Two slow drifting
+  // noise fields multiplied, so the patch pattern breaks up instead of scrolling as a
+  // tile; ground-facing faces take the full swing, walls only a quarter of it. The
+  // swing is warm-biased so a sun patch carries the key colour, unlike a flat gain.
+  float dapA = vnoise(vWPos.xz * 0.21 + vec2(uDap * 0.028, -uDap * 0.016));
+  float dapB = vnoise(vWPos.xz * 0.67 - vec2(uDap * 0.011, uDap * 0.023));
+  float dapM = smoothstep(0.28, 0.72, dapA * dapB * 2.35);
+  float upFace = an.y > 0.5 ? 1.0 : 0.22;
+  diffuseColor.rgb *= 1.0 + upFace * (dapM * vec3(0.30, 0.26, 0.19) - (1.0 - dapM) * vec3(0.055, 0.058, 0.062));
 }
 `)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
@@ -258,7 +326,7 @@ float fbm1(vec2 p) { return vnoise(p); }
 `);
       m.userData.shader = shader;
     };
-    m.customProgramCacheKey = () => 'vr-terrain-f9';
+    m.customProgramCacheKey = () => 'vr-terrain-g1';
     this.terrainMaterial = m;
 
     // Standard, not Lambert: props take the same lighting model as the car body so
@@ -305,13 +373,21 @@ float fbm1(vec2 p) { return vnoise(p); }
     lightingFor(this.biome, this.tod, rig);
 
     const oc = this.overcast || 0;
-    this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.20);
-    this.sun.intensity = rig.keyIntensity * 1.18 * (1 - 0.52 * oc);
+    // Warmer key (0.20 -> 0.32 of the warm key tint) and a stronger key gain:
+    // three's directional shadow is already at full attenuation, so the only headroom
+    // for a readable contact shadow is the key/fill ratio, not the shadow map.
+    this.sun.color.copy(rig.sunColor).lerp(this._warmKey, 0.32);
+    this.sun.intensity = rig.keyIntensity * 1.34 * (1 - 0.52 * oc);
     this.hemi.color.copy(rig.hemiSky);
     this.hemi.groundColor.copy(rig.hemiGround);
-    this.hemi.intensity = rig.ambIntensity * 1.16 * (1 + 0.22 * oc);
+    // Ambient fill up (1.16 -> 1.42): the forest floor and the shaded flank of the
+    // treeline lift out of black while the sun's direct term keeps the contrast.
+    this.hemi.intensity = rig.ambIntensity * 1.42 * (1 + 0.22 * oc);
     this.fill.color.copy(rig.fillColor);
-    this.fill.intensity = rig.fillIntensity * 1.10 * (1 + 0.30 * oc);
+    // The fill points back at the shadow side, so it is also the light that erases the
+    // car/prop contact shadow. It goes slightly DOWN; the crush lift is carried by the
+    // hemisphere and by the composite's shadowLift instead (plan §10 "cien nie jest czarny").
+    this.fill.intensity = rig.fillIntensity * 1.04 * (1 + 0.30 * oc);
 
     // Biome-matched haze, but *directional*: the sky keeps a warm key-lit cast and the
     // fog stays a tint rather than a grey sheet, so mid-distance terrain still reads as
@@ -328,6 +404,18 @@ float fbm1(vec2 p) { return vnoise(p); }
     this.skyColor.g = Math.min(1, this.skyColor.g * rig.saturation);
     this.skyColor.b = Math.min(1, this.skyColor.b * rig.saturation);
     this.scene.fog.color.copy(this.fogColor);
+    // Sky dome follows the same rig: the horizon band IS the fog colour (so the fog
+    // dissolves into the haze instead of hitting a wall), the zenith is the saturated
+    // sky pushed deeper, and the sun disc sits on rig.sunDir - so it swings with the
+    // time of day exactly like the key light.
+    const sku = this.sky.material.uniforms;
+    sku.uSunDir.value.copy(rig.sunDir);
+    sku.uSunCol.value.copy(rig.sunColor);
+    sku.uHorizon.value.copy(this.fogColor);
+    sku.uZenith.value.copy(this.skyColor).multiplyScalar(0.60);
+    sku.uZenith.value.b = Math.min(1.4, sku.uZenith.value.b * 1.30);
+    sku.uHaze.value = 0.42 + 0.58 * rig.warmth;
+    sku.uSunPow.value = 14.0 + 22.0 * Math.max(0, Math.min(1, rig.sunDir.y * 3.0));
     const far = settings.drawDistance;
     // Fog is short by design (PLAN §10.2 "teren jasny, tylko horyzont mglisty"):
     // mid-distance terrain must stay crisp, only the outer silhouette ring hazes. Both
@@ -371,6 +459,10 @@ float fbm1(vec2 p) { return vnoise(p); }
     // clipped away and the horizon is a hard cut again.
     this.camera.far = Math.max(q === QUALITY.LOW ? 420 : 900, settings.drawDistance * 1.1);
     this.camera.updateProjectionMatrix();
+    // Keep the dome inside the far plane, otherwise its far vertices clip and the
+    // horizon opens up as a hole.
+    this._skyRadius = Math.max(80, Math.min(this.camera.far * 0.85, 2200));
+    this.sky.scale.setScalar(this._skyRadius);
 
     // Post stack: POST / GRADE rows plus the driver gate (composer.ok). LOW keeps
     // it on but runs the cheapest graph (one mip, 3 taps); BLOOM sets the row.
@@ -440,6 +532,11 @@ float fbm1(vec2 p) { return vnoise(p); }
 
   render() {
     this._time = performance.now() * 0.001;
+    // The dome rides with the camera (it is a backdrop, not a distant object), and the
+    // canopy dapple clock only exists once the terrain program is compiled.
+    this.sky.position.copy(this.camera.position);
+    const shD = this.terrainMaterial.userData && this.terrainMaterial.userData.shader;
+    if (shD && shD.uniforms.uDap) shD.uniforms.uDap.value = this._time;
     if (this.post.enabled) {
       this.post.render(this.scene, this.camera, this.rig, this._time);
       this.info.calls = this.post.calls;

@@ -6,19 +6,19 @@ export const BLOOM_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
  *  a plain finite number inside the ranges tests.js pins (T33) — nothing else in the
  *  renderer carries a bloom/grade constant, so the look is dialled from one place. */
 export const POST_TUNE = {
-  exposure: 1.18,              // AgX sits darker/softer than ACES at the same key light
+  exposure: 1.34,              // AgX sits darker/softer than ACES at the same key light
   bloom: {
-    LOW: { threshold: 0.92, knee: 0.40, intensity: 0.34, radius: 1.00, taps: 3, sigma: 1.10, mips: 1 },
-    MEDIUM: { threshold: 0.78, knee: 0.50, intensity: 0.52, radius: 1.25, taps: 5, sigma: 1.30, mips: 2 },
-    HIGH: { threshold: 0.68, knee: 0.55, intensity: 0.70, radius: 1.60, taps: 7, sigma: 1.55, mips: 2 },
+    LOW: { threshold: 1.05, knee: 0.45, intensity: 0.30, radius: 1.00, taps: 3, sigma: 1.10, mips: 1 },
+    MEDIUM: { threshold: 0.95, knee: 0.55, intensity: 0.58, radius: 1.35, taps: 5, sigma: 1.30, mips: 2 },
+    HIGH: { threshold: 0.88, knee: 0.60, intensity: 0.74, radius: 1.70, taps: 7, sigma: 1.55, mips: 2 },
   },
   grade: {
-    contrast: 0.24,            // gentle S curve about the mid grey (band width 1.15)
-    shadowLift: 0.026,         // the shadow side never crushes to black
+    contrast: 0.30,            // gentle S curve about the mid grey (band width 1.15)
+    shadowLift: 0.062,         // the shadow side never crushes to black
     warmHi: [1.075, 1.005, 0.885], coolSh: [0.855, 0.940, 1.110],
-    warmAmt: 0.55, coolAmt: 0.32,
-    satGreen: 0.18, satBrown: 0.14,
-    vignette: 0.30, grain: 0.018, grainSpeed: 20.0,
+    warmAmt: 0.60, coolAmt: 0.40,
+    satGreen: 0.24, satBrown: 0.12,
+    vignette: 0.22, grain: 0.014, grainSpeed: 20.0,
   },
 };
 

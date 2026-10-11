@@ -72,8 +72,10 @@ function params() {
   // ?ref=<s> reference time for the stage (docs/03 §6 ghost is not wired yet).
   const ref = Number(q.get('ref') || 0);
   // ?tod=<0..1> time of day for the art-direction shots (PLAN §10 criterion 1/4):
-  // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour.
-  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.62;
+  // 0.25 sunrise, 0.5 noon, 0.72 golden hour, 1 night. Default: golden hour, on the low
+  // side of it - the sky dome puts the sun disc at rig.sunDir, so a 0.68-0.70 sun sits
+  // IN the frame down the stage and throws the long key across the carriageway.
+  const tod = q.has('tod') ? Math.max(0, Math.min(1, Number(q.get('tod')))) : 0.70;
   // ?post=0|1 turns the composite off/on (A/B shots for the pass-cost numbers).
   // Read *after* the quality preset below so the flag always wins.
   const postFlag = q.get('post');

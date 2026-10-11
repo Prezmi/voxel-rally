@@ -38,16 +38,21 @@ export const PALETTE = [
   // mid-brown earth sitting within ~6% value of DIRT, SHOULDER only a shade paler, MUD a
   // shade darker and glossier (the wheel ruts). Anchors are kept tight (tone spread <=
   // ~8%) so neighbouring blocks never separate by more than ~12% lightness.
-  { id: BLOCK.DIRT, name: 'dirt', surface: SURF.DIRT, color: 0x5f4527, roughness: 0.96, loose: true, solid: true, pattern: 2, tone: [0x68502f, 0x513a20] },
+  { id: BLOCK.DIRT, name: 'dirt', surface: SURF.DIRT, color: 0x585040, roughness: 0.96, loose: true, solid: true, pattern: 2, tone: [0x615a49, 0x4b4637] },
     // GRAVEL/SHOULDER are the corridor's own material and they cover most of the frame:
   // with the old 0xa8977a / 0xc0af8d anchors the sun pushed the worn wheel lines to a
   // near-white albedo (measured: 1002+ mesh panels with min channel >= 0.45 within the
   // start corridor). Anchored down to a dusty ochre so no lit panel can clip.
-  { id: BLOCK.GRAVEL, name: 'gravel', surface: SURF.GRAVEL, color: 0x6b5030, roughness: 0.88, loose: true, solid: true, pattern: 3, tone: [0x745a39, 0x604728] },
+  // STAGE ROAD PALETTE: dusty brown-grey earth, not orange. The old anchors were ochre
+  // (G running ~25 % above B), which under the warm key read as flat orange
+  // (shots/veg-pass.png, FAULT: road = orange slab). Every road anchor is now pulled
+  // towards neutral: R still leads, but B is within ~12 % of G, so the carriageway
+  // reads as dusty brown-grey and the warm key stays in the *light*, not in the albedo.
+  { id: BLOCK.GRAVEL, name: 'gravel', surface: SURF.GRAVEL, color: 0x635c4c, roughness: 0.88, loose: true, solid: true, pattern: 3, tone: [0x6d6755, 0x565142] },
   { id: BLOCK.ASPHALT, name: 'asphalt', surface: SURF.ASPHALT, color: 0x3d3d3c, roughness: 0.55, loose: false, solid: true, pattern: 4, tone: [0x474643, 0x303033] },
   // The wheel-line ruts: damp packed earth, so darker and noticeably glossier than
   // the dry crown it sits beside.
-  { id: BLOCK.MUD, name: 'mud', surface: SURF.MUD, color: 0x3f2c1a, roughness: 0.62, loose: true, solid: true, pattern: 2, tone: [0x463320, 0x372514] },
+  { id: BLOCK.MUD, name: 'mud', surface: SURF.MUD, color: 0x35332c, roughness: 0.54, loose: true, solid: true, pattern: 2, tone: [0x3b3931, 0x2c2b24] },
   { id: BLOCK.SNOW, name: 'snow', surface: SURF.SNOW, color: 0xe7edf1, roughness: 0.75, loose: true, solid: true, pattern: 5, tone: [0xf1f5f8, 0xd6dfef] },
   { id: BLOCK.STONE, name: 'stone', surface: SURF.STONE, color: 0x5f5f5a, roughness: 0.65, loose: false, solid: true, pattern: 6, tone: [0x66655f, 0x565550] },
   { id: BLOCK.SAND, name: 'sand', surface: SURF.SAND, color: 0xc9b184, roughness: 0.98, loose: true, solid: true, pattern: 7, tone: [0xd6c093, 0xb49b72] },
@@ -55,7 +60,7 @@ export const PALETTE = [
   { id: BLOCK.ICE, name: 'ice', surface: SURF.ICE, color: 0xa8c6d4, roughness: 0.35, loose: false, solid: true, pattern: 8, tone: [0xbcd6e2, 0x8fb2c6] },
     // SHOULDER was the sandy-wash band: a full value step above the carriageway. Held
   // just a shade above GRAVEL now, so the road edge reads as packed earth, not sand.
-  { id: BLOCK.SHOULDER, name: 'shoulder', surface: SURF.GRAVEL, color: 0x715a3a, roughness: 0.98, loose: true, solid: true, pattern: 3, tone: [0x7a6342, 0x67502f] },
+  { id: BLOCK.SHOULDER, name: 'shoulder', surface: SURF.GRAVEL, color: 0x6d6858, roughness: 0.98, loose: true, solid: true, pattern: 3, tone: [0x777261, 0x615c4c] },
 ];
 
 export function block(id) { return PALETTE[id] || PALETTE[0]; }
