@@ -11,7 +11,7 @@
 import { BLOCK, blockForSurface } from './palette.js';
 import { surface } from './surfaces.js';
 import { CHUNK, WORLD_HEIGHT, chunkKey, keyToCx, keyToCz } from './chunk.js';
-import { smoothstep, hash01 } from './noise.js';
+import { smoothstep, hash01, valueNoise } from './noise.js';
 const EDGE_SALT = 0x39d7a1c5;
 const GRIT_SALT = 0x6b2f8e51;
 
@@ -39,6 +39,12 @@ export const RUT_AT = 0.55;             // wheel line at 55 % of half-width (mat
 export const RUT_WIDTH = 0.30;          // gaussian sigma, as a fraction of half-width
 export const EDGE_BREAK = 0.10;         // m of jitter on the carriageway edge (broken lip)
 export const GRAVEL_RIPPLE = 0.055;     // m of small-stone ripple across the strip
+// The corridor band the mesher must NOT face-shade: the carriageway and the shoulder
+// always carry a wear band of 108..168 here, while the bank tail decays to <= 10 and
+// natural ground stays 0. So `wear >= LANE_WEAR_MIN` is an exact, zero-cost test for
+// "this column lies under the road ribbon" (src/world/road-ribbon.js), and it survives a
+// shipped map (chunk.wear is serialised in map-load.js / stage-cache.js).
+export const LANE_WEAR_MIN = 64;
 
 /**
  * Surface key -> block id for a corridor column, with the biome guard: SNOW/ICE are
@@ -162,9 +168,13 @@ export function carveChunk(world, cx, cz, road, carveIndex, terrain) {
       // 0.5 m; nothing here is per-column independent, so the strip has no seam.
       const u = absD / hw;
       const wl = Math.exp(-Math.pow((absD - hw * RUT_AT) / (hw * RUT_WIDTH), 2));
-      const edge = (hash01(colX, colZ, EDGE_SALT) - 0.5) * EDGE_BREAK
+      // Sampled on a continuous world-space lattice, NOT per column: the amplitude is the
+      // same (broken edge, gravel ripple) but the bed no longer carries a different offset
+      // on every 1 m column, which is what made the mesher emit one stepped panel per
+      // column along the lane. The ribbon (road-ribbon.js) samples the same field.
+      const edge = (valueNoise(colX + 0.5, colZ + 0.5, 2, EDGE_SALT) - 0.5) * EDGE_BREAK
         * Math.max(0, (u - 0.55) / 0.45);
-      const grit = (hash01(colX, colZ, GRIT_SALT) - 0.5) * GRAVEL_RIPPLE;
+      const grit = (valueNoise(colX + 0.5, colZ + 0.5, 1, GRIT_SALT) - 0.5) * GRAVEL_RIPPLE;
       target = scratchH[c] - CROWN * hw * u * u - RUT_DEPTH * wl + edge + grit;
     } else if (absD <= hw + SHOULDER) {
       target = scratchH[c] + (absD - hw) * SHOULDER_RISE;

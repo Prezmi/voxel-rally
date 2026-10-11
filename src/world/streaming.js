@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { CHUNK, COLS, chunkKey, keyToCx, keyToCz } from './chunk.js';
 import { hash01 } from './noise.js';
 import { meshChunk, LOD_CELL } from './mesher.js';
+import { ribbonChunk } from './road-ribbon.js';
 import { carveChunk, SHOULDER } from './road-carve.js';
 import { chunkTiles, FLAG_PEBBLE, FLAG_RUT, FLAG_CROWN, SURF_MASK, VERGE, VERGE_SALT, BARE_SALT,
   PEBBLE_CHANCE, TILE_CAP_CHUNK } from './block-tiles.js';
@@ -203,8 +204,8 @@ export class Streaming {
     this._euler = new THREE.Euler();
     this._col = new THREE.Color();
 
-    this.stats = { chunks: 0, tris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
-    this.stats.breakdown = { terrain: 0, treesNear: 0, treesFar: 0, propsNear: 0, propsFar: 0, tiles: 0, other: 0 };
+    this.stats = { chunks: 0, tris: 0, ribbonTris: 0, remeshes: 0, props: 0, generated: 0, carved: 0, tiles: 0 };
+    this.stats.breakdown = { terrain: 0, ribbon: 0, treesNear: 0, treesFar: 0, propsNear: 0, propsFar: 0, tiles: 0, other: 0 };
     this.stats.species = {};
     this._lastInst = 0;              // 4 Hz gate on the instance rebuild/upload
     this._lastCx = null; this._lastCz = null; this._lastCount = -1; this._lastCamQ = null;
@@ -479,6 +480,7 @@ export class Streaming {
       const d = Math.hypot(dx, dz);
       if (d > R + CHUNK * 2) {
         if (rec.mesh) { this.renderer.scene.remove(rec.mesh); rec.mesh.geometry.dispose(); }
+        if (rec.ribbon) { this.renderer.scene.remove(rec.ribbon); rec.ribbon.geometry.dispose(); rec.ribbon = null; }
         this.records.delete(key);
         if (this.stage.preGen) {
           // Pre-generated stage: the chunk data is the point of the pre-generation, so
@@ -548,6 +550,7 @@ export class Streaming {
         // left full-detail tiles on chunks the car had driven away from.
         rec.tiles = null;
         if (rec.mesh) { this.renderer.scene.remove(rec.mesh); rec.mesh.geometry.dispose(); rec.mesh = null; }
+        if (rec.ribbon) { this.renderer.scene.remove(rec.ribbon); rec.ribbon.geometry.dispose(); rec.ribbon = null; }
         const data = meshChunk(this.world, c, job.ring);
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
@@ -563,6 +566,28 @@ export class Streaming {
         this.renderer.scene.add(mesh);
         rec.mesh = mesh;
         rec.lod = job.ring;
+        // The road surface: one continuous ribbon over the lane (src/world/road-ribbon.js),
+        // replacing the suppressed voxel top panels. Same terrain material, same attribute
+        // layout, so the pinned road skin band (render/road-skin.js) still drives tone and
+        // the packed-rut sheen. Rings 2+ are far enough that the voxel bed reads fine and
+        // the ribbon would only cost triangles.
+        if (job.ring <= 1) {
+          const rb = ribbonChunk(this.world, this.road, job.cx, job.cz, this.carveIndex);
+          if (rb) {
+            const rg = new THREE.BufferGeometry();
+            rg.setAttribute('position', new THREE.Float32BufferAttribute(rb.position, 3));
+            rg.setAttribute('normal', new THREE.Float32BufferAttribute(rb.normal, 3));
+            rg.setAttribute('color', new THREE.Float32BufferAttribute(rb.color, 3));
+            rg.setAttribute('aSurface', new THREE.Float32BufferAttribute(rb.surface, 1));
+            rg.setIndex(new THREE.BufferAttribute(rb.index, 1));
+            rg.computeBoundingSphere();
+            const rm = new THREE.Mesh(rg, this.renderer.terrainMaterial);
+            rm.receiveShadow = true;
+            rm.matrixAutoUpdate = false;
+            this.renderer.scene.add(rm);
+            rec.ribbon = rm;
+          }
+        }
         c.dirty = false;
         c.lod = job.ring;
         remeshes++;
@@ -604,10 +629,14 @@ export class Streaming {
       this._rebuildTiles(focus);
     }
 
-    let tris = 0;
-    for (const rec of this.records.values()) if (rec.mesh) tris += rec.mesh.geometry.index.count / 3;
+    let tris = 0, ribbon = 0;
+    for (const rec of this.records.values()) {
+      if (rec.mesh) tris += rec.mesh.geometry.index.count / 3;
+      if (rec.ribbon) ribbon += rec.ribbon.geometry.index.count / 3;
+    }
     this.stats.chunks = this.records.size;
-    this.stats.tris = tris;
+    this.stats.ribbonTris = ribbon;
+    this.stats.tris = tris + ribbon;
     this._breakdown();
     return performance.now() - t0;
   }
@@ -625,7 +654,8 @@ export class Streaming {
     });
     const sp = this.stats.species || (this.stats.species = {});
     for (const k of Object.keys(sp)) sp[k] = null;
-    bd.terrain = this.stats.tris;
+    bd.terrain = this.stats.tris - (this.stats.ribbonTris || 0);
+    bd.ribbon = this.stats.ribbonTris || 0;
     bd.treesNear = bd.treesFar = bd.propsNear = bd.propsFar = bd.tiles = bd.other = 0;
     for (const [type, im] of this.propMeshes) {
       const name = PROP_NAMES[type] || String(type);

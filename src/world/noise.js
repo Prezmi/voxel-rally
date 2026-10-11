@@ -155,3 +155,21 @@ export function smoothstep(a, b, x) {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
 }
+
+/**
+ * Bilinear value noise on a `cell` metre lattice, continuous in world space. A corridor
+ * relief term sampled with hash01(colX,colZ) is piecewise constant per 1 m column, so the
+ * carved bed carries a different offset on every column and the mesher steps it into one
+ * panel per column (the paving-plate look). Sampling the same amplitude on this lattice
+ * keeps the gravel ripple and the broken edge line while the surface itself stays smooth.
+ */
+export function valueNoise(x, z, cell, salt) {
+  const gx = x / cell, gz = z / cell;
+  const ix = Math.floor(gx), iz = Math.floor(gz);
+  const fx = gx - ix, fz = gz - iz;
+  const sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
+  const a = hash01(ix, iz, salt), b = hash01(ix + 1, iz, salt);
+  const c = hash01(ix, iz + 1, salt), d = hash01(ix + 1, iz + 1, salt);
+  const ab = a + (b - a) * sx, cd = c + (d - c) * sx;
+  return ab + (cd - ab) * sz;
+}

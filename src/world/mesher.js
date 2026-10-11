@@ -12,6 +12,7 @@
 //
 // Winding convention: front faces are CCW when viewed from outside, Y-up world.
 import { CHUNK, WORLD_HEIGHT } from './chunk.js';
+import { LANE_WEAR_MIN } from './road-carve.js';
 import { blockColor, blockSurface } from './palette.js';
 import { hash01 } from './noise.js';
 
@@ -172,6 +173,16 @@ export function meshChunk(world, chunk, lod = 0) {
     sur.push(surfId + wearOf(wear));
   };
 
+  // Neighbour-chunk wear band, for a wall on the last plane of this chunk (a lane that
+  // crosses a chunk border must stay suppressed across it).
+  const wearOutside = (i, j) => {
+    const wx = Math.floor(x0 + i * cs + cs * 0.5), wz = Math.floor(z0 + j * cs + cs * 0.5);
+    const c = world.chunkAt(Math.floor(wx / CHUNK), Math.floor(wz / CHUNK));
+    if (!c || !c.wear) return 0;
+    const lx = ((wx % CHUNK) + CHUNK) % CHUNK, lz = ((wz % CHUNK) + CHUNK) % CHUNK;
+    return c.wear[lz * CHUNK + lx];
+  };
+
   const topOutside = (i, j) => {
     const wx = Math.floor(x0 + i * cs + cs * 0.5), wz = Math.floor(z0 + j * cs + cs * 0.5);
     const tq = world.columnTopQAt(wx, wz);
@@ -188,7 +199,19 @@ export function meshChunk(world, chunk, lod = 0) {
   // the driving line"). Quantised to 32 levels so noise in the field does not
   // shatter the corridor into per-column panels.
   const wearBkt = new Uint8Array(N * N);
-  for (let c = 0; c < N * N; c++) wearBkt[c] = wearG[c] >> 5;
+  // Lane suppression: the corridor surface is a continuous ribbon mesh built by
+  // src/world/road-ribbon.js (1 m x 0.5 m quad grid), NOT voxel top panels. Left alone,
+  // the mesher stepped the carved heightfield in per-column faces *along the lane* - one
+  // raised plate per column with a deep seam between them, which is the fault this kills.
+  // Marking the cell visited before the merge both skips its top face and stops a merged
+  // panel from running into the ribbon.
+  const laneCell = new Uint8Array(N * N);
+  for (let c = 0; c < N * N; c++) {
+    wearBkt[c] = wearG[c] >> 5;
+    // The ribbon is only built for rings 0/1 (streaming.js), so the far silhouette LODs
+    // keep their voxel top panels - suppressing them there would open a hole in the lane.
+    if (wearG[c] >= LANE_WEAR_MIN && lod <= 1) { laneCell[c] = 1; visited[c] = 1; }
+  }
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const c0 = j * N + i;
@@ -345,6 +368,14 @@ export function meshChunk(world, chunk, lod = 0) {
           nb = lastPlane ? 0 : bid[(p + 1) * N + q];
         }
         if (ha === hb) continue;
+        // No riser inside the lane either: a step between two ribbon-covered columns is
+        // exactly the "stepped column faces along the lane" the ribbon replaces. The
+        // blocky voxel edge survives, because a wall is still drawn wherever only one
+        // side of the step is in the band (the outer half metre of the ribbon).
+        let la, lb;
+        if (axis === 0) { la = laneCell[q * N + p]; lb = lastPlane ? (wearOutside(p + 1, q) >= LANE_WEAR_MIN ? 1 : 0) : laneCell[q * N + p + 1]; }
+        else { la = laneCell[p * N + q]; lb = lastPlane ? (wearOutside(q, p + 1) >= LANE_WEAR_MIN ? 1 : 0) : laneCell[(p + 1) * N + q]; }
+        if (la && lb) continue;
         // A heightfield step has to be walled whichever way it faces. The old test
         // only emitted the band when the *left/−z* column was higher, so every step
         // that rises towards −x or −z had no wall at all: viewed from the low side at a

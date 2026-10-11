@@ -35,7 +35,9 @@ import { t as tr, setLang, getLang, table as i18nTable, languages as i18nLanguag
 import { textWidth } from '../game/pixel-font.js';
 import { generateChunkProps, roadCorridorGap, PROP_CORRIDOR_MARGIN, PROP, PROP_NAMES, buildGateGeometry, GATE_PLANES, SPRITE_PROPS, SPRITE_SPEC, SPRITE_ATLAS, NEAR_LOD_TRIS, atlasRect, buildSpriteGeometries, buildBillboardGeometries, FAR_SPRITE_CELLS, FAR_SPRITE_PX, paintFoliageCell, foliageCellStats, TREE_MIN_SPACING, TREE_CORRIDOR_HARD, TREE_FREE, propFootprint, treeSpacingFor } from '../world/props.js';
 import { VEG_BANDS, PROP_CAPACITY, vegBandPlan, vegDensity, vegCostFromDensity, vegTrisPerInstance } from '../world/veg-bands.js';
-import { buildCarveIndex, prewarmArea, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN } from '../world/road-carve.js';
+import { buildCarveIndex, prewarmArea, carveRoad, SHOULDER, RUT_DEPTH, RUT_AT, EDGE_BREAK, GRAVEL_RIPPLE, CROWN, LANE_WEAR_MIN } from '../world/road-carve.js';
+import { meshChunk } from '../world/mesher.js';
+import { ribbonChunk, ribbonHeight, terrainTopBilinear, STEP_ALONG, STEP_ACROSS, RIBBON_DROP, EDGE_BLOCK_BAND } from '../world/road-ribbon.js';
 import { TILE_ON_CARRIAGEWAY, chunkTiles, TILE_SURFACE_IDS, TILE_CAP_CHUNK } from '../world/block-tiles.js';
 import { buildColliders, queryNearBrute, COLLIDER_CELL, SPECIES_SHAPE } from '../world/prop-colliders.js';
 import { ROAD_TONE, RUT_GLOSS, roadToneRange, roadRutRoughness } from '../render/road-skin.js';
@@ -47,7 +49,7 @@ import { MODEL_QUEUE, ModelQueue, nextBackoffMs } from '../render/model-queue.js
 import { BEAM, BEAM_VERT, BEAM_FRAG, isDark, beamAnchors, beamGeometry, beamMaterialSpec, beamTriangleCount, setBeamGain, beamFootprint, poolIlluminance, shaftHalfAngle, shaftWallAlpha, shaftPeak } from '../render/headlights.js';
 import { createPaceDriver } from './pace-driver.js';
 import { GeoBuilder } from '../render/primitives.js';
-import { CHUNK } from '../world/chunk.js';
+import { CHUNK, keyToCx, keyToCz } from '../world/chunk.js';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { showroomConfig, showroomRoute, showroomPose } from './showroom.js';
@@ -3950,6 +3952,122 @@ function testCarriagewayIsOneContinuousCarvedStrip() {
     `ruts ${(rutSum / Math.max(1, rutN)).toFixed(3)} m (want ${RUT_DEPTH}) crown ${CROWN} edge ${EDGE_BREAK} gravel ${GRAVEL_RIPPLE} | samples=${samples} holes=${holes} offProfile=${devs} maxDev=${maxDev.toFixed(2)}m meanDev=${(devSum / Math.max(1, samples)).toFixed(3)}m | tiles ${tiles} over ${chunks} chunks, onLane=${laneTiles} lift=${lift ? lift[1] : '?'} span=${span ? span[1] : '?'} gaps=[${gaps.join(' ')}]`);
 }
 testCarriagewayIsOneContinuousCarvedStrip();
+
+// T59 (JOB: the carriageway still read as a lattice of raised paving plates with deep
+// seams - the voxel mesher stepping the carved heightfield in per-column faces along the
+// lane): the lane surface is a dedicated continuous ribbon mesh (src/world/road-ribbon.js,
+// 1 m along x 0.5 m across, built per chunk from the existing road table). No voxel top
+// face or column riser is drawn inside the band, the ribbon never stands above the terrain
+// surface it lies on, chunk borders share identical positions AND normals (welded join),
+// and the ribbon adds no height step along the lane that the ground itself does not have.
+function testRoadRibbonIsOneContinuousSurface() {
+  const gaps = [];
+  const seed = 12345;
+  const terrain = makeTerrain(seed, 'FOREST');
+  const road = buildRoad({ seed, lengthTarget: 1400, terrainHeightAt: terrain.heightAt, biome: 'FOREST' });
+  const world = new VoxelWorld(seed);
+  const index = carveRoad(world, road, terrain).index;
+  let terrainTris = 0, ribbonTris = 0, quads = 0, verts = 0;
+  let laneTopTris = 0, laneRisers = 0, proud = 0, maxProud = 0, rimProud = 0;
+  let welded = 0, weldMiss = 0, extraSteps = 0, maxStep = 0, maxGroundStep = 0;
+  let cover = 0, coverWanted = 0, coverDev = 0, reliefSum = 0, reliefN = 0;
+  const posMap = new Map();
+  const bil = (x, z) => terrainTopBilinear(world, x, z);
+  const band = (x, z, margin) => {
+    const i = road.nearest(x, z);
+    const lat = Math.abs((x - road.x[i]) * road.nx[i] + (z - road.z[i]) * road.nz[i]);
+    return lat <= road.width[i] / 2 + SHOULDER - margin;
+  };
+  for (const key of index.keys()) {
+    const cx = keyToCx(key), cz = keyToCz(key);
+    const t = meshChunk(world, world.chunkAt(cx, cz), 0);
+    terrainTris += t.triangles;
+    for (let k = 0; k < t.index.length; k += 3) {
+      const a = t.index[k] * 3, b = t.index[k + 1] * 3, d = t.index[k + 2] * 3;
+      // Classified by all three corners, not the centroid: a merged wall band on the
+      // shoulder edge has its outer corners off the band, a panel inside the lane does not.
+      const ny = (t.normal[a + 1] + t.normal[b + 1] + t.normal[d + 1]) / 3;
+      // The backdrop/void walls of empty columns and the >1 m cutting faces are not lane
+      // geometry; they are the world border and the bank, and they are wanted.
+      const ySpan = Math.max(t.position[a + 1], t.position[b + 1], t.position[d + 1])
+        - Math.min(t.position[a + 1], t.position[b + 1], t.position[d + 1]);
+      let overVoid = false;
+      for (const p of [a, b, d]) {
+        if (world.columnTopQAt(Math.floor(t.position[p]), Math.floor(t.position[p + 2])) < 0) overVoid = true;
+      }
+      if (!(overVoid || ySpan > 1.5)) {
+      if (ny > 0.9 && band(t.position[a], t.position[a + 2], 0.2)
+        && band(t.position[b], t.position[b + 2], 0.2)
+        && band(t.position[d], t.position[d + 2], 0.2)) laneTopTris++;   // voxel top panel on the lane
+      // A riser 1 m clear of the carriageway edge is the blocky verge character and is
+      // wanted; a riser inside the lane is the stepped column fault the ribbon replaces.
+      if (ny < 0.5 && band(t.position[a], t.position[a + 2], 1.0)
+        && band(t.position[b], t.position[b + 2], 1.0)
+        && band(t.position[d], t.position[d + 2], 1.0)) laneRisers++;
+      }
+    }
+    const rb = ribbonChunk(world, road, cx, cz, index);
+    if (!rb) continue;
+    ribbonTris += rb.triangles; quads += rb.quads;
+    for (let v = 0; v < rb.verts; v++) {
+      verts++;
+      const x = rb.position[v * 3], y = rb.position[v * 3 + 1], z = rb.position[v * 3 + 2];
+      const nk = Math.round(x * 1e4) + '|' + Math.round(z * 1e4);
+      const prev = posMap.get(nk);
+      if (prev !== undefined) {
+        welded++;
+        const dn = Math.hypot(rb.normal[v * 3] - prev[0], rb.normal[v * 3 + 1] - prev[1], rb.normal[v * 3 + 2] - prev[2]);
+        if (dn > 1e-6) weldMiss++;
+      } else posMap.set(nk, [rb.normal[v * 3], rb.normal[v * 3 + 1], rb.normal[v * 3 + 2]]);
+      const top = bil(x, z);
+      if (top < -1e4) continue;                        // no ground to sit on
+      const over = y - top;
+      if (over > 0.002) { proud++; if (over > maxProud) maxProud = over; }
+      const i = road.nearest(x, z);
+      const d = (x - road.x[i]) * road.nx[i] + (z - road.z[i]) * road.nz[i];
+      const hw = road.width[i] / 2;
+      if (Math.abs(d) > hw + SHOULDER) {          // outer band: terrain faces still drawn
+        const own = world.columnTopQAt(Math.floor(x), Math.floor(z));
+        if (own >= 0 && y - own / 16 > 0.002) rimProud++;
+      } else {
+        let lo = 1e9, hi = -1e9;
+        for (let dz = 0; dz <= 1; dz++) {
+          for (let dx = 0; dx <= 1; dx++) {
+            const q = world.columnTopQAt(Math.floor(x) + dx, Math.floor(z) + dz) / 16;
+            if (q < lo) lo = q; if (q > hi) hi = q;
+          }
+        }
+        reliefSum += hi - lo; reliefN++;
+      }
+    }
+  }
+  // per lane sample: no step that the ground itself does not have
+  for (let i = 1; i < road.n; i++) {
+    const a = ribbonHeight(world, road, i - 1, 0), b = ribbonHeight(world, road, i, 0);
+    const ga = bil(road.x[i - 1], road.z[i - 1]), gb = bil(road.x[i], road.z[i]);
+    const st = Math.abs(b - a), gs = Math.abs(gb - ga);
+    if (st > maxStep) maxStep = st;
+    if (gs > maxGroundStep) maxGroundStep = gs;
+    if (st > gs + 0.08) extraSteps++;
+    coverWanted++;
+    const top = bil(road.x[i], road.z[i]);
+    if (top > -1e4) { const dev = top - b; coverDev += dev; if (dev >= RIBBON_DROP - 1e-6) cover++; }
+  }
+  if (laneTopTris) gaps.push(`${laneTopTris} voxel top panels still drawn inside the lane band`);
+  if (laneRisers) gaps.push(`${laneRisers} stepped column faces still drawn inside the lane band`);
+  if (proud) gaps.push(`${proud} ribbon vertices stand >2 mm above the terrain surface (max ${maxProud.toFixed(3)} m)`);
+  if (rimProud) gaps.push(`${rimProud} ribbon edge vertices stand >2 mm above the terrain column they overlap`);
+  if (weldMiss) gaps.push(`${weldMiss} shared chunk-border vertices disagree on the normal`);
+  if (welded < 400) gaps.push(`only ${welded} welded chunk-border vertices`);
+  if (extraSteps > coverWanted * 0.02) gaps.push(`${extraSteps} lane steps the ground does not have (maxStep ${maxStep.toFixed(3)} m, ground ${maxGroundStep.toFixed(3)} m)`);
+  if (cover < coverWanted * 0.98) gaps.push(`${coverWanted - cover} lane samples are not covered by the ribbon on the ground`);
+  if (!(quads > 4000 && verts > 4000)) gaps.push(`ribbon too small: ${quads} quads / ${verts} verts`);
+  if (!(STEP_ALONG === 1 && STEP_ACROSS === 0.5)) gaps.push(`ribbon grid ${STEP_ALONG}/${STEP_ACROSS} m, want 1.0 along / 0.5 across`);
+  check('T59 the lane is one continuous ribbon mesh, not stepped voxel columns: no voxel top face or riser is drawn inside the lane band, the 1 m x 0.5 m ribbon grid is welded across chunk borders, it never stands proud of the terrain top and adds no step along the lane the ground does not have',
+    gaps.length === 0,
+    `ribbon quads=${quads} verts=${verts} tris=${ribbonTris} | terrain tris=${terrainTris} | laneTopTris=${laneTopTris} laneRisers=${laneRisers} proud=${proud} rimProud=${rimProud} weld=${welded}/miss ${weldMiss} steps=${extraSteps} maxStep=${maxStep.toFixed(3)}/${maxGroundStep.toFixed(3)}m cover=${cover}/${coverWanted} meanDrop=${(coverDev / Math.max(1, coverWanted)).toFixed(3)}m laneRelief=${(reliefSum / Math.max(1, reliefN)).toFixed(3)}m grid=${STEP_ALONG}/${STEP_ACROSS} drop=${RIBBON_DROP} edge=${EDGE_BLOCK_BAND} wearMin=${LANE_WEAR_MIN} gaps=[${gaps.join(' ')}]`);
+}
+testRoadRibbonIsOneContinuousSurface();
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
