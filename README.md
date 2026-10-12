@@ -1,116 +1,107 @@
-# Voxel Rally
+# VOXEL RALLY
 
-A browser-based procedural rally sim built with Three.js (ES modules, no bundler
-required). Stages are time attacks against a clock and a ghost, not head-to-head
-racing: the surface is the main opponent, each of the four wheels gets its own
-load and slip, and the car visibly collects dirt according to what it drove on.
-Everything — terrain, road, car mesh, textures, dirt, sound — is generated from a
-seed in code; the repo contains no image, model or audio files.
+Colin McRae meets Minecraft: a chunky voxel rally time attack that runs
+in the browser. Pick a biome, a stage length and a seed, then drive a
+box-built rally car flat out through checkpoints against the clock and
+your own best time.
 
-Design inspiration and the three project pillars are in `PLAN.md` and
-`docs/01-design.md`.
+Everything is generated in code at boot from the stage seed. Terrain,
+road, textures, props, the car, the sky and even the engine sound are
+procedural. The repo contains no image, model or audio asset files.
 
 ## Run it
+
+There is no build step. Serve the folder with any static server and
+open `index.html`:
 
 ```
 npm run dev          # python3 -m http.server 8090
 ```
 
-then open `index.html` at http://localhost:8090/ . No build step; `index.html`
-carries the import map and `src/main.js` boots the stage.
+then visit http://localhost:8090/
 
-```
-npm test             # node src/debug/tests.js  (physics regression suite + determinism)
-npm run test:world   # node src/debug/tests.js world
-```
-
-Stage options are query parameters handled in `src/main.js`: `?seed=`,
-`?biome=`, `?car=`, `?len=`, `?surface=`, `?cam=`, `?tod=`, `?rain=`, `?q=`,
-`?post=0`, `?frames=`, `?stats=1`.
+Three.js is vendored under `vendor/` and wired up with an import map
+in `index.html`. No npm install is needed to play.
 
 ## Controls
 
-Verified against `src/game/input.js` and the `input.on(...)` block in `src/main.js`.
+Keyboard:
 
 | Key | Action |
 | --- | --- |
-| `W` / `↑` | throttle |
-| `S` / `↓` | brake |
-| `A` `D` / `←` `→` | steer left / right |
-| `Space` | handbrake |
-| `Q` / `E` | shift down / up |
-| `C` | cycle camera: CHASE → ONBOARD → BUMPER → FREE |
-| `H` | toggle debug HUD |
-| `N` | toggle rally HUD |
-| `M` | mute / unmute the co-driver voice |
-| `P` / `Esc` | pause |
-| `R` | restart the run |
-| `X` | wash the car (tyre rubber stays) |
-| `V` | wipe the camera lens |
-| `L` | cycle lens-dirt amount (0.45 → 0 → 1) |
-| `B` | toggle rain |
-| `F1` `F2` `F3` | difficulty NOVICE / RALLY / PRO |
-| `1` `2` `3` | quality preset LOW / MED / HIGH |
-| `Tab` / `Enter` | move focus in the menu / activate the menu item |
+| W / Up arrow | Accelerate |
+| S / Down arrow | Brake, reverse when stopped |
+| A D / Left Right arrows | Steer |
+| Space | Handbrake (drift) |
+| R | Reset to road (+5 s penalty) |
+| C | Camera: chase / hood |
+| M | Mute |
+| Esc | Pause |
 
-## How it is built
+### Mobile and touch
 
-- `src/core/` — fixed-step loop, time (`DT = 1/120 s`), math, seeded RNG,
-  settings, event bus.
-- `src/car/` — vehicle body, suspension, tyre, wheel, steering, differential,
-  powertrain, damage, raycast terrain contact.
-- `src/world/` — noise, terrain generation, palette, surface table, road spline,
-  road carve, chunks, mesher, streaming.
-- `src/render/` — renderer, lighting, primitives, car mesh, camera, lens dirt,
-  post composite.
-- `src/dirt/` — dirt map, per-panel dirt, emitters, wash, dirt lens.
-- `src/game/` — stage rules, timing, checkpoints/gates, ghost, pace notes,
-  co-driver voice, rally HUD, input.
-- `src/debug/` — on-screen HUD and the Node regression tests.
-- `src/audio/` — planned procedural audio; currently empty.
+The game is fully playable on a phone. Menus, stage and car select,
+settings, HUD, pause and results all use a responsive layout with big
+tap targets that fits a portrait phone screen (tested at 390 x 844)
+as well as desktop.
 
-Three.js r169 (MIT) is vendored at `vendor/three.module.js`, with
-`vendor/addons/OrbitControls.js` and `vendor/addons/mergeGeometries.js`. It is
-the only third-party dependency, and there are no binary assets of any kind.
+On touch devices, driving buttons appear automatically during a run:
 
-## Status
+- Left / right steer buttons, bottom left
+- Throttle and brake, bottom right
+- HB handbrake button
+- Pause and CAM (camera) buttons, top right
 
-Work in progress. `PLAN.md` §6 and `docs/07-roadmap.md` define phases F0–F7:
+Touch buttons feed the same input system as the keyboard, so the
+driving feel is identical. The canvas resizes on rotation and window
+resize, the pixel ratio is capped per quality setting, and phones
+default to Low quality on first run so the frame rate stays smooth
+(change it any time in Settings).
 
-- F0 bootstrap, F1 world + box-car driving, F2 per-wheel physics — implemented.
-- F3 dirt (map, panels, wash, lens) — implemented.
-- F4 rally loop (stage, timing, penalties, pace notes, ghost, rally HUD) —
-  implemented; `SYSTEM-NOTES.md` records its deviations.
-- F5 polish — partially present (`src/render/post.js`, rut/trace-related world
-  features); `src/audio/` is still empty, so the procedural engine/tyre/road
-  audio described in `docs/05-audio.md` is not there yet.
-- F6 content (8 stages, 4 cars, championship) and F7 hardening (gamepad,
-  accessibility, balance, long-session stability) — not finished, although the
-  LOW/MED/HIGH quality presets already exist.
+## The game
 
-Expect broken edges and unfinished systems; treat the repo as a sim under
-construction.
+- Three biomes: Forest (gravel and mud), Desert (packed dirt and
+  sand), Snow (packed snow road, very slippery off it).
+- Three stage lengths: Short, Medium, Long. The seed fully decides
+  the stage, so the same seed is the same rally for everyone.
+- Checkpoints with split times compared against your best, stored
+  per stage in `localStorage`.
+- Pace notes in the Colin McRae spirit: chevron boards at the road
+  side and a HUD call (direction plus severity 1 to 6) before corners.
+- Wrong way warning, stage progress bar, countdown start, results
+  screen with splits and a NEW BEST badge.
+- One car, three liveries with different tunes: Sunset Works
+  (balanced), Azure Racing (more grip), Volt GP (faster, driftier).
 
-## Physics
+## Surfaces matter
 
-`docs/02-physics.md` specifies the model: a rigid body (1240 kg, semi-implicit
-Euler) on four independent suspension arms whose normal load `N_i` is the only
-source of grip, plus a per-wheel tyre model, differential, powertrain and
-surface table, all run at a fixed `DT = 1/120 s`.
+Grip, drag and dust colour come from the surface under the car:
+tarmac grips, gravel slides, mud drags, deep snow bogs the car down.
+Staying on the road is the fast way, but cutting the grass on a tight
+hairpin is sometimes worth it. Usually not.
 
-`PHYSICS-NOTES.md` is the running record of where the code has departed from that
-document and why — e.g. solving the tyre slip/spin coupling implicitly instead of
-explicitly, allowing the strut to pull, the handbrake lever being re-sized, and a
-postmortem on `integrateQ` rotating the body about world axes while being fed
-body-frame rates — each entry backed by measurements from `tools/`.
+## Tests
 
-## Tools
+```
+npm test             # node tests/smoke.mjs
+```
 
-`tools/*.mjs` are headless harness scripts: they import the sim straight from
-`src/` (no renderer, no DOM) and drive it in Node, so physics can be validated
-without a browser. They cover parked-car traces and road-bed behaviour
-(`bed2..bed13`, `roadbed`, `place`), cornering and braking sweeps (`arc`, `arc2`,
-`turn*`, `brake`, `hb`, `spin`), whole-stage drive-throughs (`smoke`, `long`,
-`straight`), stability and energy diagnostics (`covar`, `grow`, `jac`, `stab`,
-`nan`, `intq`, `steptrace`) and dirt/road masking checks (`dirtmask`,
-`tile-tone`). `PHYSICS-NOTES.md` names which harness produced which measurement.
+The smoke suite checks the pure modules directly: stage generation
+is deterministic per seed, road heights are finite with sane grades,
+the mesher culls hidden faces versus a naive build, and the car
+physics steps 2000 times with mixed inputs without NaNs.
+
+## Code map
+
+- `src/world/stage.js` seeded stage generation (pure, no Three)
+- `src/world/mesher.js` chunk mesher with hidden face culling
+- `src/world/tiles.js` tile atlas ids and surface physics tables
+- `src/world/textures.js` canvas painted texture atlas
+- `src/car/physics.js` arcade car physics (pure, no Three)
+- `src/render/` voxel box builder, props, car mesh, sky, particles
+- `src/game/` WebAudio synth and input (keyboard + touch)
+- `src/main.js` game state machine, HUD, cameras, race logic
+- `DESIGN.md` short design notes for the v2 rebuild
+
+Three.js r169 (MIT) is vendored at `vendor/three.module.js` with
+addons under `vendor/addons/`. It is the only third-party dependency.
