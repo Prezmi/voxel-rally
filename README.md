@@ -1,13 +1,35 @@
 # VOXEL RALLY
 
 Colin McRae meets Minecraft: a chunky voxel rally time attack that runs
-in the browser. Pick a biome, a stage length and a seed, then drive a
-box-built rally car flat out through checkpoints against the clock and
-your own best time.
+in the browser. Drive a box-built rally car flat out through the
+classic championship stages, against the clock and your own best time.
 
-Everything is generated in code at boot from the stage seed. Terrain,
-road, textures, props, the car, the sky and even the engine sound are
-procedural. The repo contains no image, model or audio asset files.
+## The championship
+
+Eight named stages recreate the character of the classic Colin McRae
+Rally tests, each with a hand authored route, its own surfaces,
+scenery and light:
+
+| Stage | Country | Length | Character |
+| --- | --- | --- | --- |
+| Sweet Lamb | Wales, UK | 4.6 km | Mud and gravel, tight forest, overcast, puddles |
+| Ouninpohja | Finland | 6.1 km | Flat out gravel, endless crests, lakes, golden hour |
+| Acropolis | Greece | 4.6 km | Rocky switchbacks and hairpins, harsh sun |
+| Col de Turini | Monte Carlo | 3.6 km | Tarmac hairpin stacks, ice on shaded corners, stone walls |
+| Safari | Kenya | 7.2 km | Very fast red dirt across open savanna |
+| Vargasen | Sweden | 5.6 km | Snow, snow banks, fast sweeping corners |
+| Mineshaft | Australia | 4.4 km | Red gravel over crests, eucalyptus |
+| Whaanga Coast | New Zealand | 4.8 km | Flowing cambered gravel, green hills |
+
+Checkpoints sit every 400 to 700 m (a 6 km stage has about 11), splits
+compare against your saved best per stage, and the results screen
+lists every split. A Free Play mode still builds random seeded stages
+(2.4 / 4 / 6 km) in forest, desert and snow, and every stage can be
+run at Day, Golden Hour, Dusk or Overcast.
+
+Everything is generated in code at boot. Terrain, road, textures,
+props, the car, the sky and even the engine sound are procedural. The
+repo contains no image, model or audio asset files.
 
 ## Run it
 

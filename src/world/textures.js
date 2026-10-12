@@ -22,12 +22,21 @@ function painters() {
   };
 
   P[TILE.GRASS] = (c, r) => {
-    base(c, '#67a047', r, ['#578a3a', '#77b355', '#4c7d33', '#86c064']);
+    base(c, '#67a047', r, ['#578a3a', '#77b355', '#4c7d33', '#86c064'], 620, 0.18);
     c.strokeStyle = 'rgba(60,110,40,0.5)';
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 90; i++) {
       const x = r() * TS, y = r() * TS;
       c.beginPath(); c.moveTo(x, y); c.lineTo(x + (r() - 0.5) * 2, y - 3 - r() * 3); c.stroke();
     }
+    // Sparse wild flowers.
+    for (let i = 0; i < 7; i++) {
+      c.fillStyle = ['#f5e97a', '#ffffff', '#e88bb0'][Math.floor(r() * 3)];
+      const x = r() * TS, y = r() * TS;
+      c.fillRect(x, y, 2.4, 2.4); c.fillRect(x - 1.6, y + 0.6, 1.4, 1.4); c.fillRect(x + 2.2, y + 0.6, 1.4, 1.4);
+    }
+    // Bare earth flecks.
+    c.fillStyle = 'rgba(122,90,56,0.35)';
+    for (let i = 0; i < 5; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 3 + r() * 5, 2 + r() * 3, r() * 3, 0, 7); c.fill(); }
   };
   P[TILE.GRASS_SIDE] = (c, r) => {
     base(c, '#7a5a38', r, ['#6b4e2f', '#8a683f', '#5d4429']);
@@ -37,24 +46,40 @@ function painters() {
     c.fillStyle = '#578a3a'; c.fillRect(0, 0, TS, 7);
   };
   P[TILE.DIRT] = (c, r) => {
-    base(c, '#8a6a42', r, ['#77572f', '#9c7c4e', '#6b4e2f']);
+    base(c, '#8a6a42', r, ['#77572f', '#9c7c4e', '#6b4e2f'], 520, 0.18);
     c.fillStyle = 'rgba(90,70,45,0.6)';
     for (let i = 0; i < 12; i++) { c.beginPath(); c.arc(r() * TS, r() * TS, 2 + r() * 3, 0, 7); c.fill(); }
+    // Embedded stones and a pale worn band.
+    c.fillStyle = 'rgba(200,185,160,0.5)';
+    for (let i = 0; i < 26; i++) c.fillRect(r() * TS, r() * TS, 2.5, 2);
+    c.fillStyle = 'rgba(255,240,210,0.07)';
+    c.fillRect(0, 44, TS, 40);
   };
   P[TILE.GRAVEL] = (c, r) => {
     c.fillStyle = '#8f8b82'; c.fillRect(0, 0, TS, TS);
     const shades = ['#7c786f', '#a3a099', '#6e6a62', '#b0aca2', '#948f85'];
-    for (let i = 0; i < 260; i++) {
+    for (let i = 0; i < 420; i++) {
       c.fillStyle = shades[Math.floor(r() * shades.length)];
       c.globalAlpha = 0.85;
       c.beginPath(); c.ellipse(r() * TS, r() * TS, 2 + r() * 4, 1.5 + r() * 3, r() * 3, 0, 7); c.fill();
     }
     c.globalAlpha = 1;
+    // Darker swept line and loose edges: reads as a used rally road.
+    c.fillStyle = 'rgba(60,56,50,0.13)';
+    c.fillRect(0, 50, TS, 28);
+    c.fillStyle = 'rgba(255,250,240,0.10)';
+    for (let i = 0; i < 30; i++) c.fillRect(r() * TS, r() * 12, 3, 2);
   };
   P[TILE.MUD] = (c, r) => {
-    base(c, '#5f4630', r, ['#513b28', '#6e543a'], 300, 0.2);
+    base(c, '#5f4630', r, ['#513b28', '#6e543a', '#48351f'], 300, 0.2);
     c.fillStyle = 'rgba(40,28,18,0.55)';
     for (let i = 0; i < 8; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 8 + r() * 16, 5 + r() * 8, r() * 3, 0, 7); c.fill(); }
+    // Wet tyre ruts and standing water sheen.
+    c.fillStyle = 'rgba(30,20,12,0.5)';
+    c.fillRect(24, 0, 15, TS); c.fillRect(88, 0, 15, TS);
+    c.fillStyle = 'rgba(168,188,205,0.30)';
+    c.fillRect(27, 0, 4, TS); c.fillRect(91, 0, 4, TS);
+    for (let i = 0; i < 4; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 7 + r() * 10, 4 + r() * 5, 0, 0, 7); c.fill(); }
   };
   P[TILE.ROCK] = (c, r) => {
     base(c, '#8d8d90', r, ['#7a7a7e', '#9d9da0', '#6e6e72'], 260, 0.2);
@@ -92,7 +117,25 @@ function painters() {
     base(c, '#c9d6e4', r, ['#b8c9da', '#dbe6f0']);
     c.fillStyle = '#f6fafc'; c.fillRect(0, 0, TS, 22);
   };
-  P[TILE.TARMAC] = (c, r) => base(c, '#43464a', r, ['#3a3d40', '#4e5154', '#33363a'], 520, 0.14);
+  P[TILE.TARMAC] = (c, r) => {
+    base(c, '#43464a', r, ['#3a3d40', '#4e5154', '#33363a'], 620, 0.15);
+    // Cracks, tar patches and oil stains: an old mountain road.
+    c.strokeStyle = 'rgba(20,21,24,0.55)'; c.lineWidth = 1.6;
+    for (let i = 0; i < 5; i++) {
+      c.beginPath();
+      let x = r() * TS, y = r() * TS;
+      c.moveTo(x, y);
+      for (let k = 0; k < 4; k++) { x += (r() - 0.5) * 34; y += (r() - 0.5) * 34; c.lineTo(x, y); }
+      c.stroke();
+    }
+    c.fillStyle = 'rgba(28,29,32,0.5)';
+    for (let i = 0; i < 3; i++) c.fillRect(r() * TS * 0.8, r() * TS * 0.8, 18 + r() * 22, 12 + r() * 14);
+    c.fillStyle = 'rgba(15,15,18,0.35)';
+    for (let i = 0; i < 4; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 5 + r() * 9, 3 + r() * 5, r() * 3, 0, 7); c.fill(); }
+    // Faded edge paint.
+    c.fillStyle = 'rgba(232,230,223,0.5)';
+    c.fillRect(3, 0, 4, TS); c.fillRect(TS - 7, 0, 4, TS);
+  };
   P[TILE.TARMAC_LINE] = (c, r) => {
     P[TILE.TARMAC](c, r);
     c.fillStyle = '#e8e6df';
@@ -245,6 +288,91 @@ function painters() {
     c.fillStyle = 'rgba(0,0,0,0.85)';
     c.font = 'bold 44px Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
     void r;
+  };
+  P[TILE.ICE] = (c, r) => {
+    base(c, '#cfe2ee', r, ['#bdd5e6', '#e2eef6', '#aecadb'], 260, 0.22);
+    const g = c.createLinearGradient(0, 0, TS, TS);
+    g.addColorStop(0, 'rgba(255,255,255,0.35)'); g.addColorStop(0.5, 'rgba(255,255,255,0)');
+    g.addColorStop(1, 'rgba(140,170,200,0.25)');
+    c.fillStyle = g; c.fillRect(0, 0, TS, TS);
+    c.strokeStyle = 'rgba(240,250,255,0.8)'; c.lineWidth = 1.4;
+    for (let i = 0; i < 6; i++) {
+      c.beginPath();
+      let x = r() * TS, y = r() * TS;
+      c.moveTo(x, y);
+      for (let k = 0; k < 3; k++) { x += (r() - 0.5) * 44; y += (r() - 0.5) * 44; c.lineTo(x, y); }
+      c.stroke();
+    }
+    // Dark tarmac ghosts through the ice.
+    c.fillStyle = 'rgba(60,70,80,0.18)';
+    c.fillRect(0, 52, TS, 24);
+  };
+  P[TILE.DRY_GRASS] = (c, r) => {
+    base(c, '#b3a05e', r, ['#a08c4c', '#c2b06c', '#8f7c40'], 520, 0.16);
+    c.strokeStyle = 'rgba(140,120,60,0.6)';
+    for (let i = 0; i < 110; i++) {
+      const x = r() * TS, y = r() * TS;
+      c.beginPath(); c.moveTo(x, y); c.lineTo(x + (r() - 0.5) * 3, y - 2 - r() * 4); c.stroke();
+    }
+    c.fillStyle = 'rgba(150,110,70,0.3)';
+    for (let i = 0; i < 6; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 4 + r() * 6, 2 + r() * 3, r() * 3, 0, 7); c.fill(); }
+  };
+  P[TILE.RED_DIRT] = (c, r) => {
+    base(c, '#a4502f', r, ['#93452a', '#b55d38', '#8a3e24'], 560, 0.18);
+    c.fillStyle = 'rgba(230,190,150,0.4)';
+    for (let i = 0; i < 30; i++) c.fillRect(r() * TS, r() * TS, 2.5, 2);
+    // Corrugations, the outback classic.
+    c.fillStyle = 'rgba(70,30,16,0.16)';
+    for (let y = 4; y < TS; y += 11) c.fillRect(0, y, TS, 3);
+    c.fillStyle = 'rgba(255,220,190,0.10)';
+    c.fillRect(0, 46, TS, 34);
+  };
+  P[TILE.POST] = (c, r) => {
+    c.fillStyle = '#e8e6df'; c.fillRect(0, 0, TS, TS);
+    c.fillStyle = '#d23a2a';
+    for (let y = -TS; y < TS * 2; y += 44) {
+      c.beginPath();
+      c.moveTo(0, y); c.lineTo(TS, y + TS * 0.55); c.lineTo(TS, y + TS * 0.55 + 22); c.lineTo(0, y + 22);
+      c.fill();
+    }
+    base(c, 'rgba(0,0,0,0)', r, ['#c9c5ba', '#f4f2ec'], 120, 0.12);
+  };
+  P[TILE.TAPE] = (c, r) => {
+    c.fillStyle = '#ff5a1f'; c.fillRect(0, 0, TS, TS);
+    c.fillStyle = '#ffffff';
+    c.font = 'bold 30px Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    for (let x = 16; x < TS; x += 42) c.fillRect(x, TS / 2 - 9, 22, 18);
+    void r;
+  };
+  P[TILE.PUDDLE] = (c, r) => {
+    const g = c.createLinearGradient(0, 0, TS, TS);
+    g.addColorStop(0, '#7d99ad'); g.addColorStop(0.45, '#4d6a80'); g.addColorStop(1, '#6d8aa0');
+    c.fillStyle = g; c.fillRect(0, 0, TS, TS);
+    c.fillStyle = 'rgba(255,255,255,0.4)';
+    c.beginPath(); c.moveTo(14, TS); c.lineTo(56, 0); c.lineTo(76, 0); c.lineTo(34, TS); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.2)';
+    for (let i = 0; i < 5; i++) { c.beginPath(); c.ellipse(r() * TS, r() * TS, 6 + r() * 10, 2 + r() * 3, 0, 0, 7); c.fill(); }
+  };
+  P[TILE.HIVIS] = (c, r) => {
+    base(c, '#d8e021', r, ['#c3cb1a', '#e8ec40'], 140, 0.12);
+    c.fillStyle = '#c0c6cc'; c.fillRect(0, 52, TS, 12); c.fillRect(0, 84, TS, 10);
+    c.fillStyle = 'rgba(0,0,0,0.12)'; c.fillRect(0, 0, TS, 8);
+  };
+  P[TILE.SCRUB] = (c, r) => {
+    base(c, '#9a8f66', r, ['#8a7f58', '#aa9f74', '#7d724e'], 420, 0.16);
+    c.fillStyle = 'rgba(110,105,80,0.55)';
+    for (let i = 0; i < 26; i++) { c.beginPath(); c.arc(r() * TS, r() * TS, 2 + r() * 4, 0, 7); c.fill(); }
+    c.fillStyle = 'rgba(90,95,60,0.6)';
+    for (let i = 0; i < 34; i++) c.fillRect(r() * TS, r() * TS, 3, 4);
+    c.fillStyle = 'rgba(200,190,160,0.35)';
+    for (let i = 0; i < 20; i++) c.fillRect(r() * TS, r() * TS, 2.5, 2);
+  };
+  P[TILE.FLOWER] = (c, r) => {
+    base(c, '#5d9440', r, ['#4f8434', '#6ca34e'], 200, 0.14);
+    for (let i = 0; i < 26; i++) {
+      c.fillStyle = ['#e84f7a', '#f5e97a', '#ffffff', '#b678e8'][Math.floor(r() * 4)];
+      c.fillRect(r() * TS, r() * TS, 3, 3);
+    }
   };
   return P;
 }

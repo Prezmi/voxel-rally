@@ -43,6 +43,15 @@ export const TILE = {
   LEAF_AUTUMN: 34,
   METAL: 35,
   SNOW_TREE: 36,
+  ICE: 37,
+  DRY_GRASS: 38,
+  RED_DIRT: 39,
+  POST: 40,
+  TAPE: 41,
+  PUDDLE: 42,
+  HIVIS: 43,
+  SCRUB: 44,
+  FLOWER: 45,
 };
 
 // UV rect for a tile. Canvas row 0 is the TOP of the image; with the
@@ -71,18 +80,24 @@ export const SURFACE = {
   SNOW: 7,
   PACKED_SNOW: 8,
   ROCK: 9,
+  ICE: 10,
+  RED_DIRT: 11,
+  DRY: 12,
+  SCRUB: 13,
 };
 
 // Lateral grip multiplier per surface.
-export const SURFACE_GRIP = [1.0, 1.0, 0.8, 0.72, 0.6, 0.5, 0.52, 0.4, 0.62, 0.78];
+export const SURFACE_GRIP = [1.0, 1.0, 0.8, 0.72, 0.6, 0.5, 0.52, 0.4, 0.62, 0.78, 0.34, 0.74, 0.58, 0.55];
 // Extra rolling drag (1/s velocity damping) per surface.
-export const SURFACE_DRAG = [0.12, 0.12, 0.3, 0.42, 0.65, 0.85, 0.95, 0.8, 0.4, 0.35];
+export const SURFACE_DRAG = [0.12, 0.12, 0.3, 0.42, 0.65, 0.85, 0.95, 0.8, 0.4, 0.35, 0.1, 0.4, 0.7, 0.75];
 // Dust/spray tint per surface for the particle system.
 export const SURFACE_DUST = [
   0x8a8d90, 0x8a8d90, 0xa79a83, 0x8a6f4d, 0x6f9e4a, 0x6e5136,
-  0xd9bd8a, 0xffffff, 0xeef2f5, 0x9a958c,
+  0xd9bd8a, 0xffffff, 0xeef2f5, 0x9a958c, 0xdfe9f2, 0xa8502f,
+  0xc9b06a, 0xa89a72,
 ];
 
 export const isRoadSurface = (s) =>
   s === SURFACE.TARMAC || s === SURFACE.TARMAC_LINE ||
-  s === SURFACE.GRAVEL || s === SURFACE.DIRT || s === SURFACE.PACKED_SNOW;
+  s === SURFACE.GRAVEL || s === SURFACE.DIRT || s === SURFACE.PACKED_SNOW ||
+  s === SURFACE.ICE || s === SURFACE.RED_DIRT;
