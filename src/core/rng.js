@@ -1,52 +1,59 @@
-// Deterministic RNG: mulberry32. Separate named streams so world/fx/audio never
-// perturb the sim stream (docs/06 §1: determinism).
+// Seeded RNG + deterministic value noise. Pure module: no DOM, no THREE.
+// Everything procedural in Voxel Rally flows from these so a seed always
+// rebuilds the exact same stage.
+
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-export class Rng {
-  constructor(seed) {
-    this.seed = seed >>> 0;
-    this._f = mulberry32(this.seed);
-  }
-  next() { return this._f(); }
-  range(a, b) { return a + (b - a) * this._f(); }
-  int(a, b) { return Math.floor(a + (b - a + 1) * this._f()); }
-  sign() { return this._f() < 0.5 ? -1 : 1; }
-  pick(arr) { return arr[Math.floor(this._f() * arr.length) % arr.length]; }
-  /** Sample from a weighted table: [[value, weight], ...] */
-  weighted(table) {
-    let total = 0;
-    for (const [, w] of table) total += w;
-    let r = this._f() * total;
-    for (const [v, w] of table) { r -= w; if (r <= 0) return v; }
-    return table[table.length - 1][0];
-  }
-  /** Approx normal via sum of 3 uniforms, mapped through erf-ish. */
-  gauss() { return (this._f() + this._f() + this._f() - 1.5) * 1.1547; }
-}
-
-/** The four streams used by the game (docs/06 §1). */
-export function makeStreams(seed) {
-  const s = seed >>> 0;
-  return {
-    sim: new Rng(s ^ 0x9e3779b9),
-    world: new Rng(s ^ 0x85ebca6b),
-    fx: new Rng(s ^ 0xc2b2ae35),
-    audio: new Rng(s ^ 0x27d4eb2f),
-  };
-}
-
+// Integer lattice hash -> [0,1). Stable across runs and platforms.
 export function hash2(x, y, seed) {
-  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 2246822519)) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  let h = seed >>> 0;
+  h = Math.imul(h ^ Math.imul(x | 0, 0x27d4eb2d), 0x165667b1);
+  h = Math.imul(h ^ Math.imul(y | 0, 0x9e3779b1), 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
   h ^= h >>> 16;
   return (h >>> 0) / 4294967296;
 }
+
+const smooth = (t) => t * t * (3 - 2 * t);
+
+// Smooth value noise over a seeded lattice.
+export function makeNoise2D(seed) {
+  return function noise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const a = hash2(xi, yi, seed);
+    const b = hash2(xi + 1, yi, seed);
+    const c = hash2(xi, yi + 1, seed);
+    const d = hash2(xi + 1, yi + 1, seed);
+    const u = smooth(xf), v = smooth(yf);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  };
+}
+
+// Fractal Brownian motion, returns roughly [0,1].
+export function fbm(noise, x, y, octaves = 4) {
+  let amp = 0.5, freq = 1, sum = 0, norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * noise(x * freq, y * freq);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.03;
+  }
+  return sum / norm;
+}
+
+export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+export const lerp = (a, b, t) => a + (b - a) * t;
+export const smoothstep = (a, b, x) => {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};

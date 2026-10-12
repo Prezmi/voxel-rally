@@ -1,137 +1,366 @@
 <!doctype html>
-<html lang="pl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- maximum-scale=1 + user-scalable=no: two thumbs on the touch overlay must never pinch-zoom
-     or double-tap-zoom the page. viewport-fit=cover keeps the safe-area probes honest. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>VOXEL RALLY</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  /* Page-level anti-zoom / anti-pan (phone). Declared on html+body, NOT only on the
-     touch overlay: a pinch that starts on the canvas or a two-thumb press must not
-     pan, rubber-band, pull-to-refresh or scroll the document, and a long press must
-     not offer copy/select. `position: fixed` + a height lock makes scrolling
-     impossible outright, so the browser chrome cannot slide back in mid-run. */
-  html {
-    height: 100%; overflow: hidden; background: #0b0d10;
-    /* the long-press selection popup is offered by the ROOT element: the callout /
-       user-select rules have to be on html itself, not only on body and the children. */
-    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
-    -webkit-user-drag: none;
-    touch-action: none; overscroll-behavior: none;
+  :root {
+    color-scheme: dark;
+    --accent: #ffb400;
+    --red: #e8442e;
+    --panel: rgba(12, 15, 21, 0.88);
+    --line: #2a3040;
   }
-  body {
-    position: fixed; inset: 0; width: 100%; height: 100%; max-height: 100%;
-    margin: 0; padding: 0; overflow: hidden; background: #0b0d10;
-    touch-action: none; overscroll-behavior: none;
-    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; overflow: hidden; background: #0b0e13;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; touch-action: none; overscroll-behavior: none;
   }
-  #c {
-    display: block; width: 100vw; height: 100vh;
-    touch-action: none; overscroll-behavior: none;
-    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+
+  /* ---------- generic panels & buttons ---------- */
+  .screen {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    flex-direction: column; align-items: flex-start; justify-content: center;
+    padding: 4vh 5vw; pointer-events: none;
   }
-  /* DEV overlay (physics read-out, key H) — deliberately a different animal from the
-     game HUD: monospace, hairline dashed frame, its own label, dimmer, z-order under
-     #rally, so a screenshot can never be read as "the game UI is a text wall". */
-  #hud {
-    position: fixed; inset: 0; pointer-events: none; z-index: 2; display: none;
-    font: 11px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    color: #8fa3b0; text-shadow: 0 1px 2px rgba(0,0,0,.85);
+  .screen.on { display: flex; }
+  .panel {
+    pointer-events: auto; background: var(--panel);
+    border: 3px solid #000; box-shadow: 8px 8px 0 rgba(0,0,0,0.45), inset 0 0 0 2px var(--line);
+    padding: 22px 26px; max-width: min(560px, 92vw); max-height: 92vh; overflow-y: auto;
   }
-  #hud .panel {
-    position: absolute; padding: 8px 10px; border-radius: 2px;
-    background: rgba(6,8,10,.42); border: 1px dashed rgba(255,138,92,.35);
-    white-space: pre; max-width: 34vw;
+  .btn {
+    pointer-events: auto; display: block; width: 100%; text-align: left;
+    font-family: "Arial Black", "Segoe UI", sans-serif; font-size: 19px; letter-spacing: 0.06em;
+    color: #f2f4f7; background: #1b212e; border: 3px solid #000;
+    box-shadow: 4px 4px 0 rgba(0,0,0,0.5), inset 0 0 0 2px var(--line);
+    padding: 12px 16px; margin: 9px 0; cursor: pointer; text-transform: uppercase;
   }
-  #hud .panel::before {
-    content: "DEV · FIZYKA"; display: block; margin-bottom: 4px;
-    color: #ff8a5c; letter-spacing: .18em; font-size: 9px;
+  .btn:hover, .btn:focus-visible { background: #28303f; transform: translate(-1px, -1px); box-shadow: 5px 5px 0 rgba(0,0,0,0.5), inset 0 0 0 2px var(--line); outline: none; }
+  .btn:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 rgba(0,0,0,0.5); }
+  .btn.primary { background: var(--accent); color: #191204; box-shadow: 4px 4px 0 rgba(0,0,0,0.55), inset 0 0 0 2px #7a5600; }
+  .btn.primary:hover { background: #ffc233; }
+  .btn.small { font-size: 14px; padding: 8px 12px; width: auto; display: inline-block; }
+  .btn.ghost { background: transparent; box-shadow: none; border-color: transparent; color: #9fb2c8; }
+  .btn.ghost:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  h2.title {
+    font-family: "Arial Black", sans-serif; font-size: 30px; letter-spacing: 0.04em;
+    color: #fff; text-transform: uppercase; margin-bottom: 6px;
+    text-shadow: 3px 3px 0 rgba(0,0,0,0.6);
   }
-  #hud-tl { top: 10px; left: 10px; }
-  #hud-tr { top: 10px; right: 10px; text-align: right; }
-  #hud-bl { bottom: 10px; left: 10px; }
-  #hud-br { bottom: 10px; right: 10px; text-align: right; }
-  /* The DEV read-out is opt-in: src/debug/hud.js adds .on (?debug=1 or key H), so it
-     is never in the way of the pixel strip or a touch pad by default. On a phone it
-     keeps to the upper half for the same reason. */
+  .sub { color: #9fb2c8; font-size: 14px; margin-bottom: 14px; }
+
+  /* ---------- logo ---------- */
+  #logo { pointer-events: none; margin-bottom: 26px; }
+  #logo .vox {
+    font-family: "Arial Black", sans-serif; font-size: clamp(44px, 9vw, 96px); line-height: 0.92;
+    color: #fff; letter-spacing: 0.01em;
+    text-shadow: 0 4px 0 #3c4657, 0 8px 0 rgba(0,0,0,0.45), 6px 10px 24px rgba(0,0,0,0.5);
+  }
+  #logo .ral {
+    font-family: "Arial Black", sans-serif; font-size: clamp(44px, 9vw, 96px); line-height: 0.92;
+    color: var(--accent);
+    text-shadow: 0 4px 0 #7a5600, 0 8px 0 rgba(0,0,0,0.45), 6px 10px 24px rgba(0,0,0,0.5);
+  }
+  #logo .tag { color: #dfe7ef; font-size: clamp(13px, 2vw, 17px); letter-spacing: 0.34em; margin-top: 10px; text-transform: uppercase; text-shadow: 2px 2px 0 rgba(0,0,0,0.7); }
+  .cubes { display: flex; gap: 7px; margin-bottom: 14px; }
+  .cubes i { width: 17px; height: 17px; display: block; border: 2px solid rgba(0,0,0,0.55); box-shadow: inset -4px -4px 0 rgba(0,0,0,0.22), inset 3px 3px 0 rgba(255,255,255,0.25); }
+
+  /* ---------- option cards ---------- */
+  .cards { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 4px; }
+  .card {
+    pointer-events: auto; flex: 1 1 120px; min-width: 118px; cursor: pointer;
+    background: #171d29; border: 3px solid #000; box-shadow: inset 0 0 0 2px var(--line);
+    padding: 12px; color: #dfe7ef;
+  }
+  .card:hover { background: #202839; }
+  .card.sel { box-shadow: inset 0 0 0 3px var(--accent); background: #232c3d; }
+  .card .nm { font-family: "Arial Black", sans-serif; font-size: 16px; color: #fff; text-transform: uppercase; }
+  .card .ds { font-size: 12px; color: #9fb2c8; margin-top: 4px; line-height: 1.45; }
+  .card .sw { height: 26px; border: 2px solid #000; margin-bottom: 9px; box-shadow: inset -6px -6px 0 rgba(0,0,0,0.25), inset 4px 4px 0 rgba(255,255,255,0.22); }
+  .seg { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+  .seg button {
+    pointer-events: auto; flex: 1; min-width: 84px; cursor: pointer;
+    font-family: "Arial Black", sans-serif; font-size: 14px; text-transform: uppercase;
+    color: #cfd9e5; background: #171d29; border: 3px solid #000; box-shadow: inset 0 0 0 2px var(--line);
+    padding: 9px 6px;
+  }
+  .seg button.sel { box-shadow: inset 0 0 0 3px var(--accent); color: #fff; background: #232c3d; }
+  .lbl { font-family: "Arial Black", sans-serif; font-size: 13px; letter-spacing: 0.14em; color: var(--accent); text-transform: uppercase; margin-top: 16px; }
+  .stat { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #9fb2c8; margin-top: 6px; }
+  .stat .bar { flex: 1; height: 9px; background: #0d1016; border: 1px solid #000; box-shadow: inset 0 0 0 1px var(--line); }
+  .stat .bar i { display: block; height: 100%; background: var(--accent); }
+  .best-line { color: #ffd34d; font-size: 13px; margin-top: 8px; min-height: 16px; }
+  .seedrow { display: flex; align-items: center; gap: 10px; margin-top: 6px; color: #dfe7ef; font-size: 15px; }
+  .seedrow b { color: #fff; font-size: 18px; letter-spacing: 0.08em; }
+  table.controls { border-collapse: collapse; margin-top: 6px; }
+  table.controls td { padding: 5px 14px 5px 0; font-size: 14px; color: #dfe7ef; }
+  table.controls td:first-child {
+    font-family: "Arial Black", sans-serif; color: #fff; font-size: 12px;
+    background: #1b212e; border: 2px solid #000; box-shadow: inset 0 0 0 1px var(--line);
+    padding: 5px 9px; text-align: center; white-space: nowrap;
+  }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; display: none; }
   #hud.on { display: block; }
-  @media (max-width: 760px), (max-height: 620px) {
-    #hud { font-size: 10px; }
-    #hud .panel { max-width: 46vw; padding: 6px 8px; }
-    #hud-bl, #hud-br { bottom: auto; top: 46vh; }
-    #hud-br { text-align: left; }
+  #hud-progress { position: absolute; top: 0; left: 0; right: 0; height: 12px; background: rgba(8,10,14,0.72); border-bottom: 2px solid #000; }
+  #progress-fill { height: 100%; width: 0%; background: repeating-linear-gradient(45deg, var(--accent) 0 14px, #d99a00 14px 28px); transition: width 0.2s linear; }
+  #hud-cp { position: absolute; top: 17px; left: 50%; transform: translateX(-50%); color: #dfe7ef; font-size: 13px; letter-spacing: 0.22em; text-shadow: 2px 2px 0 rgba(0,0,0,0.8); }
+  #hud-time { position: absolute; top: 16px; left: 18px; color: #fff; }
+  #hud-time .now { font-family: "Arial Black", sans-serif; font-size: 30px; text-shadow: 3px 3px 0 rgba(0,0,0,0.65); }
+  #hud-time .best { font-size: 13px; color: #ffd34d; text-shadow: 1px 1px 0 rgba(0,0,0,0.8); }
+  #hud-speed { position: absolute; right: 22px; bottom: 20px; text-align: right; color: #fff; }
+  #hud-speed .num { font-family: "Arial Black", sans-serif; font-size: 62px; line-height: 0.95; text-shadow: 4px 4px 0 rgba(0,0,0,0.55); }
+  #hud-speed .unit { font-size: 15px; letter-spacing: 0.3em; color: var(--accent); text-shadow: 1px 1px 0 rgba(0,0,0,0.8); }
+  #hud-speed .surf { font-size: 12px; color: #ffb0a0; letter-spacing: 0.18em; margin-top: 3px; min-height: 14px; text-shadow: 1px 1px 0 rgba(0,0,0,0.8); }
+  #pace {
+    position: absolute; right: 24px; top: 34%; text-align: center; color: #fff; display: none;
+    background: rgba(10,12,17,0.55); border: 3px solid #000; box-shadow: inset 0 0 0 2px var(--line); padding: 8px 14px;
   }
-  /* Rally HUD — Colin McRae Rally OBJECTS drawn in Minecraft's VISUAL LANGUAGE
-     (PLAN.md §10 + §10.1). The whole HUD is one canvas drawn with integer coordinates
-     and nearest-neighbour scaling: no gradients, no blur, no rounded corners, no alpha
-     panels, no CSS filter, no system font. Layout stays anchor-based (corners), the
-     canvas is a whole-integer upscale of a logical GUI buffer and every panel honours
-     the safe area (skills/game-ui-ux #1-#3): the insets are read from #rly-safe. */
-  #rally {
-    position: fixed; inset: 0; pointer-events: none; z-index: 5;
-    touch-action: none; overscroll-behavior: none;
-    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+  #pace .arr { font-size: 34px; line-height: 1; color: var(--accent); text-shadow: 2px 2px 0 rgba(0,0,0,0.7); }
+  #pace .sev { font-family: "Arial Black", sans-serif; font-size: 22px; text-shadow: 2px 2px 0 rgba(0,0,0,0.7); }
+  #pace .dist { font-size: 12px; color: #cfd9e5; }
+  #banner {
+    position: absolute; top: 24%; left: 50%; transform: translateX(-50%) scale(1);
+    font-family: "Arial Black", sans-serif; font-size: clamp(26px, 5.4vw, 46px); color: #fff;
+    text-shadow: 4px 4px 0 rgba(0,0,0,0.6); letter-spacing: 0.05em; display: none; text-align: center; white-space: nowrap;
   }
-  #rally .rly-canvas {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    image-rendering: pixelated; image-rendering: crisp-edges;
+  #banner small { display: block; font-size: 0.52em; margin-top: 4px; }
+  #banner .good { color: #51e07a; }
+  #banner .bad { color: #ff6a55; }
+  #wrongway {
+    position: absolute; top: 38%; left: 50%; transform: translateX(-50%);
+    font-family: "Arial Black", sans-serif; font-size: 30px; color: #ff5147; display: none;
+    text-shadow: 3px 3px 0 rgba(0,0,0,0.7); animation: blink 0.5s steps(2) infinite;
   }
-  /* safe-area probe: the HUD reads its insets from this element's computed padding */
-  #rly-safe {
-    position: fixed; top: 0; left: 0; width: 0; height: 0; pointer-events: none;
-    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
-             env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  @keyframes blink { 50% { opacity: 0.15; } }
+  #countdown {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    font-family: "Arial Black", sans-serif; font-size: clamp(90px, 22vw, 210px); color: #fff;
+    text-shadow: 0 6px 0 #7a5600, 0 12px 0 rgba(0,0,0,0.4);
   }
-  /* Screen-state stack (skill #5): the modal owns focus. Its text is pixel-drawn on the
-     canvas; these DOM rows are the keyboard/gamepad/mouse focus targets, laid over the
-     drawn rows, so the menu never needs a system font. */
-  #rally .rly-modal { position: absolute; inset: 0; display: none; pointer-events: none; touch-action: manipulation; }
-  #rally .rly-modal.open { display: block; pointer-events: auto; }
-  /* Hit area of a menu row. The visible button is pixel-drawn on the canvas; this DOM
-     box is the touch/mouse target and is never smaller than 72 CSS px in either axis
-     (WCAG 2.5.5), so on a phone the drawn row is centred inside a taller box. */
-  #rally .menu-item {
-    position: absolute; padding: 0; border: 0; background: none;
-    min-width: 72px; min-height: 72px;
-    -webkit-user-select: none; user-select: none; -webkit-user-drag: none;
-    font-size: 1px; line-height: 1px; color: transparent; cursor: pointer;
-    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  #toast {
+    position: absolute; bottom: 112px; left: 50%; transform: translateX(-50%);
+    background: rgba(10,12,17,0.8); color: #ffd34d; border: 2px solid #000;
+    padding: 7px 16px; font-size: 15px; display: none; letter-spacing: 0.06em;
   }
-  #rally .menu-item.off { display: none; }
-  /* Visible focus is drawn by the canvas (a blue ring inside the raised row): the DOM
-     box is a >= 72 CSS px hit target and is taller than the drawn row, so a DOM
-     outline here would ring the neighbour row instead. */
-  #rally .menu-item.focus { outline: none; }
-  #boot {
-    position: fixed; inset: 0; display: grid; place-items: center;
-    font: 14px/1.5 ui-monospace, monospace; color: #9fb0ba; background: #0b0d10;
+
+  /* ---------- overlays ---------- */
+  .center-screen { align-items: center; text-align: center; }
+  .center-screen .panel { text-align: left; }
+  #results .big-time { font-family: "Arial Black", sans-serif; font-size: 44px; color: #fff; }
+  #res-newbest { display: none; color: #191204; background: var(--accent); font-family: "Arial Black", sans-serif; padding: 3px 10px; font-size: 14px; margin-left: 10px; vertical-align: middle; }
+  table.splits { border-collapse: collapse; margin: 12px 0; width: 100%; }
+  table.splits td { padding: 4px 10px 4px 0; font-size: 14px; color: #dfe7ef; }
+  table.splits td.d { text-align: right; font-variant-numeric: tabular-nums; }
+  .good { color: #51e07a; } .bad { color: #ff6a55; }
+
+  /* ---------- loading ---------- */
+  #loading { position: fixed; inset: 0; z-index: 40; background: #0b0e13; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+  #loading.on { display: flex; }
+  #load-label { color: #dfe7ef; letter-spacing: 0.24em; font-size: 14px; text-transform: uppercase; }
+  #load-track { width: min(420px, 80vw); height: 18px; border: 3px solid #000; background: #171d29; box-shadow: inset 0 0 0 2px var(--line); }
+  #load-bar { height: 100%; width: 0%; background: repeating-linear-gradient(45deg, var(--accent) 0 14px, #d99a00 14px 28px); }
+
+  /* ---------- touch ---------- */
+  #touch { position: fixed; inset: 0; z-index: 15; display: none; pointer-events: none; }
+  #touch.on { display: block; }
+  .tbtn {
+    position: absolute; pointer-events: auto; width: 74px; height: 74px;
+    background: rgba(16,20,28,0.55); border: 3px solid rgba(0,0,0,0.7);
+    color: #fff; font-size: 26px; display: flex; align-items: center; justify-content: center;
+    box-shadow: inset 0 0 0 2px rgba(255,255,255,0.14); touch-action: none;
   }
-  #boot.hidden { display: none; }
-  .warn { color: #ffb37a; }
+  .tbtn.on { background: rgba(255,180,0,0.5); }
+  #t-left { left: 18px; bottom: 96px; }
+  #t-right { left: 108px; bottom: 96px; }
+  #t-up { right: 18px; bottom: 186px; }
+  #t-down { right: 18px; bottom: 96px; }
+  #t-hb { right: 108px; bottom: 96px; font-size: 15px; font-family: "Arial Black", sans-serif; }
+  #t-pause { right: 16px; top: 44px; width: 48px; height: 48px; font-size: 17px; }
+  #t-cam { right: 16px; top: 104px; width: 48px; height: 48px; font-size: 11px; font-family: "Arial Black", sans-serif; }
+
+  .btn { min-height: 50px; }
+  .seg button { min-height: 46px; }
+  .card { min-height: 44px; }
+
+  @media (max-width: 640px) {
+    .screen { padding: 3vh 4vw; justify-content: flex-start; overflow-y: auto; }
+    #hud-speed .num { font-size: 44px; }
+    #hud-time .now { font-size: 22px; }
+    #hud-cp { font-size: 11px; top: 15px; }
+    #wrongway { font-size: 22px; }
+    #pace { right: 12px; top: 26%; padding: 6px 10px; }
+    #pace .arr { font-size: 26px; }
+    #pace .sev { font-size: 17px; }
+    .panel { padding: 16px; }
+    #logo { margin-bottom: 16px; }
+    #toast { bottom: 190px; width: max-content; max-width: 92vw; text-align: center; }
+  }
+  @media (max-height: 520px) {
+    .screen { justify-content: flex-start; overflow-y: auto; padding-top: 2vh; }
+    #logo .vox, #logo .ral { font-size: 40px; }
+    #logo .tag { display: none; }
+    .cubes { display: none; }
+  }
 </style>
-<script type="importmap">
-{
-  "imports": {
-    "three": "./vendor/three.module.js",
-    "three/addons/": "./vendor/addons/"
-  }
-}
-</script>
 </head>
 <body>
-<canvas id="c"></canvas>
-<div id="hud">
-  <div class="panel" id="hud-tl"></div>
-  <div class="panel" id="hud-tr"></div>
-  <div class="panel" id="hud-bl"></div>
-  <div class="panel" id="hud-br"></div>
+<div id="app"></div>
+
+<!-- MAIN MENU -->
+<div class="screen on" id="menu">
+  <div id="logo">
+    <div class="cubes"><i style="background:#67a047"></i><i style="background:#ffb400"></i><i style="background:#e8442e"></i><i style="background:#2456c4"></i></div>
+    <div class="vox">VOXEL</div>
+    <div class="ral">RALLY</div>
+    <div class="tag">Blocky stages · Flat out</div>
+  </div>
+  <div style="width:min(400px,92vw)">
+    <button class="btn primary" data-act="start">Start Stage</button>
+    <button class="btn" data-act="stage">Stage Select</button>
+    <button class="btn" data-act="car">Car Select</button>
+    <button class="btn" data-act="settings">Settings</button>
+    <button class="btn" data-act="help">How to Play</button>
+  </div>
 </div>
-<div id="rally" class="rally mode-full"></div>
-<div id="rly-safe"></div>
-<div id="boot">VOXEL RALLY — generowanie odcinka…</div>
+
+<!-- STAGE SELECT -->
+<div class="screen" id="panel-stage">
+  <div class="panel">
+    <h2 class="title">Stage Select</h2>
+    <div class="sub">Pick a biome, a length and a seed. Same seed, same stage, every time.</div>
+    <div class="lbl">Biome</div>
+    <div class="cards" id="biome-cards">
+      <div class="card" data-biome="forest"><div class="sw" style="background:#67a047"></div><div class="nm">Forest</div><div class="ds">Gravel through green hills. Pines, farms, mud patches.</div></div>
+      <div class="card" data-biome="desert"><div class="sw" style="background:#e2c07e"></div><div class="nm">Desert</div><div class="ds">Packed dirt and sand. Loose, dusty, fast straights.</div></div>
+      <div class="card" data-biome="snow"><div class="sw" style="background:#eef4fa"></div><div class="nm">Snow</div><div class="ds">Packed snow road, slippery verges. Low grip, big drifts.</div></div>
+    </div>
+    <div class="lbl">Length</div>
+    <div class="seg" id="length-seg">
+      <button data-length="short">Short</button>
+      <button data-length="medium">Medium</button>
+      <button data-length="long">Long</button>
+    </div>
+    <div class="lbl">Seed</div>
+    <div class="seedrow">Stage seed <b id="seed-val">1</b> <button class="btn small" id="btn-seed">New Seed</button></div>
+    <div class="best-line" id="stage-best"></div>
+    <button class="btn primary" id="btn-stage-start">Build &amp; Start</button>
+    <button class="btn ghost" data-act="back">← Back</button>
+  </div>
+</div>
+
+<!-- CAR SELECT -->
+<div class="screen" id="panel-car">
+  <div class="panel">
+    <h2 class="title">Car Select</h2>
+    <div class="sub">One car, three liveries, three tunes.</div>
+    <div class="cards" id="car-cards"></div>
+    <button class="btn ghost" data-act="back">← Back</button>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="screen" id="panel-settings">
+  <div class="panel">
+    <h2 class="title">Settings</h2>
+    <div class="lbl">Graphics Quality</div>
+    <div class="seg" id="quality-seg">
+      <button data-quality="low">Low</button>
+      <button data-quality="med">Medium</button>
+      <button data-quality="high">High</button>
+    </div>
+    <div class="sub">Controls shadow size, view distance and dust amount.</div>
+    <div class="lbl">Sound</div>
+    <div class="seg" id="sound-seg">
+      <button data-sound="on">On</button>
+      <button data-sound="off">Off</button>
+    </div>
+    <div class="lbl">Camera</div>
+    <div class="sub">Press C in game to swap between chase cam and hood cam.</div>
+    <button class="btn ghost" data-act="back">← Back</button>
+  </div>
+</div>
+
+<!-- HELP -->
+<div class="screen" id="panel-help">
+  <div class="panel">
+    <h2 class="title">How to Play</h2>
+    <div class="sub">Beat the clock through every checkpoint. Green splits mean you are up on your best.</div>
+    <table class="controls">
+      <tr><td>W / ↑</td><td>Accelerate</td></tr>
+      <tr><td>S / ↓</td><td>Brake · reverse when stopped</td></tr>
+      <tr><td>A D / ← →</td><td>Steer</td></tr>
+      <tr><td>SPACE</td><td>Handbrake · drift</td></tr>
+      <tr><td>R</td><td>Reset to road (+5 s)</td></tr>
+      <tr><td>C</td><td>Camera: chase / hood</td></tr>
+      <tr><td>M</td><td>Mute</td></tr>
+      <tr><td>ESC</td><td>Pause</td></tr>
+    </table>
+    <div class="sub" style="margin-top:12px">Watch the chevron boards and the pace arrows: they call the next corner and how tight it is. Off road is slow and rough. Snow is slippery everywhere.</div>
+    <button class="btn ghost" data-act="back">← Back</button>
+  </div>
+</div>
+
+<!-- PAUSE -->
+<div class="screen center-screen" id="pause-menu">
+  <div class="panel" style="width:min(380px,92vw)">
+    <h2 class="title">Paused</h2>
+    <button class="btn primary" data-act="resume">Resume</button>
+    <button class="btn" data-act="restart">Restart Stage</button>
+    <button class="btn" data-act="quit">Quit to Menu</button>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<div class="screen center-screen" id="results">
+  <div class="panel" style="width:min(440px,92vw)">
+    <h2 class="title">Stage Complete</h2>
+    <div><span class="big-time" id="res-time">0:00.0</span><span id="res-newbest">NEW BEST</span></div>
+    <div class="best-line" id="res-best"></div>
+    <table class="splits" id="res-splits"></table>
+    <button class="btn primary" data-act="again">Drive Again</button>
+    <button class="btn" data-act="stage">Change Stage</button>
+    <button class="btn ghost" data-act="quit">Menu</button>
+  </div>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="hud-progress"><div id="progress-fill"></div></div>
+  <div id="hud-cp"></div>
+  <div id="hud-time"><div class="now">0:00.0</div><div class="best"></div></div>
+  <div id="pace"><div class="arr"></div><div class="sev"></div><div class="dist"></div></div>
+  <div id="banner"></div>
+  <div id="wrongway">WRONG WAY</div>
+  <div id="countdown"></div>
+  <div id="toast"></div>
+  <div id="hud-speed"><div class="num">0</div><div class="unit">KM/H</div><div class="surf"></div></div>
+</div>
+
+<!-- TOUCH -->
+<div id="touch">
+  <div class="tbtn" id="t-left">◀</div>
+  <div class="tbtn" id="t-right">▶</div>
+  <div class="tbtn" id="t-up">▲</div>
+  <div class="tbtn" id="t-down">▼</div>
+  <div class="tbtn" id="t-hb">HB</div>
+  <div class="tbtn" id="t-pause">II</div>
+  <div class="tbtn" id="t-cam">CAM</div>
+</div>
+
+<!-- LOADING -->
+<div id="loading"><div id="load-label">Building stage</div><div id="load-track"><div id="load-bar"></div></div></div>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/addons/" } }
+</script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
