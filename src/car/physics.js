@@ -98,8 +98,12 @@ export function stepCar(st, input, dt, env) {
   st.vz = fz2 * vf + rz2 * vl;
   st.x += st.vx * dt;
   st.z += st.vz * dt;
-  st.x = clamp(st.x, 1.5, 254.5);
-  st.z = clamp(st.z, 1.5, 254.5);
+  // World bounds come from the stage (kilometres across now, not a
+  // fixed 256 m box). No bounds in env = no clamp (synthetic tests).
+  if (env.bounds) {
+    st.x = clamp(st.x, env.bounds.minX, env.bounds.maxX);
+    st.z = clamp(st.z, env.bounds.minZ, env.bounds.maxZ);
+  }
 
   // --- vertical: suspension on ground, ballistic in air -------------------------
   st.lastImpact = 0;

@@ -1,1 +1,1 @@
-{"description":"Voxel Rally - a chunky voxel rally time attack in Three.js. Procedural stages, zero asset files, no build step.","name":"voxel-rally","private":true,"scripts":{"dev":"python3 -m http.server 8090","test":"node tests/smoke.mjs"},"type":"module","version":"2.0.0"}
+{"description":"Voxel Rally - a chunky voxel rally time attack in Three.js. Procedural stages, zero asset files, no build step.","name":"voxel-rally","private":true,"scripts":{"dev":"python3 -m http.server 8090","test":"node tests/smoke.mjs"},"type":"module","version":"3.0.0"}

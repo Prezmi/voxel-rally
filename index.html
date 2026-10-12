@@ -106,6 +106,32 @@
     padding: 5px 9px; text-align: center; white-space: nowrap;
   }
 
+  /* ---------- stage roster ---------- */
+  #stage-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+  .stage-row {
+    pointer-events: auto; display: block; width: 100%; text-align: left; cursor: pointer;
+    background: #171d29; border: 3px solid #000; box-shadow: inset 0 0 0 2px var(--line);
+    padding: 10px 13px; color: #dfe7ef; min-height: 56px;
+  }
+  .stage-row:hover { background: #202839; }
+  .stage-row.sel { box-shadow: inset 0 0 0 3px var(--accent); background: #232c3d; }
+  .stage-row .sr-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .stage-row .sr-name { font-family: "Arial Black", sans-serif; font-size: 17px; color: #fff; text-transform: uppercase; }
+  .stage-row .sr-country { font-size: 12px; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; white-space: nowrap; }
+  .stage-row .sr-meta { display: block; font-size: 13px; color: #ffd34d; margin-top: 2px; }
+  .stage-row .sr-note { display: block; font-size: 12px; color: #9fb2c8; margin-top: 2px; line-height: 1.4; }
+  #free-play { opacity: 0.62; }
+  #free-play.active { opacity: 1; }
+  #free-play.active .lbl:first-child { color: #fff; }
+
+  /* ---------- vignette / grade overlay ---------- */
+  #vignette {
+    position: fixed; inset: 0; z-index: 5; pointer-events: none;
+    background:
+      linear-gradient(to bottom, rgba(6,8,14,0.18), transparent 18%, transparent 84%, rgba(6,8,14,0.22)),
+      radial-gradient(ellipse at center, transparent 52%, rgba(5,8,14,0.40) 100%);
+  }
+
   /* ---------- HUD ---------- */
   #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; display: none; }
   #hud.on { display: block; }
@@ -213,6 +239,7 @@
 </head>
 <body>
 <div id="app"></div>
+<div id="vignette"></div>
 
 <!-- MAIN MENU -->
 <div class="screen on" id="menu">
@@ -233,23 +260,35 @@
 
 <!-- STAGE SELECT -->
 <div class="screen" id="panel-stage">
-  <div class="panel">
+  <div class="panel" style="max-width:min(620px,94vw)">
     <h2 class="title">Stage Select</h2>
-    <div class="sub">Pick a biome, a length and a seed. Same seed, same stage, every time.</div>
-    <div class="lbl">Biome</div>
-    <div class="cards" id="biome-cards">
-      <div class="card" data-biome="forest"><div class="sw" style="background:#67a047"></div><div class="nm">Forest</div><div class="ds">Gravel through green hills. Pines, farms, mud patches.</div></div>
-      <div class="card" data-biome="desert"><div class="sw" style="background:#e2c07e"></div><div class="nm">Desert</div><div class="ds">Packed dirt and sand. Loose, dusty, fast straights.</div></div>
-      <div class="card" data-biome="snow"><div class="sw" style="background:#eef4fa"></div><div class="nm">Snow</div><div class="ds">Packed snow road, slippery verges. Low grip, big drifts.</div></div>
+    <div class="sub">The classic championship. Pick a stage, or build your own in Free Play below.</div>
+    <div class="lbl">Championship Stages</div>
+    <div id="stage-list"></div>
+    <div id="free-play">
+      <div class="lbl">Free Play · Random Stage</div>
+      <div class="cards" id="biome-cards">
+        <div class="card" data-biome="forest"><div class="sw" style="background:#67a047"></div><div class="nm">Forest</div><div class="ds">Gravel through green hills. Pines, farms, mud patches.</div></div>
+        <div class="card" data-biome="desert"><div class="sw" style="background:#e2c07e"></div><div class="nm">Desert</div><div class="ds">Packed dirt and sand. Loose, dusty, fast straights.</div></div>
+        <div class="card" data-biome="snow"><div class="sw" style="background:#eef4fa"></div><div class="nm">Snow</div><div class="ds">Packed snow road, slippery verges. Low grip, big drifts.</div></div>
+      </div>
+      <div class="lbl">Length</div>
+      <div class="seg" id="length-seg">
+        <button data-length="short">Short · 2.4 km</button>
+        <button data-length="medium">Medium · 4 km</button>
+        <button data-length="long">Long · 6 km</button>
+      </div>
+      <div class="lbl">Seed</div>
+      <div class="seedrow">Stage seed <b id="seed-val">1</b> <button class="btn small" id="btn-seed">New Seed</button></div>
     </div>
-    <div class="lbl">Length</div>
-    <div class="seg" id="length-seg">
-      <button data-length="short">Short</button>
-      <button data-length="medium">Medium</button>
-      <button data-length="long">Long</button>
+    <div class="lbl">Time of Day</div>
+    <div class="seg" id="tod-seg">
+      <button data-tod="auto">Stage Default</button>
+      <button data-tod="day">Day</button>
+      <button data-tod="golden">Golden Hour</button>
+      <button data-tod="dusk">Dusk</button>
+      <button data-tod="overcast">Overcast</button>
     </div>
-    <div class="lbl">Seed</div>
-    <div class="seedrow">Stage seed <b id="seed-val">1</b> <button class="btn small" id="btn-seed">New Seed</button></div>
     <div class="best-line" id="stage-best"></div>
     <button class="btn primary" id="btn-stage-start">Build &amp; Start</button>
     <button class="btn ghost" data-act="back">← Back</button>

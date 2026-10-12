@@ -154,25 +154,95 @@ const DEFS = {
     p.box(0, 0.82, 0, 7.2, 0.13, 0.06, TILE.WOOD);
     p.box(0, 0.45, 0, 7.2, 0.13, 0.06, TILE.WOOD);
   },
+  acacia(p) {
+    p.box(0, 1.1, 0, 0.34, 2.2, 0.34, TILE.BARK);
+    p.box(0.8, 2.5, 0.2, 1.4, 0.2, 0.2, TILE.BARK);
+    p.box(-0.7, 2.6, -0.2, 1.2, 0.2, 0.2, TILE.BARK);
+    p.box(0, 3.15, 0, 4.6, 0.55, 3.9, TILE.LEAF_ROUND, { tint: 0.82 });
+    p.box(0.6, 3.5, 0.3, 2.8, 0.35, 2.4, TILE.LEAF_ROUND, { tint: 0.9 });
+  },
+  eucalypt(p, v) {
+    p.box(0, 1.9, 0, 0.3, 3.8, 0.3, TILE.WALL_CREAM, { tint: 0.82 });
+    p.box(0, 4.3, 0, 2.2, 1.5, 2.2, TILE.LEAF_ROUND, { tint: 0.72 });
+    p.box(0.7, 5.1, 0.3, 1.5, 1.1, 1.5, TILE.LEAF_ROUND, { tint: 0.8 });
+    if (v % 2) p.box(-0.8, 3.7, -0.3, 1.2, 1.0, 1.2, TILE.LEAF_ROUND, { tint: 0.68 });
+  },
+  olive(p) {
+    p.box(0, 0.55, 0, 0.52, 1.1, 0.52, TILE.BARK);
+    p.box(0.3, 1.35, 0.1, 0.8, 0.24, 0.24, TILE.BARK);
+    p.box(0, 2.0, 0, 2.4, 1.2, 2.4, TILE.LEAF_ROUND, { tint: 0.95 });
+    p.box(-0.6, 2.6, -0.4, 1.4, 0.8, 1.4, TILE.LEAF_ROUND, { tint: 1.04 });
+  },
+  post(p) {
+    p.box(0, 0.45, 0, 0.2, 0.9, 0.2, TILE.POST);
+    p.box(0, 0.93, 0, 0.26, 0.07, 0.26, TILE.RED);
+  },
+  tapeSeg(p, v, prop) {
+    const len = prop.len ?? 7;
+    p.box(0, 0.72, 0, len, 0.3, 0.05, TILE.TAPE);
+    void v;
+  },
+  wallSeg(p, v, prop) {
+    const len = prop.len ?? 7.4;
+    p.box(0, 0.5, 0, len, 1.0, 0.45, TILE.STONE);
+    p.box(0, 1.06, 0, len, 0.14, 0.55, TILE.STONE, { tint: 1.08 });
+    void v;
+  },
+  tuft(p, v) {
+    p.box(0, 0.17, 0, 0.8, 0.34, 0.1, TILE.GRASS);
+    p.box(0, 0.17, 0, 0.1, 0.34, 0.8, TILE.GRASS);
+    if (v === 3) p.box(0, 0.4, 0, 0.3, 0.14, 0.3, TILE.FLOWER);
+  },
+  tuftDry(p, v) {
+    p.box(0, 0.15, 0, 0.75, 0.3, 0.1, TILE.DRY_GRASS);
+    p.box(0, 0.15, 0, 0.1, 0.3, 0.75, TILE.DRY_GRASS);
+    if (v === 2) p.box(0.2, 0.1, 0.1, 0.4, 0.2, 0.4, TILE.SCRUB);
+  },
+  marshal(p) {
+    p.box(-0.11, 0.28, 0, 0.17, 0.56, 0.2, TILE.BLACK);
+    p.box(0.11, 0.28, 0, 0.17, 0.56, 0.2, TILE.BLACK);
+    p.box(0, 0.92, 0, 0.56, 0.72, 0.3, TILE.HIVIS);
+    p.box(0, 1.5, 0, 0.44, 0.44, 0.44, TILE.WALL_CREAM);
+    p.box(0.55, 0.5, 0, 0.4, 1.0, 0.4, TILE.WHITE);
+  },
+  board(p) {
+    p.box(-2.2, 0.8, 0, 0.18, 1.6, 0.18, TILE.METAL);
+    p.box(2.2, 0.8, 0, 0.18, 1.6, 0.18, TILE.METAL);
+    p.box(0, 1.75, 0, 5.2, 1.15, 0.16, TILE.BANNER);
+  },
+  parkedCar(p, v) {
+    const bodyT = [TILE.RED, TILE.WHITE, TILE.BLUE, TILE.YELLOW, TILE.ORANGE][v % 5];
+    p.box(0, 0.55, 0, 1.75, 0.62, 3.9, bodyT);
+    p.box(0, 1.0, -0.2, 1.55, 0.36, 1.9, TILE.GLASS);
+    p.box(0, 1.22, -0.2, 1.65, 0.1, 2.0, bodyT);
+    for (const [sx, sz] of [[-0.85, 1.25], [0.85, 1.25], [-0.85, -1.25], [0.85, -1.25]])
+      p.box(sx, 0.33, sz, 0.16, 0.66, 0.66, TILE.TYRE);
+  },
+  lake(p) {
+    p.box(0, 0, 0, 48, 0.22, 48, TILE.PUDDLE);
+  },
+  puddle(p) {
+    p.box(0, 0, 0, 3.4, 0.05, 2.4, TILE.PUDDLE);
+  },
 };
 
-export function buildPropsGeometry(stage, THREE) {
+// Builds merged geometry for an explicit list of props (one chunk's
+// worth, or the whole stage). Props with an explicit y (lakes,
+// puddles) sit at that height; everything else grounds itself.
+export function buildPropsGeometry(stage, THREE, propList = stage.props) {
   const builder = new BoxBuilder();
   const placer = new Placer(builder);
-  for (const prop of stage.props) {
+  for (const prop of propList) {
     const def = DEFS[prop.type];
     if (!def) continue;
-    const gy = stage.groundHeight(prop.x, prop.z) - 0.14;
+    const gy = prop.y !== undefined ? prop.y : stage.groundHeight(prop.x, prop.z) - 0.14;
     placer.at(prop.x, gy, prop.z, prop.rot);
-    // Apply scale by temporarily wrapping: defs are unit sized; scale via
-    // a second builder pass is overkill — scale is baked by scaling box
-    // calls through the placer origin trick below.
     const tint = 0.93 + (prop.variant % 3) * 0.045;
     const origBox = placer.box.bind(placer);
     placer.box = (cx, cy, cz, sx, sy, sz, tiles, opts = {}) =>
       origBox(cx * prop.scale, cy * prop.scale, cz * prop.scale,
         sx * prop.scale, sy * prop.scale, sz * prop.scale, tiles, { tint, ...opts });
-    def(placer, prop.variant);
+    def(placer, prop.variant, prop);
     placer.box = origBox;
   }
   return builder.build(THREE);

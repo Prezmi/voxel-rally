@@ -17,18 +17,27 @@ written fresh.
 
 ## World generation
 
-`src/world/stage.js` is pure and deterministic. A Catmull Rom spline
-winds across a 256 x 256 m heightfield (fbm value noise); the road is
-carved to smoothly varying heights with grades capped near 14%.
-Surfaces are painted per cell: road, centre line and dashed markings
-on the straights, dirt shoulders, biome ground elsewhere. Corners are
+`src/world/stage.js` is pure and deterministic. There is no fixed
+world box: a stage is a route (a Catmull Rom spline sampled every
+metre, kilometres long) plus analytic terrain. Ground height and
+surface at any point are computed on demand from seeded noise blended
+into the road's height profile near the route, cached per 1 m column.
+Named stages use hand authored routes written as segment lists
+(length + total heading change); the generator fits the spline to the
+design length, so a 6.1 km Ouninpohja really is 6.1 km. Corners are
 scored from curvature into severities 1 (tightest) to 6 (fastest) and
-get chevron boards. Props are scattered by biome with the road kept
-clear: trees, rocks, houses, tents, vans, spectators, fences, hay
-bales, start/finish gantry and checkpoint banners.
+get chevron boards, red/white corner posts, rally tape, hay bales,
+spectators and marshals. Checkpoints are spaced evenly along the
+whole route.
 
-Rendering (`src/world/mesher.js`) meshes 16 x 16 cell chunks. Only
-visible faces are emitted: column sides appear only where the
+Rendering (`src/world/mesher.js`) meshes 16 x 16 cell chunks with
+hidden face culling, directional face shading and a cheap baked
+ambient occlusion at block edges. Chunks stream in around the car
+(a few per frame, distance sorted) and are disposed behind it; a
+coarse vertex coloured shell mesh covers the whole stage area so the
+horizon always has hills. Time of day presets (Day, Golden Hour,
+Dusk, Overcast) drive the sky shader, sun, fog and exposure.
+Only visible faces are emitted: column sides appear only where the
 neighbour is lower, split into 1 m bands so textures never stretch.
 Visual height is quantized to 0.25 m steps for the terraced voxel
 look; physics uses the smooth heightfield.
@@ -45,11 +54,14 @@ per-surface drag round it out. Liveries scale grip and acceleration.
 ## Presentation
 
 Merged geometry everywhere: one mesh per terrain chunk, one merged
-mesh for all props, one for the car body. A gradient sky dome with a
-sun glow, voxel clouds, distance fog matched to the horizon, ACES
-tone mapping, and a shadow-casting sun that follows the car. Dust is
-a single pooled `THREE.Points` system coloured by surface. Sound is
-a small WebAudio synth: engine oscillators, wind and skid noise,
+prop mesh per chunk, one for the car body, one for the distant hill
+shell. A gradient sky dome with sun disc and horizon haze, voxel
+clouds tinted by the light, distance fog matched to the horizon,
+ACES tone mapping, a CSS vignette, and a shadow-casting sun that
+follows the car and swings with the time of day. Dust is a single
+pooled `THREE.Points` system coloured by surface, and dirt visibly
+builds up on the car's lower body the longer it runs loose. Sound
+is a small WebAudio synth: engine oscillators, wind and skid noise,
 beeps. Quality settings scale view distance, shadow size, pixel
 ratio and dust rate for a 60 fps target at Medium on a laptop.
 

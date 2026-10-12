@@ -3,13 +3,14 @@
 // finished / results. Physics runs on a fixed 1/120 step.
 
 import * as THREE from 'three';
-import { generateStage, SIZE } from './world/stage.js';
+import { generateStage, STAGES } from './world/stage.js';
 import { meshChunk, chunkGeometry, CHUNK } from './world/mesher.js';
 import { createAtlasTexture } from './world/textures.js';
 import { atlasMaterial } from './render/voxel.js';
 import { buildPropsGeometry } from './render/props.js';
 import { buildCar, LIVERIES } from './render/car.js';
-import { buildSky } from './render/sky.js';
+import { buildSky, todPreset } from './render/sky.js';
+import { buildFarGeometry, farMaterial } from './render/far.js';
 import { DustSystem } from './render/particles.js';
 import { createCar, stepCar } from './car/physics.js';
 import { SURFACE, SURFACE_DUST, isRoadSurface } from './world/tiles.js';
@@ -51,12 +52,14 @@ const QUALITY = {
   high: { view: 205, shadow: 2048, dust: 1.6, pixel: 2 },
 };
 const sel = {
+  stageId: store.get('stageId', 'finland'),
+  tod: store.get('tod', 'auto'),
   biome: store.get('biome', 'forest'),
   length: store.get('length', 'medium'),
   seed: store.get('seed', 7),
   livery: store.get('livery', 0),
 };
-const bestKey = () => `best.${sel.biome}.${sel.length}.${sel.seed}`;
+const bestKey = () => (sel.stageId ? `best.stage.${sel.stageId}` : `best.${sel.biome}.${sel.length}.${sel.seed}`);
 
 // ---------- renderer / scene ----------
 let renderer;
@@ -75,7 +78,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 $('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 4200);
 camera.rotation.order = 'YXZ';
 
 const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x54503c, 0.85);
@@ -101,14 +104,118 @@ const steerState = { value: 0 };
 // ---------- world state ----------
 let stage = null;
 let worldGroup = null;
-let chunkMeshes = [];
 let skyObj = null;
 let worldKey = '';
 let carMesh = null;
 let carState = null;
 let dust = null;
+let currentTod = todPreset('day');
+let dirtDist = 0;
+const stageActuals = new Map(); // stageId -> { km, cps } once generated
 
-const selectionKey = () => `${sel.biome}|${sel.length}|${sel.seed}`;
+const selectionKey = () => (sel.stageId ? `stage:${sel.stageId}` : `free:${sel.biome}|${sel.length}|${sel.seed}`);
+const effectiveTodKey = () => (sel.tod === 'auto' ? (stage ? stage.tod : 'day') : sel.tod);
+
+// ---------- chunk streaming ----------
+// Detailed voxel chunks exist only around the camera focus; the far
+// shell covers everything beyond. Build queue is distance sorted and
+// processed a couple of chunks per frame to avoid hitches.
+const chunkMap = new Map(); // "cx,cz" -> { terrain, props|null }
+let streamQueue = [];
+const chunkKeyOf = (cx, cz) => `${cx},${cz}`;
+
+function buildChunkNow(cx, cz) {
+  const key = chunkKeyOf(cx, cz);
+  if (chunkMap.has(key)) return;
+  const geo = chunkGeometry(THREE, meshChunk(stage, cx, cz));
+  const terrain = new THREE.Mesh(geo, terrainMat);
+  terrain.receiveShadow = true;
+  terrain.matrixAutoUpdate = false;
+  worldGroup.add(terrain);
+  let propsMesh = null;
+  const list = stage.propsByChunk.get(key);
+  if (list && list.length) {
+    propsMesh = new THREE.Mesh(buildPropsGeometry(stage, THREE, list), propsMat);
+    propsMesh.castShadow = true;
+    propsMesh.receiveShadow = true;
+    propsMesh.matrixAutoUpdate = false;
+    worldGroup.add(propsMesh);
+  }
+  chunkMap.set(key, { terrain, props: propsMesh });
+}
+
+function disposeChunk(key) {
+  const entry = chunkMap.get(key);
+  if (!entry) return;
+  for (const m of [entry.terrain, entry.props]) {
+    if (!m) continue;
+    worldGroup.remove(m);
+    m.geometry.dispose();
+  }
+  chunkMap.delete(key);
+}
+
+function updateStreaming(fx, fz, immediate = false) {
+  if (!stage || !worldGroup) return;
+  const view = QUALITY[settings.quality].view;
+  const buildR = view + 52;
+  const keepR = buildR + 130;
+  const ccx = Math.floor(fx / CHUNK), ccz = Math.floor(fz / CHUNK);
+  const cr = Math.ceil(buildR / CHUNK);
+  const wanted = new Set();
+  const missing = [];
+  for (let cz = ccz - cr; cz <= ccz + cr; cz++) {
+    for (let cx = ccx - cr; cx <= ccx + cr; cx++) {
+      const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
+      const d2 = (mx - fx) * (mx - fx) + (mz - fz) * (mz - fz);
+      if (d2 > buildR * buildR) continue;
+      const key = chunkKeyOf(cx, cz);
+      wanted.add(key);
+      if (!chunkMap.has(key)) missing.push({ key, cx, cz, d2 });
+    }
+  }
+  missing.sort((a, b) => a.d2 - b.d2);
+  streamQueue = missing;
+  if (immediate) {
+    for (const m of streamQueue) buildChunkNow(m.cx, m.cz);
+    streamQueue = [];
+  }
+  for (const key of [...chunkMap.keys()]) {
+    if (wanted.has(key)) continue;
+    const [cx, cz] = key.split(',').map(Number);
+    const mx = cx * CHUNK + CHUNK / 2, mz = cz * CHUNK + CHUNK / 2;
+    if ((mx - fx) * (mx - fx) + (mz - fz) * (mz - fz) > keepR * keepR) disposeChunk(key);
+  }
+}
+
+function processStreamQueue() {
+  let n = 0;
+  while (streamQueue.length && n < 2) {
+    const m = streamQueue.shift();
+    buildChunkNow(m.cx, m.cz);
+    n++;
+  }
+}
+
+// ---------- environment (time of day) ----------
+function applyEnvironment() {
+  if (!stage) return;
+  currentTod = todPreset(effectiveTodKey());
+  if (skyObj) {
+    scene.remove(skyObj.group);
+    skyObj.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); });
+  }
+  skyObj = buildSky(THREE, effectiveTodKey());
+  scene.add(skyObj.group);
+  scene.fog = new THREE.Fog(currentTod.fog, 42, QUALITY[settings.quality].view + 80);
+  hemi.color.set(currentTod.hemiSky);
+  hemi.groundColor.set(currentTod.hemiGround);
+  hemi.intensity = currentTod.hemiInt;
+  sun.color.set(currentTod.sunColor);
+  sun.intensity = currentTod.sunInt;
+  renderer.toneMappingExposure = currentTod.exposure;
+  if (carMesh) carMesh.setLights(currentTod.lights);
+}
 
 function disposeWorld() {
   if (worldGroup) {
@@ -116,50 +223,34 @@ function disposeWorld() {
     scene.remove(worldGroup);
   }
   if (skyObj) { scene.remove(skyObj.group); skyObj.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); }); skyObj = null; }
-  worldGroup = null; chunkMeshes = [];
+  worldGroup = null;
+  chunkMap.clear();
+  streamQueue = [];
 }
 
 async function buildWorld() {
+  window.__vr.events.push(['buildWorld', sel.stageId ?? sel.biome, Math.round(performance.now())]);
   disposeWorld();
-  stage = generateStage({ biome: sel.biome, seed: sel.seed, length: sel.length });
+  stage = sel.stageId
+    ? generateStage({ stageId: sel.stageId })
+    : generateStage({ biome: sel.biome, seed: sel.seed, length: sel.length });
+  if (sel.stageId) stageActuals.set(sel.stageId, { km: stage.totalLength / 1000, cps: stage.checkpoints.length });
   worldGroup = new THREE.Group();
-  const chunksPerSide = SIZE / CHUNK;
-  const total = chunksPerSide * chunksPerSide;
-  let done = 0;
-  for (let cz = 0; cz < chunksPerSide; cz++) {
-    for (let cx = 0; cx < chunksPerSide; cx++) {
-      const geo = chunkGeometry(THREE, meshChunk(stage, cx, cz));
-      if (geo) {
-        const mesh = new THREE.Mesh(geo, terrainMat);
-        mesh.receiveShadow = true;
-        mesh.matrixAutoUpdate = false;
-        worldGroup.add(mesh);
-        chunkMeshes.push({ mesh, cx: cx * CHUNK + CHUNK / 2, cz: cz * CHUNK + CHUNK / 2 });
-      }
-      done++;
-    }
-    $('load-bar').style.width = `${Math.round((done / total) * 88)}%`;
-    await new Promise((r) => requestAnimationFrame(r));
-  }
-  const propsMesh = new THREE.Mesh(buildPropsGeometry(stage, THREE), propsMat);
-  propsMesh.castShadow = true;
-  propsMesh.receiveShadow = true;
-  propsMesh.matrixAutoUpdate = false;
-  worldGroup.add(propsMesh);
-  $('load-bar').style.width = '94%';
-  await new Promise((r) => requestAnimationFrame(r));
-
-  skyObj = buildSky(THREE, stage.cfg.sky);
-  scene.add(skyObj.group);
-  scene.fog = new THREE.Fog(stage.cfg.sky.fog, 55, QUALITY[settings.quality].view + 60);
-  hemi.color.set(stage.cfg.sky.top);
-  sun.color.set(stage.cfg.sky.sun);
   scene.add(worldGroup);
 
+  $('load-bar').style.width = '30%';
+  await new Promise((r) => requestAnimationFrame(r));
+  const farMesh = new THREE.Mesh(buildFarGeometry(stage, THREE), farMaterial(THREE));
+  farMesh.matrixAutoUpdate = false;
+  worldGroup.add(farMesh);
+  $('load-bar').style.width = '52%';
+  await new Promise((r) => requestAnimationFrame(r));
+
+  applyEnvironment();
   if (!dust) { dust = new DustSystem(THREE, 800); scene.add(dust.points); }
   placeCarAtStart();
+  updateStreaming(stage.startPose.x, stage.startPose.z, true);
   worldKey = selectionKey();
-  updateChunkVisibility(true);
   $('load-bar').style.width = '100%';
 }
 
@@ -168,6 +259,9 @@ function placeCarAtStart() {
   if (carMesh) { scene.remove(carMesh.group); carMesh.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); }); }
   carMesh = buildCar(THREE, atlasTex, sel.livery);
   carMesh.group.rotation.order = 'YXZ';
+  carMesh.setLights(currentTod.lights);
+  carMesh.setDirt(0);
+  dirtDist = 0;
   scene.add(carMesh.group);
   carState = createCar(stage.startPose);
   lastIdx = 0;
@@ -182,15 +276,27 @@ let raceTime = 0, penalties = 0, countdownT = 0, lastCount = 4;
 let lastIdx = 0, nextCp = 0, splits = [];
 let best = store.get(bestKey(), null);
 let bannerUntil = 0, toastUntil = 0, finishAt = 0;
-let shakeAmp = 0, dustAcc = 0, visTimer = 0;
+let shakeAmp = 0, dustAcc = 0, streamTimer = 0;
 let camMode = 0; // 0 chase, 1 hood
 const camPos = new THREE.Vector3(0, 30, 60);
 let camInit = false;
 let prevSpeedF = 0;
 
+// Test/debug hook: automated checks watch the state machine here.
+let lastModeLogged = '';
+window.__vr = {
+  events: [],
+  mode: () => mode,
+  raceTime: () => raceTime,
+  nextCp: () => nextCp,
+  worldKey: () => worldKey,
+  carPos: () => (carState ? [Math.round(carState.x), Math.round(carState.z)] : null),
+};
+
 const envFor = () => ({
   groundHeight: stage.groundHeight,
   surfaceAt: stage.surfaceAt,
+  bounds: stage.bounds,
   params: LIVERIES[sel.livery].params,
 });
 
@@ -223,6 +329,7 @@ function showToast(text, secs = 2) {
 }
 
 function startCountdown() {
+  window.__vr.events.push(['countdown', Math.round(performance.now())]);
   best = store.get(bestKey(), null);
   raceTime = 0; penalties = 0; splits = []; nextCp = 0;
   lastIdx = 0; dustAcc = 0; shakeAmp = 0;
@@ -236,6 +343,7 @@ function startCountdown() {
   updateTouchVisibility();
   $('hud-time').querySelector('.best').textContent = best ? `BEST ${fmtTime(best.total)}` : '';
   $('hud-cp').textContent = '';
+  showToast(`${stage.name.toUpperCase()}${stage.country ? ' · ' + stage.country.toUpperCase() : ''} · ${(stage.totalLength / 1000).toFixed(1)} KM`, 2.8);
   audio.ensure();
 }
 
@@ -253,7 +361,7 @@ function finishStage() {
     mode = 'results';
     $('res-time').textContent = fmtTime(total);
     $('res-newbest').style.display = isBest ? 'inline-block' : 'none';
-    $('res-best').textContent = `Best ${fmtTime(best.total)} · ${stage.cfg.name} · seed ${stage.seed}`;
+    $('res-best').textContent = `Best ${fmtTime(best.total)} · ${stage.name}${stage.country ? ' · ' + stage.country : ''}${stage.id ? '' : ` · seed ${stage.seed}`}`;
     const rows = [];
     const labels = stage.checkpoints.map((c, i) => `Checkpoint ${i + 1}`);
     labels.push('Finish');
@@ -374,20 +482,6 @@ function updateCamera(dt, t) {
   camera.updateProjectionMatrix();
 }
 
-// ---------- chunk visibility ----------
-function updateChunkVisibility(force = false) {
-  if (!carState && !stage) return;
-  const view = QUALITY[settings.quality].view + 26;
-  const px = carState ? carState.x : stage.startPose.x;
-  const pz = carState ? carState.z : stage.startPose.z;
-  for (const cm of chunkMeshes) {
-    const dx = cm.cx - px, dz = cm.cz - pz;
-    cm.mesh.visible = (dx * dx + dz * dz) < view * view;
-  }
-  if (scene.fog) scene.fog.far = QUALITY[settings.quality].view + 60;
-  void force;
-}
-
 // ---------- HUD ----------
 const SURF_NAMES = {
   [SURFACE.TARMAC]: '', [SURFACE.GRAVEL]: '', [SURFACE.DIRT]: 'DIRT',
@@ -445,7 +539,35 @@ function updateTouchVisibility() {
   const touch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   $('touch').classList.toggle('on', touch && (mode === 'race' || mode === 'countdown'));
 }
+function buildStageList() {
+  const wrap = $('stage-list');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (const def of STAGES) {
+    const act = stageActuals.get(def.id);
+    const km = act ? act.km.toFixed(1) : def.lengthKm.toFixed(1);
+    const cps = act ? act.cps : Math.round(def.lengthKm * 1000 / def.cpSpacing);
+    const row = document.createElement('button');
+    row.className = 'stage-row' + (sel.stageId === def.id ? ' sel' : '');
+    row.dataset.stageId = def.id;
+    row.innerHTML =
+      `<span class="sr-top"><span class="sr-name">${def.name}</span><span class="sr-country">${def.country}</span></span>` +
+      `<span class="sr-meta">${def.surface} · ${km} km · ${cps} checkpoints</span>` +
+      `<span class="sr-note">${def.note}</span>`;
+    row.addEventListener('click', () => {
+      sel.stageId = def.id;
+      store.set('stageId', def.id);
+      refreshSelectionUI();
+    });
+    wrap.appendChild(row);
+  }
+  const fp = $('free-play');
+  if (fp) fp.classList.toggle('active', !sel.stageId);
+}
+
 function refreshSelectionUI() {
+  buildStageList();
+  document.querySelectorAll('#tod-seg button').forEach((el) => el.classList.toggle('sel', el.dataset.tod === sel.tod));
   document.querySelectorAll('#biome-cards .card').forEach((el) => el.classList.toggle('sel', el.dataset.biome === sel.biome));
   document.querySelectorAll('#length-seg button').forEach((el) => el.classList.toggle('sel', el.dataset.length === sel.length));
   document.querySelectorAll('#quality-seg button').forEach((el) => el.classList.toggle('sel', el.dataset.quality === settings.quality));
@@ -481,8 +603,9 @@ function applyQuality() {
     sun.shadow.mapSize.set(q.shadow, q.shadow);
     if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
   }
+  if (scene.fog) scene.fog.far = q.view + 80;
   resize();
-  updateChunkVisibility(true);
+  if (stage && carState) updateStreaming(carState.x, carState.z);
 }
 
 async function startRace() {
@@ -524,14 +647,21 @@ document.querySelectorAll('[data-act]').forEach((el) => {
   });
 });
 document.querySelectorAll('#biome-cards .card').forEach((el) =>
-  el.addEventListener('click', () => { sel.biome = el.dataset.biome; store.set('biome', sel.biome); refreshSelectionUI(); }));
+  el.addEventListener('click', () => { sel.biome = el.dataset.biome; sel.stageId = null; store.set('biome', sel.biome); store.set('stageId', null); refreshSelectionUI(); }));
 document.querySelectorAll('#length-seg button').forEach((el) =>
-  el.addEventListener('click', () => { sel.length = el.dataset.length; store.set('length', sel.length); refreshSelectionUI(); }));
+  el.addEventListener('click', () => { sel.length = el.dataset.length; sel.stageId = null; store.set('length', sel.length); store.set('stageId', null); refreshSelectionUI(); }));
+document.querySelectorAll('#tod-seg button').forEach((el) =>
+  el.addEventListener('click', () => {
+    sel.tod = el.dataset.tod;
+    store.set('tod', sel.tod);
+    refreshSelectionUI();
+    if (stage) applyEnvironment();
+  }));
 document.querySelectorAll('#quality-seg button').forEach((el) =>
   el.addEventListener('click', () => { settings.quality = el.dataset.quality; store.set('quality', settings.quality); applyQuality(); refreshSelectionUI(); }));
 document.querySelectorAll('#sound-seg button').forEach((el) =>
   el.addEventListener('click', () => { settings.sound = el.dataset.sound === 'on'; store.set('sound', settings.sound); audio.setMuted(!settings.sound); refreshSelectionUI(); }));
-$('btn-seed').addEventListener('click', () => { sel.seed = 1 + Math.floor(Math.random() * 9998); store.set('seed', sel.seed); refreshSelectionUI(); });
+$('btn-seed').addEventListener('click', () => { sel.seed = 1 + Math.floor(Math.random() * 9998); sel.stageId = null; store.set('seed', sel.seed); store.set('stageId', null); refreshSelectionUI(); });
 $('btn-stage-start').addEventListener('click', () => startRace());
 
 input.bindTouchButton($('t-left'), 'left');
@@ -576,6 +706,10 @@ function frame() {
   let dt = Math.min(0.1, now - lastT);
   lastT = now;
   const t = now;
+  if (mode !== lastModeLogged) {
+    window.__vr.events.push(['mode', lastModeLogged || 'boot', mode, Math.round(now * 1000)]);
+    lastModeLogged = mode;
+  }
 
   // Edge actions.
   if (input.pressed('pause')) {
@@ -629,6 +763,14 @@ function frame() {
       if (mode === 'race') raceTime += STEP;
       if (mode === 'race') checkRaceProgress();
     }
+    // Dirt builds up on the lower body off road and on loose surfaces.
+    if (carMesh && carState.grounded && carState.speed > 2) {
+      const s = carState.surface;
+      if (carState.offroad || s === SURFACE.DIRT || s === SURFACE.MUD || s === SURFACE.RED_DIRT || s === SURFACE.SAND || s === SURFACE.GRAVEL) {
+        dirtDist += carState.speed * dt;
+        carMesh.setDirt(Math.min(1, dirtDist / 1100));
+      }
+    }
     // Dust from the rear wheels.
     if (dust && carState.grounded && carState.speed > 3.5) {
       const c = carState;
@@ -655,12 +797,19 @@ function frame() {
     skyObj.setCenter(carState.x, carState.z);
   }
   if (carState) {
-    sun.position.set(carState.x + 52, carState.y + 74, carState.z + 40);
+    const sd = skyObj ? skyObj.sunDir : { x: 0.48, y: 0.78, z: 0.34 };
+    const sunH = currentTod === todPreset('overcast') ? 190 : 150;
+    sun.position.set(carState.x + sd.x * sunH, carState.y + sd.y * sunH, carState.z + sd.z * sunH);
     sun.target.position.set(carState.x, carState.y, carState.z);
     sun.target.updateMatrixWorld();
   }
-  visTimer -= dt;
-  if (visTimer <= 0) { visTimer = 0.3; updateChunkVisibility(); }
+  streamTimer -= dt;
+  if (streamTimer <= 0) {
+    streamTimer = 0.25;
+    if (carState) updateStreaming(carState.x, carState.z);
+    else if (stage) updateStreaming(stage.startPose.x, stage.startPose.z);
+  }
+  processStreamQueue();
   shakeAmp *= Math.exp(-5.5 * dt);
 
   updateCamera(dt, t);
